@@ -11,7 +11,16 @@
 # 与旧 panel-9router 模块的区别：无独立面板进程。Dashboard（Svelte SPA）
 # 由引擎通过 go:embed 直接服务在引擎端口上；DNS 管理走模块 WebUI（webroot/）。
 
-MODDIR="${0%/*}"
+# MODDIR 必须解析为绝对路径：以 `sh service.sh`（相对路径）调用时
+# ${0%/*} 会得到 "service.sh"，导致 bin 路径拼错、引擎起不来。
+case "$0" in
+  */*) MODDIR="${0%/*}" ;;
+  *)   MODDIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" ;;
+esac
+case "$MODDIR" in
+  /*) ;;
+  *)  MODDIR="$(pwd)" ;;
+esac
 DATA_DIR="${DATA_DIR:-/data/adb/9router-go}"
 
 # 端口：$DATA_DIR/port 是持久值（WebUI 可写），读 + 严格校验；环境变量 PORT 优先。
@@ -60,6 +69,16 @@ fi
 if [ -x "$SQLITE3" ] && [ -s "$DB_FILE" ]; then
   _AUTOUPD_SQL='UPDATE settings SET data = json_set(data, '\''$.autoUpdate'\'', json('\''false'\'')) WHERE json_type(data, '\''$.autoUpdate'\'') IS NOT NULL;'
   "$SQLITE3" "$DB_FILE" "$_AUTOUPD_SQL" 2>>"$LOG"
+fi
+
+# --- Dashboard 出厂客户端 key ---
+# 前端 getAuthHeaders() 在浏览器无 localStorage['9router_key'] 时回退到出厂 key
+# sk-8b71f86e...（web/src/api/client.ts 硬编码）。该 key 由 Node 版官方 DB 模板
+# 出厂自带；Go 版无 seed，全新安装缺它 → 所有走 RequireApiKey 的 dashboard
+# 调用（模型测试、SSE 控制台等）报 "Invalid API key"。INSERT OR IGNORE 幂等，
+# 不覆盖用户自己的 key。不想要它可在 Dashboard 的 API Keys 页删除。
+if [ -x "$SQLITE3" ] && [ -s "$DB_FILE" ]; then
+  "$SQLITE3" "$DB_FILE" "INSERT OR IGNORE INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('seed-default-client-key', 'sk-8b71f86e0a1f2fb5-nhz496-cfa1c800', 'Default client key (dashboard)', 1, datetime('now'));" 2>>"$LOG"
 fi
 
 # --- 承载性 2/2：CA 目录 ---
