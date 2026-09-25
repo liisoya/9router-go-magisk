@@ -61,12 +61,9 @@ export AUTO_UPDATE=false
 PORT="$("$OPS" get-port)"
 export PORT
 
-# --- 首次启动生成随机管理密码（Dashboard 登录用）---
-# 引擎约定：INITIAL_PASSWORD 为空则要求显式设置；无头模块场景在首启生成并落盘。
+# --- 初始管理密码：默认 123456（首次登录后请在 Dashboard 修改）---
 if [ ! -f "$DATA_DIR/initial-password" ]; then
-  _pw="$(head -c 16 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-16)"
-  [ -n "$_pw" ] || _pw="9router-$(date +%s)"
-  printf '%s\n' "$_pw" > "$DATA_DIR/initial-password"
+  printf '123456\n' > "$DATA_DIR/initial-password"
   chmod 600 "$DATA_DIR/initial-password"
 fi
 export INITIAL_PASSWORD="$(cat "$DATA_DIR/initial-password" 2>/dev/null)"

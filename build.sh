@@ -88,9 +88,10 @@ find "$STAGING/module/bin" -type f -exec chmod 0755 {} +
 step "7/7 打包 + 校验"
 mkdir -p "$OUT_DIR"
 rm -f "${OUT_DIR}/${ZIP_NAME}"
+# 纯净发布：webroot/test（离线测试）不随模块分发，仅保留在仓库供回归
 (cd "$STAGING/module" && zip -r9 "${OLDPWD}/${OUT_DIR}/${ZIP_NAME}" \
   module.prop customize.sh service.sh action.sh uninstall.sh lib webroot etc bin \
-  -x 'bin/*.o' > /dev/null)
+  -x 'bin/*.o' 'webroot/test/*' > /dev/null)
 
 verify_zip() {
   local zip_path="$1"

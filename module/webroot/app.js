@@ -105,7 +105,8 @@ async function refresh() {
 async function resources(st) {
   // 单行输出（tr 折行）：promise 降级形态（多行只剩末行）下也能完整解析
   const mi = KP.parseMeminfo((await KB.sh(`grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null | tr '\\n' '|'`)).out);
-  const rssKb = async pid => pid ? KP.parseProcRss((await KB.sh(`cat /proc/${pid}/status 2>/dev/null`)).out) : 0;
+  // 单行读取（grep）：promise 降级形态下多行输出只剩末行，VmRSS 会丢失
+  const rssKb = async pid => pid ? KP.parseProcRss((await KB.sh(`grep VmRSS /proc/${pid}/status 2>/dev/null`)).out) : 0;
   const engKb = (await rssKb(st.engine_pid)) || 0;
   const dnsKb = (await rssKb(st.dns_pid)) || 0;
   const fmt = kb => !kb ? '-' : kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb + ' kB';
