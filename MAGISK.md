@@ -14,7 +14,7 @@
 │   ├── action.sh             # 管理器「操作」按钮：状态显示
 │   ├── uninstall.sh          # 卸载：停进程（保留数据）
 │   ├── bin/                  # 9router-go（构建产物）、dnsfwd、sqlite3
-│   └── webroot/index.html    # DNS 管理 WebUI（KSU/WebUIX）
+│   └── webroot/index.html    # 模块 WebUI（KSU/WebUIX）：概览/DNS/一致性检查/更新
 ├── tools/dnsfwd.c            # DNS 转发器源码（含构建脚本）
 ├── build.sh                  # 一键构建模块 zip
 ├── CONTEXT.md                # 术语表
@@ -51,6 +51,29 @@
 | `dns-bind` | dnsfwd 绑定范围：loopback（默认）/ any |
 | `port` | 持久端口（可选，默认 20130） |
 | `9router.pid` / `dnsfwd.pid` | 进程 PID |
+
+## 模块 WebUI 功能
+
+管理器 → 模块 → WebUI 打开（KernelSU 内置 / WebUIX），四页签：
+
+| 页签 | 功能 |
+|---|---|
+| 概览 | 引擎/dnsfwd 状态与内存占用、引擎端口修改（写 `port` 文件并重启） |
+| DNS | 上游增删改、`dnsfwd -P` 探测、优选评分（可用率/RTT/fake-ip）一键应用 Top5、回滚、绑定范围 |
+| 一致性检查 | 修复 Dashboard 出厂 key、清理孤儿 customModels/disabledModels（已删节点的残留，即客户端模型列表里 `openai-compatible-chat-<uuid>` 噪音的来源）、无凭据活跃连接警告 |
+| 更新 | GitHub 加速节点本机测速选优（初始清单来自 moretools.app 聚合，可自定义）、引擎 release 检查/更新（SHA256 校验）、模块 zip 覆盖更新 |
+
+- 加速节点选中值存 `$DATA_DIR/github-accel`，自定义清单 `$DATA_DIR/accel-list.conf`
+- 模块更新源存 `$DATA_DIR/module-update-url`（默认指向 fork 的 `update.json`，
+  发布 release 时在仓库根放 `{version, versionCode, zipUrl, changelog}`）
+- module.prop 的 `updateJson` 字段供 KernelSU 管理器原生在线更新（与本 WebUI 通道独立）
+
+## Dashboard 复制按钮补丁
+
+HTTP（非 localhost）访问 Dashboard 时 `navigator.clipboard` 不存在、复制按钮
+全部失效——上游问题。构建时由 `tools/patch-clipboard.py` 向 `web/dist/index.html`
+注入 polyfill 降级实现（上游源码零改动，注入块带 BEGIN/END 标记）。
+上游修复后：`CLIPBOARD_PATCH=0 ./build.sh` 跳过注入。
 
 ## 卸载
 

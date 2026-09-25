@@ -29,6 +29,12 @@ else
   echo "web/dist 已存在，跳过（FORCE=1 强制重建）"
 fi
 
+# clipboard polyfill：HTTP 非 secure context 下 Dashboard 复制按钮失效的
+# 构建时补丁（不改上游源码，见 tools/patch-clipboard.py；CLIPBOARD_PATCH=0 关闭）
+if [ "${CLIPBOARD_PATCH:-1}" = "1" ] && [ -f web/dist/index.html ]; then
+  python3 tools/patch-clipboard.py web/dist/index.html
+fi
+
 echo "== 2/3 引擎交叉编译 (linux/arm64) =="
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
   -ldflags "-s -w -X '9router/proxy/internal/updater.CurrentVersion=${VERSION}'" \
