@@ -20,7 +20,10 @@ VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 OUT_DIR="dist"
 MOD_ID="$(grep '^id=' module/module.prop | cut -d= -f2)"
 MOD_VERSION="$(grep '^version=' module/module.prop | cut -d= -f2)"
-ZIP_NAME="${MOD_ID}-${VERSION}-arm64.zip"
+# 发布包命名：9router-go-<上游版本>-r<修订>-magisk.zip
+# 版本号与上游同步（1.9.1），r 序号 = 维护者修改版本（大版本更新时归 r1）
+REL_VER="$(echo "$MOD_VERSION" | sed 's/^v//')"
+ZIP_NAME="9router-go-${REL_VER}-magisk.zip"
 STAGING="$(mktemp -d)"
 
 cleanup() { rm -rf "$STAGING"; }

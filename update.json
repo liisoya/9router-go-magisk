@@ -1,6 +1,6 @@
 {
   "version": "v1.9.1-r1",
   "versionCode": 109010,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.1-r1/ninerouter-go-1.9.1-arm64.zip",
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.1-r1/9router-go-1.9.1-r1-magisk.zip",
   "changelog": "首个发布版本：上游 v1.9.1 引擎（含 codebuddy-cn 提示词清洗修复）+ Magisk/KSU 模块层。内置 Dashboard（管理地址 http://<设备IP>:20130，初始密码 123456）、DNS 转发器管理与优选、一致性检查、引擎/模块在线更新（支持 GitHub 加速节点）。"
 }
