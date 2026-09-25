@@ -58,7 +58,27 @@ document.querySelectorAll('nav button').forEach(b => {
 
 // ═══════════ 概览 ═══════════
 async function refresh() {
-  const st = KP.parseOpsStatus((await KB.ops('status')).out);
+  let st;
+  try {
+    st = KP.parseOpsStatus((await KB.ops('status')).out);
+  } catch (e) {
+    document.getElementById('st-eng').textContent = '状态获取异常: ' + (e && e.message || e);
+    return;
+  }
+  // 诊断探针：status 为空/缺 port 时，把原始取证信息直接显示在页面上
+  if (!st.port) {
+    const diag = document.getElementById('diag');
+    diag.style.display = 'block';
+    const idRes = await KB.sh('id');
+    const rawRes = await KB.sh(`${CFG.MODDIR}/lib/ops.sh status 2>&1`);
+    const lsRes = await KB.sh(`ls -la ${CFG.MODDIR}/lib/ 2>&1`);
+    diag.textContent =
+      '【诊断】ops.sh status 原始输出: ' + JSON.stringify(rawRes).slice(0, 300) +
+      '\n【诊断】id: ' + esc(idRes.out.trim() || idRes.err.trim()) +
+      '\n【诊断】lib/ 目录: ' + esc(lsRes.out.trim() || lsRes.err.trim());
+  } else {
+    document.getElementById('diag').style.display = 'none';
+  }
   const dnsDot = document.getElementById('dot-dns');
   let dnsTxt;
   if (st.dns === 'disabled') { dnsDot.className = 'dot err'; dnsTxt = '已关闭（用户设置）'; }
