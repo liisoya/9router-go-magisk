@@ -5,10 +5,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"9router/proxy/internal/auth"
 	"9router/proxy/internal/db"
 )
 
@@ -30,6 +33,48 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		os.Remove(tmpFile.Name())
 	}
 	return database, cleanup
+}
+
+// TestSetupServerRouter_ModelTestSessionAuth — 回归：/api/models/test 曾挂在
+// RequireApiKey 组内，备份导入清空 apiKeys 表后仪表盘模型测试全部 401
+// "Invalid API key."（引擎门口拦截，请求根本没到上游）。Node 原版该端点是
+// dashboard 内部端点（admin 会话语义），现挂 RequireDashboardAuth 组：
+// 会话 cookie / CLI token / API key 任一即可，仪表盘不再依赖 apiKeys 表。
+func TestSetupServerRouter_ModelTestSessionAuth(t *testing.T) {
+	t.Setenv("JWT_SECRET", "router-model-test-secret")
+	t.Setenv("DATA_DIR", t.TempDir())
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := db.NewRepo(database)
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	// apiKeys 表为空（= 导入备份刚清空表的状态）。无凭据 → 401，
+	// 但错误体不得是 apiKeys 语义的 "Invalid API key."。
+	req := httptest.NewRequest(http.MethodPost, "/api/models/test", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without credentials, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "Invalid API key") {
+		t.Errorf("model test must not be gated by apiKeys membership, got: %s", w.Body.String())
+	}
+
+	// 有效 admin 会话 cookie → 必须越过鉴权到达 handler（任何非 401 结果均可，
+	// 空 payload 的业务报错不属于本回归的范围）。
+	token, err := auth.Sign(auth.Secret(), time.Now())
+	if err != nil {
+		t.Fatalf("sign session: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/models/test", strings.NewReader(`{}`))
+	req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: token})
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Fatalf("expected session cookie to pass auth, got 401: %s", w.Body.String())
+	}
 }
 
 func TestSetupRoutes(t *testing.T) {

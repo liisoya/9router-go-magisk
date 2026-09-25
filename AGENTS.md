@@ -136,6 +136,15 @@ Every upstream provider in this repository (`antigravity`, `opencode`, `claude`,
 
 All unit tests in this repository **MUST** use Go's standard library `testing` package (`testing.T`). Do **NOT** introduce heavy external BDD test frameworks (such as Ginkgo/Gomega or testify suite) to keep `go.mod` clean, compilation fast, and the test suite unified across all packages.
 
+### 0. Regression-Test-or-It-Didn't-Happen (HARD RULE, 2026-09-26)
+
+Every bug fix — engine (Go) or module layer (shell/JS) — MUST ship a **regression test that reproduces the original failure** before it can be marked done in `docs/FIXPLAN.md`. A documentation hint, a comment, or a UI warning alone is **not a fix** (lesson: the "backup import wipes apiKeys → model tests 401" issue was previously "fixed" with a hint text in `webroot/index.html` and resurfaced within a day). Requirements:
+
+1. The test fails on the pre-fix code and passes on the post-fix code.
+2. Engine fixes: Go test in the same package (e.g. `TestSetupServerRouter_ModelTestSessionAuth`).
+3. Module JS fixes: node --test case in `module/webroot/test/` (parsers / bridge-commands suites).
+4. Shell environment quirks (mksh vs POSIX: `[^…]` caret is a LITERAL in mksh/dash — use `[!…]`; `|` in parameter-expansion patterns is ALTERNATION — escape as `\|`) must be captured in a test or a comment with the device-verified evidence.
+
 ### A. Table-Driven Tests Pattern
 For functions with multiple inputs, edge cases, or status transformations, always structure tests using table-driven tests:
 

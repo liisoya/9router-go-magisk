@@ -26,3 +26,5 @@ bug**——例如 codebuddy-cn 执行器缺少 Node 版的 agent 系统提示词
 | 日期 | 文件 | 问题 | 补丁存档 | 上游 PR |
 |---|---|---|---|---|
 | 2026-09-25 | `internal/proxy/executor/codebuddy.go` | 缺少 agent 系统提示词清洗 → codebuddy-cn 全部请求被腾讯 11128 拦截 | `tools/patches/codebuddy-cn-agent-prompt-sanitizer.patch` | 待提交 |
+| 2026-09-25 | `internal/handlers/dashboard/settings.go` | 内嵌 Svelte 前端以 multipart/form-data 上传备份（`file` 字段、无密码、凭 admin 会话），后端却按 Node 时代的 JSON+password 解析 → Dashboard 导入数据库必然 400 "Invalid database payload"（新设备首装导入被阻断）。修复：multipart 分支解析 `file` 字段；admin 会话/CLI token/密码三选一授权（该路径中间件本就强制 admin 会话）。Node JSON 流保持不变 | `tools/patches/dashboard-import-multipart.patch` | 待提交 |
+| 2026-09-26 | `internal/handlers/router.go` | `/api/models/test`（仪表盘模型测试）被挂在 RequireApiKey 组内——Node 原版它是 dashboard 内部端点（admin 会话语义，`pingModelByKind`）。备份导入清空 apiKeys 表后，仪表盘所有模型测试在引擎门口 401 "Invalid API key."（请求未达上游）。修复：移入 RequireDashboardAuth 组（admin 会话 / CLI token / API key 三选一），仪表盘从此不依赖 apiKeys 表 | `tools/patches/models-test-dashboard-auth.patch` | 待提交 |

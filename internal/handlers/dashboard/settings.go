@@ -130,7 +130,18 @@ func (h *DashboardHandler) HandleExportDatabase(w http.ResponseWriter, r *http.R
 }
 
 // HandleImportDatabase handles POST /api/settings/database (backup restore).
+// Two client shapes reach this endpoint (upstream parity): the Node-era
+// dashboard posts the parsed backup JSON with a trailing `password` field,
+// while the built-in Svelte dashboard uploads the raw backup file as
+// multipart/form-data with a `file` field and no password — it authenticates
+// through the admin session cookie that this always-protected route already
+// requires. Both shapes must restore successfully.
 func (h *DashboardHandler) HandleImportDatabase(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		h.handleImportDatabaseMultipart(w, r)
+		return
+	}
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
@@ -149,6 +160,43 @@ func (h *DashboardHandler) HandleImportDatabase(w http.ResponseWriter, r *http.R
 
 	if !trustedRequest(r) && !h.verifyDashboardPassword(password) {
 		writePlainError(w, http.StatusUnauthorized, "Invalid password")
+		return
+	}
+
+	if err := h.importDatabase(payload); err != nil {
+		writePlainError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// handleImportDatabaseMultipart restores a backup uploaded as
+// multipart/form-data by the built-in dashboard (field "file"). Admin session
+// or CLI token is required — the always-protected route middleware already
+// enforces this, the check here is defense in depth. A plaintext `password`
+// form field is also accepted for clients that cannot present a session.
+func (h *DashboardHandler) handleImportDatabaseMultipart(w http.ResponseWriter, r *http.Request) {
+	password := r.FormValue("password")
+	if !auth.SessionValid(r) && !auth.ValidCLIToken(r.Header.Get(cliTokenHeader)) && !h.verifyDashboardPassword(password) {
+		writePlainError(w, http.StatusUnauthorized, "Invalid password")
+		return
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writePlainError(w, http.StatusBadRequest, `missing backup file (form field "file")`)
+		return
+	}
+	defer file.Close()
+	body, err := io.ReadAll(file)
+	if err != nil {
+		writePlainError(w, http.StatusBadRequest, "failed to read backup file")
+		return
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		writePlainError(w, http.StatusBadRequest, "Invalid database payload")
 		return
 	}
 

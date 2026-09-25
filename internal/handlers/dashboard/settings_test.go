@@ -3,6 +3,8 @@ package dashboard
 import (
 	"bytes"
 	json "encoding/json/v2"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,6 +149,69 @@ func TestHandleExportDatabase_RequiresPassword(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for CLI token, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleImportDatabase_Multipart covers the built-in Svelte dashboard's
+// upload shape: multipart/form-data with a `file` field and no password —
+// it authenticates via the admin session cookie (or CLI token here).
+// Regression: the handler used to json.Unmarshal the raw multipart body,
+// so every dashboard import failed with 400 "Invalid database payload".
+func TestHandleImportDatabase_Multipart(t *testing.T) {
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	backup := `{"settings":{"autoUpdate":false},"providerConnections":[{"id":"conn-mp","provider":"openai","authType":"apikey","isActive":true,"data":{"apiKey":"sk-mp"}}],"providerNodes":[],"proxyPools":[],"apiKeys":[{"id":"key-mp","key":"sk-mp-1","isActive":true}],"combos":[]}`
+
+	buildBody := func(includeFile bool) (*bytes.Buffer, string) {
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		if includeFile {
+			fw, _ := w.CreateFormFile("file", "backup.json")
+			_, _ = io.WriteString(fw, backup)
+		}
+		_ = w.Close()
+		return &buf, w.FormDataContentType()
+	}
+
+	// No CLI token / session / password → 401 (multipart branch re-checks auth).
+	body, ct := buildBody(true)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/database", body)
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without credentials, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Missing file field → 400.
+	body, ct = buildBody(false)
+	req = httptest.NewRequest(http.MethodPost, "/api/settings/database", body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing file, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Happy path with CLI token → 200 and data restored.
+	body, ct = buildBody(true)
+	req = httptest.NewRequest(http.MethodPost, "/api/settings/database", body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("multipart import failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var data string
+	if err := repo.RawDB().QueryRow(`SELECT data FROM providerConnections WHERE id='conn-mp'`).Scan(&data); err != nil {
+		t.Fatalf("restored connection not found: %v", err)
+	}
+	if !strings.Contains(data, "sk-mp") {
+		t.Errorf("restored data blob missing apiKey, got %s", data)
 	}
 }
 

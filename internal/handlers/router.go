@@ -62,7 +62,10 @@ func SetupRoutes(r interface {
 	r.Get("/api/models/catalog-sync", chatH.HandleCatalogSyncStatus)
 	r.Post("/api/models/catalog-sync", chatH.HandleCatalogSyncTrigger)
 	r.Get("/api/models", chatH.HandleModels)
-	r.Post("/api/models/test", chatH.HandleTestModel)
+	// /api/models/test moved to the dashboard-auth group (see SetupRouter): it is
+	// the built-in dashboard's model test endpoint (Node parity: internal
+	// pingModelByKind), it must not require membership in the apiKeys table —
+	// a backup import wipes that table and 401'd every model test.
 	r.Post("/chat/completions", chatH.HandleChatCompletions)
 	r.Post("/messages", chatH.HandleMessages)
 	r.Post("/messages/count_tokens", chatH.HandleCountTokens)
@@ -392,5 +395,14 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireDashboardAuth(repo))
 		SetupDashboardRoutes(r, repo)
+	})
+
+	// Model testing: the built-in dashboard tests models through its admin
+	// session (Node parity: internal pingModelByKind endpoint); CLI keeps using
+	// API keys. Under RequireApiKey this 401'd every model test after a backup
+	// import wiped the apiKeys table — the dashboard must not depend on it.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireDashboardAuth(repo))
+		r.Post("/api/models/test", chat.NewChatHandler(repo, ts).HandleTestModel)
 	})
 }
