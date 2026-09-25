@@ -331,9 +331,12 @@ async function refresh() {
   const mpTxt = (await sh(`cat ${MODDIR}/module.prop`)).out;
   const mpVer = parseProp(mpTxt, 'version');
   document.getElementById('mod-cur').textContent = mpVer || '未知';
-  const ver = (await sh(`${MODDIR}/bin/9router-go version`)).out.split('\n')[0].trim();
-  document.getElementById('st-ver').textContent = ver || '未知';
-  document.getElementById('eng-cur').textContent = ver || '未知';
+  // 引擎版本从 module.prop 推导（模块与引擎同版本发布）。
+  // 不要调 `bin/9router-go version`：它会做 GitHub 更新检查（设备上 3.4s+ 且必失败），
+  // 卡死整个 refresh()，错误文本还会漏进概览状态卡。
+  const engVer = (mpVer || '').replace(/-r\d+$/, '');
+  document.getElementById('st-ver').textContent = engVer || '未知';
+  document.getElementById('eng-cur').textContent = engVer || '未知';
   const mu = (await sh(`cat ${MOD_UPDATE_URL_FILE} 2>/dev/null`)).out.trim() || DEFAULT_MOD_UPDATE_URL;
   window._modUrl = mu;
   resources();
