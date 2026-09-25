@@ -182,7 +182,7 @@ async function probe() {
   const out = document.getElementById('probe-out');
   out.style.display = 'block'; out.textContent = '探测中，约需数秒…';
   document.getElementById('btn-probe').disabled = true;
-  const r = await KB.sh(`${CFG.MODDIR}/bin/dnsfwd -f ${UPSTREAMS} -P -j 8 2>&1`);
+  const r = await KB.sh(`${CFG.MODDIR}/bin/dnsfwd -f ${UPSTREAMS} -P -j 8 2>&1`, 60000);
   out.textContent = r.out || r.err || '（无输出）';
   document.getElementById('btn-probe').disabled = false;
 }
@@ -202,7 +202,7 @@ async function optimize() {
   const cands = [...new Set([...custom, ...DNS_CANDIDATES.map(c => KP.normUpstream(c.v)), ...cur])];
   const cf = CFG.DATA_DIR + '/dns-candidates.tmp';
   await KB.sh(`cat > ${cf} <<'__EOF__'\n${cands.join('\n')}\n__EOF__`);
-  const r = await KB.sh(`${CFG.MODDIR}/bin/dnsfwd -f ${cf} -P -j 8 2>&1`);
+  const r = await KB.sh(`${CFG.MODDIR}/bin/dnsfwd -f ${cf} -P -j 8 2>&1`, 60000);
   await KB.sh(`rm -f ${cf}`);
   btn.disabled = false; btn.textContent = '候选池测速';
   const rows = KP.parseDnsProbeOutput(r.out);
@@ -462,7 +462,7 @@ async function engUpdate() {
   out.textContent = '下载中（' + ((await KB.sh(`cat ${ACCEL_SEL} 2>/dev/null`)).out.trim() || '直连') + ')…';
   const p = (await KB.sh(`cat ${ACCEL_SEL} 2>/dev/null`)).out.trim();
   const base = `https://github.com/luqman-v1/9router-go/releases/download/${ver}`;
-  const dl = await KB.sh(`curl -sL -m 300 -o /data/local/tmp/9r-eng.new '${withAccel(base + '/9router-go-linux-arm64', p)}' && echo dl-ok`);
+  const dl = await KB.sh(`curl -sL -m 300 -o /data/local/tmp/9r-eng.new '${withAccel(base + '/9router-go-linux-arm64', p)}' && echo dl-ok`, 600000);
   if (!dl.out.includes('dl-ok')) { out.textContent = '❌ 下载失败'; return; }
   out.textContent += '\n校验 SHA256…';
   const sum = await KB.sh(`curl -sL -m 60 '${withAccel(base + '/SHA256SUMS.txt', p)}' | grep '9router-go-linux-arm64'`);
@@ -498,7 +498,7 @@ async function modUpdate() {
   const p = (await KB.sh(`cat ${ACCEL_SEL} 2>/dev/null`)).out.trim();
   const dlUrl = /https?:\/\/(github\.com|raw\.githubusercontent\.com|objects\.githubusercontent\.com)\//.test(j.zipUrl) ? withAccel(j.zipUrl, p) : j.zipUrl;
   out.textContent = '下载模块 zip…';
-  const dl = await KB.sh(`curl -sL -m 600 -o /data/local/tmp/mod-update.zip '${dlUrl}' && echo dl-ok`);
+  const dl = await KB.sh(`curl -sL -m 600 -o /data/local/tmp/mod-update.zip '${dlUrl}' && echo dl-ok`, 600000);
   if (!dl.out.includes('dl-ok')) { out.textContent = '❌ 下载失败'; return; }
   const chk = await KB.sh(`unzip -l /data/local/tmp/mod-update.zip`);
   if (!chk.out.includes('module.prop')) { out.textContent = '❌ zip 内容异常（缺 module.prop），已放弃'; return; }
