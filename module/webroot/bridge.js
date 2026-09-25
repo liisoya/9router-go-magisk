@@ -69,11 +69,20 @@
   }
 
   // SQL 经 $DATA_DIR/cc.sql 临时文件执行（Android 无 /tmp）
-  // -list 强制管道分隔输出（该 sqlite3 构建默认 box 表格模式会污染解析）
+  // -list 强制管道分隔输出（该 sqlite3 构建默认 box 表格模式会污染解析）。
+  // 引擎持有同库（WAL）：读撞上引擎写事务会报 database is locked / 输出半截，
+  // 这里对任何 sqlite3 报错自动重试（最多 3 次、间隔 1s）。
   function sqlFile(sql) {
     const f = (window.CFG && window.CFG.DATA_DIR || '/data/adb/9router-go') + '/cc.sql';
     const moddir = window.CFG && window.CFG.MODDIR;
-    return sh(`cat > ${f} <<'__EOSQL__'\n${sql}\n__EOSQL__\n${moddir}/bin/sqlite3 -list ${window.CFG.DATA_DIR}/db/data.sqlite < ${f}; rm -f ${f}`);
+    const run = () => sh(`cat > ${f} <<'__EOSQL__'\n${sql}\n__EOSQL__\n${moddir}/bin/sqlite3 -list ${window.CFG.DATA_DIR}/db/data.sqlite < ${f}; rm -f ${f}`);
+    const attempt = n => run().then(r => {
+      if (r.err && /locked|SQL error|unable/i.test(r.err) && n < 3) {
+        return new Promise(res => setTimeout(res, 1000)).then(() => attempt(n + 1));
+      }
+      return r;
+    });
+    return attempt(1);
   }
 
   function ops(subcmd) {

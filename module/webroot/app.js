@@ -311,6 +311,12 @@ SELECT key FROM kv WHERE scope='disabledModels';`);
   for (const l of r.out.split('\n').map(s => s.trim()).filter(Boolean)) {
     if (!l.includes('|')) live.add(l);
   }
+  // 安全护栏：有模型别名却读不到任何节点/连接 = 扫描结果不可信（撞上引擎写事务等），
+  // 绝不在这种状态下判定孤儿 —— 宁可扫不出，不可误删。
+  if (aliases.size > 0 && live.size === 0) {
+    box.innerHTML = '<div class="hint">⚠️ 扫描结果异常（未读到任何节点/连接，可能正被引擎写入占用），已中止判定。请稍后重试。</div>';
+    return;
+  }
   orphanAliases = KP.computeOrphans(aliases, live);
   if (!orphanAliases.length) {
     box.innerHTML = '<div class="hint">✅ 未发现孤儿数据</div>';
@@ -323,6 +329,17 @@ SELECT key FROM kv WHERE scope='disabledModels';`);
 }
 async function cleanOrphans() {
   if (!orphanAliases.length) return;
+  // 删除前二次确认：逐别名复查它是否真的不在存活节点/连接里
+  // （扫描瞬间可能撞上引擎写事务导致误判——曾误删 Import from /models 刚导入的模型）
+  const confirm = await KB.sqlFile(orphanAliases.map(a =>
+    `SELECT '${a}' WHERE EXISTS (SELECT 1 FROM providerNodes WHERE id='${a}') OR EXISTS (SELECT 1 FROM providerConnections WHERE provider='${a}');`).join('\n'));
+  const stillLive = confirm.out.split('\n').map(s => s.trim()).filter(Boolean);
+  if (stillLive.length) {
+    orphanAliases = orphanAliases.filter(a => !stillLive.includes(a));
+    toast(`⚠️ ${stillLive.length} 项复查后确认仍存活，已从清理列表剔除`, 3600);
+    scanOrphans();
+    if (!orphanAliases.length) return;
+  }
   const n = orphanAliases.length;
   // 删除前快照：把将被删除的行以 INSERT 语句形式存档，任何误删都可精确回滚
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
