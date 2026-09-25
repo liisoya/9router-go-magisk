@@ -157,7 +157,7 @@
       <button class="danger" id="btn-clean-orphans" disabled style="display:none">确认清理孤儿</button>
     </div>
     <div id="orphan-list" style="margin-top:8px"></div>
-    <div class="hint">孤儿 = 已删除节点的自定义模型残留 —— 客户端模型列表里 openai-compatible-chat-&lt;uuid&gt;/… 噪音的来源。引擎本来就忽略它们，清理只影响噪音。</div>
+    <div class="hint">只清理「已删除节点的 openai-compatible-chat-&lt;uuid&gt; 残留」（客户端模型列表噪音的来源，引擎本就忽略它们）。内置供应商别名（oc/ds/qd…）永不清理；点一次全清。</div>
   </div>
 
   <div class="card">
@@ -272,7 +272,8 @@ const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g,
 // SQL 一律经临时文件执行（Android 无 /tmp，用 $DATA_DIR），规避多层引号
 async function sqlFile(sql) {
   const f = DATA_DIR + '/cc.sql';
-  const w = await sh(`cat > ${f} <<'__EOSQL__'\n${sql}\n__EOSQL__\n${MODDIR}/bin/sqlite3 ${DATA_DIR}/db/data.sqlite < ${f}; rm -f ${f}`);
+  // -list：强制管道分隔输出（该 sqlite3 构建默认 box 表格模式，会污染解析）
+  const w = await sh(`cat > ${f} <<'__EOSQL__'\n${sql}\n__EOSQL__\n${MODDIR}/bin/sqlite3 -list ${DATA_DIR}/db/data.sqlite < ${f}; rm -f ${f}`);
   return w;
 }
 const engineRunning = () => sh(`[ -f ${ENG_PID} ] && kill -0 $(cat ${ENG_PID}) 2>/dev/null && echo up || echo down`);
@@ -511,37 +512,30 @@ async function checkFactoryKey() {
   document.getElementById('ck-key').textContent = ok ? (has ? '存在 ✅' : '已自动补入 ✅') : '缺失 ❌（修复失败）';
 }
 let orphanAliases = [];
+// 只认这种形状为"可清理孤儿"：已删除节点的 openai-compatible-chat-<uuid> 残留。
+// 内置供应商别名（oc/ds/qd/cd/or/cbai…）来自引擎内置注册表，DB 里查不到是正常的 ——
+// 绝不能因为"DB 里没有"就判定为孤儿（曾误删 oc/openrouter/qd 的自定义模型）。
+const UUID_ALIAS = /^openai-compatible-chat-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 async function scanOrphans() {
   const box = document.getElementById('orphan-list');
   const btn = document.getElementById('btn-clean-orphans');
   btn.disabled = true; btn.style.display = 'none';
   box.innerHTML = '<div class="hint">扫描中…</div>';
-  const q = `SELECT DISTINCT json_extract(data,'$.prefix') FROM providerNodes WHERE json_extract(data,'$.prefix') IS NOT NULL;
-SELECT DISTINCT json_extract(data,'$.providerSpecificData.prefix') FROM providerNodes WHERE json_extract(data,'$.providerSpecificData.prefix') IS NOT NULL;
-SELECT id FROM providerNodes;
-SELECT DISTINCT json_extract(data,'$.prefix') FROM providerConnections WHERE json_extract(data,'$.prefix') IS NOT NULL;
-SELECT DISTINCT json_extract(data,'$.providerSpecificData.prefix') FROM providerConnections WHERE json_extract(data,'$.providerSpecificData.prefix') IS NOT NULL;
+  const q = `SELECT id FROM providerNodes;
 SELECT DISTINCT provider FROM providerConnections;
 SELECT key FROM kv WHERE scope='customModels';
 SELECT key FROM kv WHERE scope='disabledModels';`;
   const r = await sqlFile(q);
   const lines = r.out.split('\n').map(s => s.trim()).filter(Boolean);
-  const valid = new Set(), aliases = new Set();
-  let mode = 0; // 前 6 组=有效别名，后 2 组=kv keys（靠 known format 区分：含 '|' 的是 kv key）
+  const live = new Set();   // 存活节点/连接的 id 与 provider
+  const aliases = new Set();// customModels/disabledModels 里的别名
   for (const l of lines) {
-    if (l.includes('|') && /^(oc\||openai-compatible|ds\||qd\||cd\||or\||cb)/.test(l) === false && l.split('|').length >= 2 && !l.includes(' ')) {
-      // kv key 形如 alias|model|kind —— 但有效别名也可能含 '|'？有效别名不含 '|'（SQL 提取值），kv key 必含 2 个 '|'
-      const parts = l.split('|');
-      if (parts.length >= 3) { aliases.add(parts[0]); continue; }
-    }
-    valid.add(l);
+    if (l.includes('|')) { aliases.add(l.split('|')[0]); continue; }
+    live.add(l);
   }
-  for (const l of lines) {
-    if (!l.includes('|')) continue;
-    const parts = l.split('|');
-    if (parts.length >= 2) aliases.add(parts[0]);
-  }
-  orphanAliases = [...aliases].filter(a => a && !valid.has(a));
+  // 孤儿判定（结构性安全）：别名本身是 openai-compatible-chat-<uuid> 形状，
+  // 且该 UUID 不属于任何存活的节点/连接。其余别名一律不动。
+  orphanAliases = [...aliases].filter(a => a && UUID_ALIAS.test(a) && !live.has(a));
   if (!orphanAliases.length) {
     box.innerHTML = '<div class="hint">✅ 未发现孤儿数据</div>';
     return;
@@ -549,6 +543,7 @@ SELECT key FROM kv WHERE scope='disabledModels';`;
   box.innerHTML = orphanAliases.map(a =>
     `<div class="list-item"><span class="tag err">孤儿</span><span style="flex:1;word-break:break-all">${esc(a)}</span></div>`).join('');
   btn.disabled = false; btn.style.display = '';
+  btn.textContent = `确认清理孤儿（${orphanAliases.length} 项，一次全清）`;
 }
 async function cleanOrphans() {
   if (!orphanAliases.length) return;
