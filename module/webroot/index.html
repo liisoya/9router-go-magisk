@@ -83,6 +83,12 @@
   </div>
 
   <div class="card">
+    <h2>服务地址</h2>
+    <div id="addr-list"><div class="hint">加载中…</div></div>
+    <div class="hint">引擎监听所有网卡，局域网设备可直接访问 Dashboard（首次需登录）。点地址复制，点链接在浏览器打开。</div>
+  </div>
+
+  <div class="card">
     <h2>资源占用</h2>
     <div class="kv"><span>引擎内存</span><b id="mem-eng">-</b></div>
     <div class="bar"><i id="bar-eng" style="width:0%"></i></div>
@@ -150,12 +156,10 @@
 
 <!-- ═══════════════ 一致性检查 ═══════════════ -->
 <div class="page" id="p-consistency">
-  <div class="card">
-    <h2><span class="dot" id="dot-key"></span>仪表出厂 key</h2>
-    <div class="kv"><span>sk-8b71f86e…（Dashboard 复制/测试按钮依赖）</span><b id="ck-key">-</b></div>
-    <button id="btn-fix-key" class="primary" style="margin-top:8px;display:none">补入出厂 key</button>
-    <div class="hint">仅在 apiKeys 表为空（全新安装）时自动补入；你在 Dashboard 删除它之后不会自动加回。若备份导入清空了整张表导致模型测试报 Invalid API key，点上面按钮补入即可。</div>
-  </div>
+  <!-- 出厂 key 卡片已移除：全新安装由 service.sh 开机自动补入；备份导入后仪表盘
+       走会话鉴权（引擎 /api/models/test 不再依赖 apiKeys 表），用户全程无感。
+       出厂 key 被用户主动删除时不自动复活（安全特性），外部 CLI 需要时在
+       Dashboard 的 keys 页手动添加。 -->
 
   <div class="card">
     <h2>孤儿数据</h2>

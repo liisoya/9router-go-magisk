@@ -15,7 +15,9 @@ case "$abi" in
 esac
 
 # 可执行位兜底：zip 里脚本/二进制若为 644，装完会跑不起来
-for f in "$MODPATH"/*.sh "$MODPATH"/bin/*; do
+# （lib/ops.sh 是 WebUI/service.sh/action.sh 的统一 seam，漏掉会导致
+#   mksh "can't execute: Permission denied"、引擎无法拉起）
+for f in "$MODPATH"/*.sh "$MODPATH"/lib/*.sh "$MODPATH"/bin/*; do
   [ -f "$f" ] && chmod 0755 "$f" 2>/dev/null
 done
 

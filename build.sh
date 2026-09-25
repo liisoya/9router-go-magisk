@@ -75,6 +75,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
   -ldflags "-s -w -X '9router/proxy/internal/updater.CurrentVersion=${VERSION}'" \
   -o module/bin/9router-go ./cmd/9router-go/
 chmod 0755 module/bin/9router-go
+# 引擎真实版本落盘（ops.sh engine_version 的构建期来源；运行期由 install-engine 覆写）
+printf '%s\n' "$VERSION" > module/etc/engine-version
 
 step "6/7 staging + MODID 注入"
 mkdir -p "$STAGING"

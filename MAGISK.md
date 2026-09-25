@@ -11,7 +11,7 @@
 │   ├── module.prop           # id=ninerouter-go + updateJson
 │   ├── customize.sh          # 安装期：ABI 检查 + chmod 兜底
 │   ├── service.sh            # 开机：schema 引导 + ops.sh(start-dns/seed-key) + 引擎拉起
-│   ├── lib/ops.sh            # 运维唯一实现（seam）：status/start-dns/stop-dns/seed-key/get-port
+│   ├── lib/ops.sh            # 运维唯一实现（seam）：status/panel/stop-all/restart-engine/start-dns/stop-dns/enable-dns/port53-busy/seed-key/get-port
 │   ├── action.sh             # 管理器「操作」按钮：状态显示（数据来自 ops.sh）
 │   ├── uninstall.sh          # 卸载：停进程（保留数据）
 │   ├── bin/                  # 9router-go（构建产物）、dnsfwd、sqlite3
@@ -51,9 +51,16 @@ node --test module/webroot/test/parsers.test.js   # 解析层 fixture 回归（�
 
 1. KernelSU / Magisk 刷入 zip
 2. 重启后引擎监听 **:20130**（默认，与上游一致），Dashboard 即引擎地址
-3. 首次启动自动生成 Dashboard 登录密码：
+3. 首次登录使用固定初始密码 **123456**（写入 `initial-password`，端口仅绑定 loopback）。
+   用户登录 Dashboard 后请立即自行修改密码（不替用户生成随机密码）：
    `adb shell su -c "cat /data/adb/9router-go/initial-password"`
 4. DNS 管理：管理器 → 模块 → WebUI
+   - 设备上已有 DNS 服务（监听 127.0.0.1:53）时，内置 dnsfwd 启动会**自动让路**，
+     引擎解析由已有服务接管（面板显示"已让路"）。开机含 5 秒让位宽限窗口，
+     但 Magisk 服务先于普通 App 启动，极端情况下第三方服务晚到仍可能抢不到端口，
+     此时在面板关闭 dnsfwd 再启动自己的服务即可
+   - 引擎（纯 Go 静态二进制）域名解析**只认 127.0.0.1:53**；关闭 dnsfwd 且 :53
+     无服务时模型域名无法解析，面板关闭时会如实警告
 
 ## 数据目录
 
@@ -62,7 +69,7 @@ node --test module/webroot/test/parsers.test.js   # 解析层 fixture 回归（�
 | 文件 | 说明 |
 |---|---|
 | `db/data.sqlite` | 引擎数据库（供应商/密钥/设置） |
-| `initial-password` | 首启生成的 Dashboard 密码 |
+| `initial-password` | Dashboard 初始密码（固定 123456，首登必改） |
 | `dns-upstreams.conf` | DNS 上游列表（WebUI 可编辑，严禁 127.0.0.1） |
 | `dns-bind` | dnsfwd 绑定范围：loopback（默认）/ any |
 | `port` | 持久端口（可选，默认 20130） |
