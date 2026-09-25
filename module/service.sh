@@ -124,6 +124,12 @@ engine_running() {
 
 start_dnsfwd() {
   [ -x "$DNSFWD" ] || return 1
+  # 用户关闭开关（$DATA_DIR/dns-disabled）：设备上可能已有其他转发器，
+  # 用户手动关闭本模块的 dnsfwd 以避免冲突。开机与手动拉起都尊重该开关。
+  if [ -f "$DATA_DIR/dns-disabled" ]; then
+    echo "[$(date)] dnsfwd disabled by user flag, skip start" >>"$DNS_LOG"
+    return 1
+  fi
   dns_running && return 0
   # 127.0.0.1:53 只能有一个所有者（如旧模块共存期已占用则跳过，引擎照常可用 :53）。
   # 优先 ss（Android netstat 对 UDP 监听展示不可靠），netstat 兜底。

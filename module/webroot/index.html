@@ -18,11 +18,11 @@
   nav button.on { background: var(--acc); border-color: var(--acc); color: #fff; }
   .page { display: none; } .page.on { display: block; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 13px; }
-  .card h2 { font-size: 14px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .card h2 { font-size: 14px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
-  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); } .dot.warn { background: var(--warn); }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .kv { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; gap: 12px; }
+  .kv { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; gap: 12px; align-items: center; }
   .kv b { font-weight: 600; text-align: right; word-break: break-all; }
   .kv span { color: var(--dim); flex: none; }
   button { background: #222734; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
@@ -31,7 +31,7 @@
   button.danger { background: transparent; border-color: var(--err); color: var(--err); }
   button:disabled { opacity: .45; cursor: default; }
   input[type=text] { width: 100%; background: #0d0f14; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 13px/1.4 ui-monospace, monospace; }
-  textarea { width: 100%; min-height: 120px; background: #0d0f14; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 12px/1.5 ui-monospace, monospace; resize: vertical; }
+  textarea { width: 100%; min-height: 110px; background: #0d0f14; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 12px/1.5 ui-monospace, monospace; resize: vertical; }
   .hint { color: var(--dim); font-size: 12px; margin-top: 6px; }
   pre { background: #0d0f14; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 11px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; margin-top: 8px; display: none; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
@@ -44,6 +44,11 @@
   .list-item:last-child { border-bottom: 0; }
   .tag { font-size: 11px; border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; color: var(--dim); flex: none; }
   .tag.err { color: var(--err); border-color: var(--err); }
+  .tag.ok { color: var(--ok); border-color: var(--ok); }
+  .tag.acc { color: var(--acc); border-color: var(--acc); }
+  .chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 14px; padding: 3px 10px; font-size: 12px; margin: 3px 4px 3px 0; cursor: pointer; }
+  .chip:active { opacity: .7; }
+  .chip.added { color: var(--ok); border-color: var(--ok); }
   #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: #222734; border: 1px solid var(--line); color: var(--txt); padding: 8px 16px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; max-width: 90vw; z-index: 9; }
   #toast.show { opacity: 1; }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
@@ -69,7 +74,6 @@
     <div class="kv"><span>引擎</span><b id="st-eng">检测中…</b></div>
     <div class="kv"><span>DNS 转发器</span><b id="st-dns">检测中…</b></div>
     <div class="kv"><span>引擎端口</span><b id="st-port">-</b></div>
-    <div class="kv"><span>绑定范围</span><b id="st-bind">-</b></div>
     <div class="kv"><span>引擎版本</span><b id="st-ver">-</b></div>
     <div class="row" style="margin-top:10px">
       <button class="primary" id="btn-refresh">刷新</button>
@@ -101,56 +105,59 @@
 <!-- ═══════════════ DNS ═══════════════ -->
 <div class="page" id="p-dns">
   <div class="card">
-    <h2>上游服务器</h2>
+    <h2>转发器开关</h2>
+    <div class="kv"><span>状态</span><b id="dnsw-state">-</b></div>
+    <div class="row" style="margin-top:8px">
+      <button class="primary" id="btn-dns-on">开启</button>
+      <button class="danger" id="btn-dns-off">关闭</button>
+    </div>
+    <div class="hint">关闭 = 本模块不占用 :53，引擎改用设备上已有的 DNS 方案。若开机时 :53 已被其他转发器占用，本模块会自动让路（状态显示"已让路"）。</div>
+  </div>
+
+  <div class="card">
+    <h2>当前生效的上游</h2>
+    <div id="cur-upstreams"><div class="hint">加载中…</div></div>
+  </div>
+
+  <div class="card">
+    <h2>上游配置 <span class="tag acc">自定义最优先</span></h2>
     <textarea id="upstreams" spellcheck="false"></textarea>
-    <div class="hint">每行一条：nameserver IP 或 DoH/DoT URL。严禁 127.0.0.1 / ::1（自我循环）。保存后热重载生效。</div>
+    <div class="hint">每行一条：nameserver IP / doh URL / dot host。严禁 127.0.0.1 / ::1。自定义项永远排在优选结果之前；保存后热重载。</div>
     <div class="row" style="margin-top:10px">
-      <button class="primary" id="btn-save">保存</button>
-      <button id="btn-reload">热重载 (SIGHUP)</button>
-      <button id="btn-probe">探测全部上游 (-P)</button>
+      <button class="primary" id="btn-save">保存并热重载</button>
+      <button id="btn-probe">逐个探测</button>
+      <button id="btn-restore-init">恢复初始默认</button>
     </div>
     <pre id="probe-out"></pre>
   </div>
 
   <div class="card">
-    <h2>上游优选 <span class="tag">简化评分 · 持续迭代</span></h2>
+    <h2>优选 <span class="tag">测速后自动应用</span></h2>
     <div class="row">
-      <button class="primary" id="btn-opt">测速并评分</button>
-      <button id="btn-apply-top5" disabled>应用 Top5</button>
-      <button id="btn-rollback" disabled>回滚上一版</button>
+      <button class="primary" id="btn-opt">候选池测速</button>
+      <button id="btn-rollback">回滚上一版</button>
     </div>
     <div id="opt-table"></div>
-    <div class="hint">评分 = 可用率×100 − 平均RTT/50 − fake-ip罚100；只列可用率 ≥50% 且非 fake-ip 的上游。应用后写入配置并热重载，上一版自动备份为 .prev。</div>
-  </div>
-
-  <div class="card">
-    <h2>绑定范围</h2>
-    <div class="row">
-      <div class="seg">
-        <button id="bind-loopback">仅本机 (loopback)</button>
-        <button id="bind-any">开放局域网 (any)</button>
-      </div>
-    </div>
-    <div class="hint">loopback：仅手机自身使用（默认，安全）。any：局域网设备可指向本机 DNS。修改后需重启 dnsfwd。</div>
-    <div class="row" style="margin-top:10px">
-      <button id="btn-restart-dns">重启 dnsfwd</button>
-    </div>
+    <div class="hint">候选池 = 内置可达清单（国内明文 + DoH/DoT，源自旧版实测）∪ 你的自定义项。评分 = 可用率×100 − RTT/50 − fake-ip罚100；测完自动写入「自定义项 + Top5」并热重载，上一版存 .prev 可回滚。</div>
   </div>
 </div>
 
 <!-- ═══════════════ 一致性检查 ═══════════════ -->
 <div class="page" id="p-consistency">
   <div class="card">
-    <h2>仪表出厂 key</h2>
+    <h2><span class="dot" id="dot-key"></span>仪表出厂 key <span class="tag">自动维护</span></h2>
     <div class="kv"><span>sk-8b71f86e…（Dashboard 复制/测试按钮依赖）</span><b id="ck-key">-</b></div>
-    <button class="primary" id="btn-fix-key" style="margin-top:8px">修复/补入出厂 key</button>
-    <div class="hint">Dashboard 导入备份会清空 apiKeys 表，此 key 丢失会导致所有模型测试报 Invalid API key。此按钮随时可点（幂等）。</div>
+    <div class="hint">每次打开本页自动检查并补入（幂等），无需手动操作。Dashboard 导入备份会清空 apiKeys 表，此修复保证模型测试不再报 Invalid API key。</div>
   </div>
 
   <div class="card">
-    <h2>孤儿数据扫描</h2>
-    <div class="row"><button class="primary" id="btn-scan">扫描</button></div>
+    <h2>孤儿数据</h2>
+    <div class="row">
+      <button class="primary" id="btn-scan">检查孤儿数据</button>
+      <button class="danger" id="btn-clean-orphans" disabled style="display:none">确认清理孤儿</button>
+    </div>
     <div id="orphan-list" style="margin-top:8px"></div>
+    <div class="hint">孤儿 = 已删除节点的自定义模型残留 —— 客户端模型列表里 openai-compatible-chat-&lt;uuid&gt;/… 噪音的来源。引擎本来就忽略它们，清理只影响噪音。</div>
   </div>
 
   <div class="card">
@@ -164,14 +171,15 @@
 <!-- ═══════════════ 更新 ═══════════════ -->
 <div class="page" id="p-update">
   <div class="card">
-    <h2>GitHub 加速节点</h2>
-    <div class="row">
+    <h2>GitHub 加速</h2>
+    <div class="kv"><span>当前加速</span><b id="accel-cur">直连 GitHub</b></div>
+    <div class="row" style="margin-top:8px">
       <button class="primary" id="btn-speed">本机测速</button>
       <button id="btn-accel-add">添加自定义节点</button>
       <button id="btn-accel-clear">清除选中</button>
     </div>
-    <div id="accel-list" style="margin-top:8px"></div>
-    <div class="hint">对每个节点用真实文件请求计时（本机结果，非网页测速）。选中后引擎/模块更新都走它；清除选中则直连 GitHub。</div>
+    <div id="accel-list"></div>
+    <div class="hint">对候选节点发真实文件请求计时（本机结果）。默认隐藏清单，测速后显示 Top5 供选择。</div>
   </div>
 
   <div class="card">
@@ -187,7 +195,6 @@
 
   <div class="card">
     <h2>模块更新 <span class="tag" id="mod-cur">-</span></h2>
-    <div class="kv"><span>更新源</span><b style="font-size:11px" id="mod-url">-</b></div>
     <div class="kv"><span>远端版本</span><b id="mod-latest">未检查</b></div>
     <div class="row" style="margin-top:8px">
       <button class="primary" id="btn-mod-check">检查更新</button>
@@ -195,7 +202,7 @@
       <button id="btn-mod-seturl">修改更新源</button>
     </div>
     <pre id="mod-out"></pre>
-    <div class="hint">下载模块 zip（校验 module.prop）→ 停进程 → 解压覆盖 → 重启。更新前 zip 备份在 $DATA_DIR/last-module.zip。管理器的在线更新（updateJson）与本按钮互相独立。</div>
+    <div class="hint">下载模块 zip（校验 module.prop）→ 停进程 → 解压覆盖 → 重启。更新前 zip 备份在 $DATA_DIR/last-module.zip。管理器在线更新（updateJson）与本按钮独立。</div>
   </div>
 </div>
 
@@ -210,13 +217,25 @@ const BIND_FILE = DATA_DIR + '/dns-bind';
 const DNS_PID = DATA_DIR + '/dnsfwd.pid';
 const ENG_PID = DATA_DIR + '/9router.pid';
 const PORT_FILE = DATA_DIR + '/port';
+const DNS_DISABLED = DATA_DIR + '/dns-disabled';
 const ACCEL_SEL = DATA_DIR + '/github-accel';
 const ACCEL_LIST = DATA_DIR + '/accel-list.conf';
 const MOD_UPDATE_URL_FILE = DATA_DIR + '/module-update-url';
 const DEFAULT_MOD_UPDATE_URL = 'https://raw.githubusercontent.com/liisoya/9router-go-magisk/main/update.json';
-const ENGINE_REPO_RAW = 'https://raw.githubusercontent.com/luqman-v1/9router-go/main/version.json';
+const ENGINE_VERSION_URL = 'https://raw.githubusercontent.com/luqman-v1/9router-go/main/version.json';
 const FACTORY_KEY = 'sk-8b71f86e0a1f2fb5-nhz496-cfa1c800';
-// 初始加速清单来源：moretools.app/github-proxy 聚合（2026-09-25 测速可用前 15）
+// 候选池：旧版实测可达清单（国内明文 + 国内 DoH/DoT）+ 用户自定义
+const DNS_CANDIDATES = [
+  { v: 'nameserver 119.29.29.29',      note: '腾讯明文（旧版实测最快）' },
+  { v: 'nameserver 223.6.6.6',         note: '阿里明文' },
+  { v: 'nameserver 180.184.1.1',       note: '字节明文' },
+  { v: 'nameserver 114.114.114.114',   note: '114 明文兜底' },
+  { v: 'doh https://223.5.5.5/dns-query',        note: '阿里 DoH（加密优先）' },
+  { v: 'doh https://dns.alidns.com/dns-query',   note: '阿里 DoH' },
+  { v: 'doh https://doh.pub/dns-query',          note: '腾讯 DoH' },
+  { v: 'doh https://doh.360.cn/dns-query',       note: '360 DoH' },
+  { v: 'dot 223.5.5.5',                note: '阿里 DoT' }
+];
 const BUILTIN_ACCEL = [
   'https://github.cnxiaobai.com/', 'https://gitproxy.mrhjx.cn/', 'https://github.chenc.dev/',
   'https://ghp.keleyaa.com/', 'https://ghproxy.xzhouqd.com/', 'https://github-proxy.memory-echoes.cn/',
@@ -225,20 +244,20 @@ const BUILTIN_ACCEL = [
   'https://ghfile.geekertao.top/', 'https://github-proxy.lixxing.top/', 'https://gh-proxy.com/'
 ];
 
-// ── root shell 桥（KernelSU / WebUIX 均提供 ksu.exec；兼容 promise 与 callback）──
+// ── root shell 桥（KernelSU / WebUIX；兼容 promise 与 callback 两种形态）──
 async function sh(cmd) {
   if (typeof ksu === 'undefined' || !ksu.exec) return { code: -1, out: '', err: 'WebUI 桥不可用' };
   try {
     const r = await ksu.exec(cmd);
-    if (typeof r === 'string') return { code: 0, out: r, err: '' };
-    return { code: r.errno ?? 0, out: r.stdout ?? '', err: r.stderr ?? '' };
+    if (typeof r === 'string') return { code: 0, out: r.replace(/\r/g, ''), err: '' };
+    return { code: r.errno ?? 0, out: (r.stdout ?? '').replace(/\r/g, ''), err: r.stderr ?? '' };
   } catch (e) { /* fallthrough */ }
   return new Promise(resolve => {
     const cb = '_ksu_cb_' + Math.random().toString(36).slice(2);
     window[cb] = res => {
       delete window[cb];
-      if (typeof res === 'string') return resolve({ code: 0, out: res, err: '' });
-      resolve({ code: (res && res.errno) || 0, out: (res && res.stdout) || '', err: (res && res.stderr) || '' });
+      if (typeof res === 'string') return resolve({ code: 0, out: res.replace(/\r/g, ''), err: '' });
+      resolve({ code: (res && res.errno) || 0, out: ((res && res.stdout) || '').replace(/\r/g, ''), err: (res && res.stderr) || '' });
     };
     try { ksu.exec(cmd, '{}', cb); }
     catch (err) { resolve({ code: -1, out: '', err: String(err) }); }
@@ -250,18 +269,34 @@ function toast(msg, ms) {
   clearTimeout(t._tm); t._tm = setTimeout(() => t.classList.remove('show'), ms || 2400);
 }
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-function sqlFile(sql) { // 经临时文件执行 SQL，规避多层引号问题
-  return sh(`printf '%s' "${sql.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}" > /tmp/cc.sql && ${MODDIR}/bin/sqlite3 ${DATA_DIR}/db/data.sqlite < /tmp/cc.sql; rm -f /tmp/cc.sql`);
+// SQL 一律经临时文件执行（Android 无 /tmp，用 $DATA_DIR），规避多层引号
+async function sqlFile(sql) {
+  const f = DATA_DIR + '/cc.sql';
+  const w = await sh(`cat > ${f} <<'__EOSQL__'\n${sql}\n__EOSQL__\n${MODDIR}/bin/sqlite3 ${DATA_DIR}/db/data.sqlite < ${f}; rm -f ${f}`);
+  return w;
 }
 const engineRunning = () => sh(`[ -f ${ENG_PID} ] && kill -0 $(cat ${ENG_PID}) 2>/dev/null && echo up || echo down`);
 const dnsRunning = () => sh(`[ -f ${DNS_PID} ] && kill -0 $(cat ${DNS_PID}) 2>/dev/null && echo up || echo down`);
 const readPort = async () => (await sh(`cat ${PORT_FILE} 2>/dev/null || echo 20130`)).out.trim() || '20130';
-async function accelPrefix() {
-  const sel = (await sh(`cat ${ACCEL_SEL} 2>/dev/null`)).out.trim();
-  return sel ? sel : '';
-}
+async function accelPrefix() { return (await sh(`cat ${ACCEL_SEL} 2>/dev/null`)).out.trim(); }
 function withAccel(url, prefix) { return prefix ? prefix + url : url; }
 function modVersion() { return document.getElementById('mod-cur').textContent.replace(/^v/, '').split('-r')[0]; }
+function parseProp(txt, key) {
+  const m = txt.split('\n').find(l => l.startsWith(key + '='));
+  return m ? m.slice(key.length + 1).trim() : '';
+}
+function upType(line) { // 单条上游 → 类型标签
+  if (/^doh\s/.test(line) || /^https:\/\//.test(line)) return 'DoH';
+  if (/^dot\s/.test(line) || /^tls:\/\//.test(line)) return 'DoT';
+  return '明文';
+}
+function normUpstream(line) { // 统一为 dnsfwd 可读形式
+  const t = line.trim();
+  if (!t || t.startsWith('#')) return t;
+  if (/^(nameserver|doh|dot)\s/.test(t)) return t;
+  if (/^https:\/\//.test(t)) return 'doh ' + t;
+  return 'nameserver ' + t;
+}
 
 // ── 页签 ──
 document.querySelectorAll('nav button').forEach(b => {
@@ -277,59 +312,72 @@ document.querySelectorAll('nav button').forEach(b => {
 async function refresh() {
   const dns = await dnsRunning(), eng = await engineRunning();
   const dnsUp = dns.out.trim() === 'up', engUp = eng.out.trim() === 'up';
-  document.getElementById('dot-dns').className = 'dot ' + (dnsUp ? 'ok' : 'err');
-  document.getElementById('st-dns').textContent = dnsUp ? '运行中 (PID ' + (await sh(`cat ${DNS_PID}`)).out.trim() + ')' : '未运行';
+  const disabled = (await sh(`[ -f ${DNS_DISABLED} ] && echo 1 || echo 0`)).out.trim() === '1';
+  const dot = document.getElementById('dot-dns');
+  let dnsTxt;
+  if (disabled) { dot.className = 'dot err'; dnsTxt = '已关闭（用户设置）'; }
+  else if (dnsUp) { dot.className = 'dot ok'; dnsTxt = '运行中 (PID ' + (await sh(`cat ${DNS_PID}`)).out.trim() + ')'; }
+  else {
+    const busy = await port53Busy();
+    dot.className = 'dot warn';
+    dnsTxt = busy ? '已让路（:53 被其他转发器占用）' : '未运行';
+  }
+  document.getElementById('st-dns').textContent = dnsTxt;
   document.getElementById('st-eng').textContent = engUp ? '运行中 (PID ' + (await sh(`cat ${ENG_PID}`)).out.trim() + ')' : '未运行';
   document.getElementById('st-eng').style.color = engUp ? 'var(--ok)' : 'var(--err)';
   const port = await readPort();
   document.getElementById('st-port').textContent = port;
   document.getElementById('in-port').value = port;
-  const bind = (await sh(`cat ${BIND_FILE} 2>/dev/null || echo loopback`)).out.trim();
-  const b = bind === 'any' ? 'any' : 'loopback';
-  document.getElementById('st-bind').textContent = b;
-  setBindUI(b);
-  const ver = (await sh(`${MODDIR}/bin/9router-go version 2>/dev/null | head -1`)).out.trim();
+  const mpTxt = (await sh(`cat ${MODDIR}/module.prop`)).out;
+  const mpVer = parseProp(mpTxt, 'version');
+  document.getElementById('mod-cur').textContent = mpVer || '未知';
+  const ver = (await sh(`${MODDIR}/bin/9router-go version`)).out.split('\n')[0].trim();
   document.getElementById('st-ver').textContent = ver || '未知';
   document.getElementById('eng-cur').textContent = ver || '未知';
-  const mp = (await sh(`grep -E '^version=' ${MODDIR}/module.prop | cut -d= -f2`)).out.trim();
-  document.getElementById('mod-cur').textContent = mp || '未知';
-  const mu = (await sh(`cat ${MOD_UPDATE_URL_FILE} 2>/dev/null || echo ${DEFAULT_MOD_UPDATE_URL}`)).out.trim();
-  document.getElementById('mod-url').textContent = mu;
+  const mu = (await sh(`cat ${MOD_UPDATE_URL_FILE} 2>/dev/null`)).out.trim() || DEFAULT_MOD_UPDATE_URL;
+  window._modUrl = mu;
   resources();
+  loadCurrentUpstreams();
+  loadUpstreamEditor();
+  checkFactoryKey(); // 自动维护出厂 key（幂等，用户无感）
+}
+async function port53Busy() {
+  const r = await sh(`ss -tuln 2>/dev/null`);
+  return /[:.]53\s/.test(r.out);
 }
 async function resources() {
-  const rss = async pid => {
+  const mi = (await sh(`cat /proc/meminfo`)).out;
+  const mem = key => { const m = mi.match(new RegExp(key + ':\\s+(\\d+)')); return m ? parseInt(m[1], 10) : 0; };
+  const total = mem('MemTotal'), avail = mem('MemAvailable');
+  const rssKb = async pid => {
     if (!pid) return 0;
-    const r = await sh(`grep VmRSS /proc/${pid}/status 2>/dev/null | grep -oE '[0-9]+'`);
-    return parseInt(r.out.trim() || '0', 10); // kB
+    const st = (await sh(`cat /proc/${pid}/status 2>/dev/null`)).out;
+    const m = st.match(/VmRSS:\s+(\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
   };
   const engPid = (await sh(`cat ${ENG_PID} 2>/dev/null`)).out.trim();
   const dnsPid = (await sh(`cat ${DNS_PID} 2>/dev/null`)).out.trim();
-  const engKb = await rss(engPid), dnsKb = await rss(dnsPid);
-  const mi = await sh(`grep -E 'MemTotal|MemAvailable' /proc/meminfo`);
-  const total = parseInt((mi.out.match(/MemTotal:\s+(\d+)/) || [0, 0])[1], 10);
-  const avail = parseInt((mi.out.match(/MemAvailable:\s+(\d+)/) || [0, 0])[1], 10);
-  const fmt = kb => kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb + ' kB';
-  const engPct = Math.min(100, engKb / 3072);          // 300MB 满格
-  const dnsPct = Math.min(100, dnsKb / 3072);
-  const sysPct = total ? Math.round((total - avail) / total * 100) : 0;
+  const engKb = await rssKb(engPid), dnsKb = await rssKb(dnsPid);
+  const fmt = kb => !kb ? '-' : kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb + ' kB';
   document.getElementById('mem-eng').textContent = fmt(engKb);
   document.getElementById('mem-eng').style.color = engKb > 307200 ? 'var(--err)' : engKb > 204800 ? 'var(--warn)' : '';
-  document.getElementById('bar-eng').style.width = engPct + '%';
-  document.getElementById('bar-eng').className = engKb > 307200 ? 'err' : engKb > 204800 ? 'warn' : '';
+  const engBar = document.getElementById('bar-eng');
+  engBar.style.width = Math.min(100, engKb / 3072) + '%';
+  engBar.className = engKb > 307200 ? 'err' : engKb > 204800 ? 'warn' : '';
   document.getElementById('mem-dns').textContent = fmt(dnsKb);
-  document.getElementById('bar-dns').style.width = dnsPct + '%';
+  document.getElementById('bar-dns').style.width = Math.min(100, dnsKb / 3072) + '%';
+  const sysPct = total ? Math.round((total - avail) / total * 100) : 0;
   document.getElementById('mem-sys').textContent = fmt(avail) + ' / ' + fmt(total);
-  document.getElementById('bar-sys').style.width = sysPct + '%';
-  document.getElementById('bar-sys').className = avail < 153600 ? 'err' : avail < 307200 ? 'warn' : '';
+  const sysBar = document.getElementById('bar-sys');
+  sysBar.style.width = sysPct + '%';
+  sysBar.className = avail && avail < 153600 ? 'err' : avail && avail < 307200 ? 'warn' : '';
 }
 async function restartAll() {
   toast('重启中…');
   await sh(`[ -f ${ENG_PID} ] && kill $(cat ${ENG_PID}) 2>/dev/null; [ -f ${DNS_PID} ] && kill $(cat ${DNS_PID}) 2>/dev/null; sleep 2; rm -f ${ENG_PID} ${DNS_PID}; sh ${MODDIR}/service.sh`);
   setTimeout(async () => {
     await refresh();
-    const up = (await engineRunning()).out.trim() === 'up';
-    toast(up ? '✅ 已重启' : '❌ 重启失败，请查看引擎日志', 3200);
+    toast((await engineRunning()).out.trim() === 'up' ? '✅ 已重启' : '❌ 重启失败，请查看引擎日志', 3200);
   }, 3500);
 }
 async function savePort() {
@@ -347,19 +395,34 @@ document.getElementById('btn-restart-all').onclick = restartAll;
 document.getElementById('btn-port').onclick = savePort;
 
 // ═══════════ DNS ═══════════
-let optCandidates = [];
+async function loadCurrentUpstreams() {
+  const box = document.getElementById('cur-upstreams');
+  const conf = (await sh(`cat ${UPSTREAMS} 2>/dev/null`)).out;
+  const lines = conf.split('\n').map(s => s.trim()).filter(l => l && !l.startsWith('#'));
+  if (!lines.length) { box.innerHTML = '<div class="hint">（空）</div>'; return; }
+  box.innerHTML = lines.map(l => {
+    const t = upType(l);
+    const cls = t === 'DoH' || t === 'DoT' ? 'tag acc' : 'tag';
+    return `<div class="list-item"><span class="${cls}">${t}</span><span style="flex:1;word-break:break-all">${esc(l.replace(/^(nameserver|doh|dot)\s/, ''))}</span></div>`;
+  }).join('');
+}
+async function loadUpstreamEditor() {
+  const conf = (await sh(`cat ${UPSTREAMS} 2>/dev/null`)).out;
+  document.getElementById('upstreams').value = conf;
+}
 async function saveUpstreams() {
   const text = document.getElementById('upstreams').value;
   if (/127\.0\.0\.1|::1/.test(text)) { toast('❌ 禁止包含 127.0.0.1 / ::1（自我循环）', 3000); return; }
   if (!text.trim()) { toast('上游不能为空'); return; }
-  const r = await sh(`cat > ${UPSTREAMS}.tmp <<'__EOF__'\n${text}\n__EOF__\nmv ${UPSTREAMS}.tmp ${UPSTREAMS}`);
-  if (r.code !== 0) { toast('❌ 保存失败: ' + esc(r.err || r.out)); return; }
-  toast('✅ 已保存，热重载生效');
+  // 首次修改前留存初始默认（"恢复初始默认"的回滚点）
+  await sh(`[ -f ${UPSTREAMS} ] && [ ! -f ${UPSTREAMS}.initial ] && cp ${UPSTREAMS} ${UPSTREAMS}.initial; cat > ${UPSTREAMS}.tmp <<'__EOF__'\n${text}\n__EOF__\nmv ${UPSTREAMS}.tmp ${UPSTREAMS}`);
+  await reloadDns(true);
+  loadCurrentUpstreams();
 }
-async function reloadDns() {
-  const r = await sh(`[ -f ${DNS_PID} ] && kill -HUP $(cat ${DNS_PID}) && echo reloaded || echo down`);
-  toast(r.out.trim() === 'reloaded' ? '✅ 已热重载' : 'dnsfwd 未运行');
-  if (r.out.trim() === 'reloaded') setTimeout(refresh, 800);
+async function reloadDns(silent) {
+  if ((await dnsRunning()).out.trim() !== 'up') { if (!silent) toast('dnsfwd 未运行'); return; }
+  const r = await sh(`kill -HUP $(cat ${DNS_PID}) && echo reloaded || echo fail`);
+  if (!silent) toast(r.out.trim() === 'reloaded' ? '✅ 已热重载' : '❌ 热重载失败');
 }
 async function probe() {
   const out = document.getElementById('probe-out');
@@ -369,117 +432,129 @@ async function probe() {
   out.textContent = r.out || r.err || '（无输出）';
   document.getElementById('btn-probe').disabled = false;
 }
+async function restoreInit() {
+  const r = await sh(`[ -f ${UPSTREAMS}.initial ] && cp ${UPSTREAMS}.initial ${UPSTREAMS} && echo ok || echo none`);
+  if (r.out.trim() === 'ok') { await reloadDns(true); toast('✅ 已恢复初始默认'); refresh(); }
+  else toast('没有初始默认备份（从未修改过）');
+}
 async function optimize() {
   const btn = document.getElementById('btn-opt');
   btn.disabled = true; btn.textContent = '测速中…';
   const r = await sh(`${MODDIR}/bin/dnsfwd -f ${UPSTREAMS} -P -j 8 2>&1`);
-  btn.disabled = false; btn.textContent = '测速并评分';
+  btn.disabled = false; btn.textContent = '候选池测速';
   const lines = r.out.split('\n').filter(l => l.includes('\t'));
   const rows = [];
   for (const line of lines) {
     const c = line.split('\t');
-    if (!c[0] || /^upstream$/i.test(c[0].trim())) continue;
+    if (!c[0] || /^upstream$/i.test(c[0].trim()) || c.length < 5) continue;
     const upstream = c[0].trim();
     const rtt = parseFloat(c[3]) || 9999;
-    const okRate = (() => { const m = (c[4] || '0/1').split('/'); const a = +m[0] || 0, b = +m[1] || 1; return a / b; })();
-    const fakeip = String(c[7] || '0') === '1';
+    const okm = (c[4] || '0/1').split('/');
+    const okRate = (+okm[0] || 0) / ((+okm[1]) || 1);
+    const fakeip = String(c[7] || '') === '1';
     if (fakeip || okRate < 0.5) continue;
     rows.push({ upstream, rtt, okRate, score: okRate * 100 - rtt / 50 });
   }
   rows.sort((a, b) => b.score - a.score);
-  optCandidates = rows.slice(0, 8);
-  document.getElementById('btn-apply-top5').disabled = rows.length === 0;
   const tbl = document.getElementById('opt-table');
-  if (!rows.length) { tbl.innerHTML = '<div class="hint">没有可用率 ≥50% 的上游，请检查网络或上游列表。</div>'; return; }
-  tbl.innerHTML = '<table><tr><th>#</th><th>上游</th><th>可用率</th><th>RTT</th><th>评分</th></tr>' +
-    optCandidates.map((x, i) => `<tr><td>${i + 1}</td><td>${esc(x.upstream)}</td><td>${Math.round(x.okRate * 100)}%</td><td>${x.rtt.toFixed(0)}ms</td><td><b>${x.score.toFixed(1)}</b></td></tr>`).join('') + '</table>';
-}
-async function applyTop5() {
-  const top = optCandidates.slice(0, 5);
-  if (!top.length) return;
-  const line = u => /^(doh|dot)\s/.test(u) ? u : /^https:\/\//.test(u) ? 'doh ' + u : 'nameserver ' + u;
-  const body = top.map(x => line(x.upstream)).join('\\n');
-  await sh(`[ -f ${UPSTREAMS} ] && cp ${UPSTREAMS} ${UPSTREAMS}.prev; printf '%b\\n' '${body.replace(/'/g, "")}\\n# 优选于 $(date)' > ${UPSTREAMS}`);
-  document.getElementById('btn-rollback').disabled = false;
-  await reloadDns();
-  const up = await sh(`cat ${UPSTREAMS}`);
-  document.getElementById('upstreams').value = up.out;
-  toast('✅ 已应用 Top5 并热重载');
+  if (!rows.length) { tbl.innerHTML = '<div class="hint">❌ 没有可用率 ≥50% 的上游，保持原配置不动。</div>'; return; }
+  const top = rows.slice(0, 5);
+  tbl.innerHTML = '<table><tr><th>#</th><th>上游</th><th>类型</th><th>可用率</th><th>RTT</th><th>评分</th></tr>' +
+    top.map((x, i) => `<tr><td>${i + 1}</td><td>${esc(x.upstream)}</td><td>${upType(x.upstream)}</td><td>${Math.round(x.okRate * 100)}%</td><td>${x.rtt.toFixed(0)}ms</td><td><b>${x.score.toFixed(1)}</b></td></tr>`).join('') + '</table>' +
+    '<div class="hint">✅ 已自动应用：自定义项（最优先）+ 上方 Top5。不满意可「回滚上一版」或「恢复初始默认」。</div>';
+  // 自动应用：用户自定义项（textarea 中非空行）永远在最前，其后接 Top5
+  const custom = document.getElementById('upstreams').value.split('\n')
+    .map(s => normUpstream(s.trim())).filter(l => l && !l.startsWith('#'));
+  const chosen = top.map(x => x.upstream.startsWith('doh ') || x.upstream.startsWith('dot ') || /^[\d.a-fA-F:]+$/.test(x.upstream) ? (x.upstream.startsWith('doh ') || x.upstream.startsWith('dot ') ? x.upstream : 'nameserver ' + x.upstream) : x.upstream);
+  const merged = [...new Set([...custom, ...chosen])].join('\n');
+  await sh(`[ -f ${UPSTREAMS} ] && [ ! -f ${UPSTREAMS}.initial ] && cp ${UPSTREAMS} ${UPSTREAMS}.initial; [ -f ${UPSTREAMS} ] && cp ${UPSTREAMS} ${UPSTREAMS}.prev; cat > ${UPSTREAMS} <<'__EOF__'\n# 优选自动生成（自定义项在前） $(date)\n${merged}\n__EOF__\necho written`);
+  await reloadDns(true);
+  loadCurrentUpstreams();
+  loadUpstreamEditor();
 }
 async function rollback() {
   const r = await sh(`[ -f ${UPSTREAMS}.prev ] && cp ${UPSTREAMS}.prev ${UPSTREAMS} && echo ok || echo none`);
-  if (r.out.trim() === 'ok') { await reloadDns(); toast('✅ 已回滚'); refresh(); }
+  if (r.out.trim() === 'ok') { await reloadDns(true); toast('✅ 已回滚上一版'); refresh(); }
   else toast('没有可回滚的备份');
 }
-function setBindUI(b) {
-  document.getElementById('bind-loopback').className = b === 'loopback' ? 'on' : '';
-  document.getElementById('bind-any').className = b === 'any' ? 'on' : '';
+async function dnsToggle(on) {
+  if (on) {
+    await sh(`rm -f ${DNS_DISABLED}`);
+    await sh(`sh ${MODDIR}/service.sh`);
+    toast('✅ dnsfwd 已开启');
+  } else {
+    await sh(`[ -f ${DNS_PID} ] && kill $(cat ${DNS_PID}) 2>/dev/null; sleep 1; rm -f ${DNS_PID}; printf 'off\\n' > ${DNS_DISABLED}`);
+    toast('⛔ dnsfwd 已关闭（引擎将改用设备已有 DNS 方案）', 3200);
+  }
+  refresh();
 }
-async function setBind(v) {
-  await sh(`printf '%s\\n' '${v}' > ${BIND_FILE}`);
-  setBindUI(v);
-  toast('已写入 ' + v + '，重启 dnsfwd 生效');
-}
-async function restartDns() {
-  await sh(`[ -f ${DNS_PID} ] && kill $(cat ${DNS_PID}) 2>/dev/null; sleep 1; rm -f ${DNS_PID}`);
-  const busy = await sh(`(ss -tuln 2>/dev/null || netstat -tuln 2>/dev/null) | grep -qE '[:.]53[[:space:]]' && echo busy || echo free`);
-  if (busy.out.trim() === 'busy') { toast('⚠️ :53 被其他进程占用，未重启', 3200); refresh(); return; }
-  const r = await sh(`setsid ${MODDIR}/bin/dnsfwd -f ${UPSTREAMS} -b $(cat ${BIND_FILE} 2>/dev/null || echo loopback) >> ${DATA_DIR}/dnsfwd.log 2>&1 & echo $! > ${DNS_PID}; echo started`);
-  if (r.out.includes('started')) { toast('✅ dnsfwd 已重启'); setTimeout(refresh, 800); }
-  else toast('❌ 重启失败', 3200);
-}
+document.getElementById('btn-dns-on').onclick = () => dnsToggle(true);
+document.getElementById('btn-dns-off').onclick = () => dnsToggle(false);
 document.getElementById('btn-save').onclick = saveUpstreams;
-document.getElementById('btn-reload').onclick = reloadDns;
 document.getElementById('btn-probe').onclick = probe;
+document.getElementById('btn-restore-init').onclick = restoreInit;
 document.getElementById('btn-opt').onclick = optimize;
-document.getElementById('btn-apply-top5').onclick = applyTop5;
 document.getElementById('btn-rollback').onclick = rollback;
-document.getElementById('btn-restart-dns').onclick = restartDns;
-document.getElementById('bind-loopback').onclick = () => setBind('loopback');
-document.getElementById('bind-any').onclick = () => setBind('any');
 
 // ═══════════ 一致性检查 ═══════════
-async function fixFactoryKey() {
-  const r = await sqlFile(`INSERT OR IGNORE INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('seed-default-client-key', '${FACTORY_KEY}', 'Default client key (dashboard)', 1, datetime('now'));`);
+async function checkFactoryKey() {
+  const dot = document.getElementById('dot-key');
   const chk = await sqlFile(`SELECT COUNT(*) FROM apiKeys WHERE key='${FACTORY_KEY}';`);
-  const ok = chk.out.trim() === '1';
-  document.getElementById('ck-key').textContent = ok ? '存在 ✅' : '缺失 ❌';
-  toast(ok ? '✅ 出厂 key 已就位' : '❌ 修复失败', 3000);
+  const has = chk.out.trim() === '1';
+  if (!has) await sqlFile(`INSERT OR IGNORE INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('seed-default-client-key', '${FACTORY_KEY}', 'Default client key (dashboard)', 1, datetime('now'));`);
+  const re = await sqlFile(`SELECT COUNT(*) FROM apiKeys WHERE key='${FACTORY_KEY}';`);
+  const ok = re.out.trim() === '1';
+  dot.className = 'dot ' + (ok ? 'ok' : 'err');
+  document.getElementById('ck-key').textContent = ok ? (has ? '存在 ✅' : '已自动补入 ✅') : '缺失 ❌（修复失败）';
 }
+let orphanAliases = [];
 async function scanOrphans() {
   const box = document.getElementById('orphan-list');
+  const btn = document.getElementById('btn-clean-orphans');
+  btn.disabled = true; btn.style.display = 'none';
   box.innerHTML = '<div class="hint">扫描中…</div>';
-  // 有效别名 = 节点前缀/ID ∪ 连接前缀/provider（引擎 prefixMap 的全部来源）
   const q = `SELECT DISTINCT json_extract(data,'$.prefix') FROM providerNodes WHERE json_extract(data,'$.prefix') IS NOT NULL;
 SELECT DISTINCT json_extract(data,'$.providerSpecificData.prefix') FROM providerNodes WHERE json_extract(data,'$.providerSpecificData.prefix') IS NOT NULL;
 SELECT id FROM providerNodes;
 SELECT DISTINCT json_extract(data,'$.prefix') FROM providerConnections WHERE json_extract(data,'$.prefix') IS NOT NULL;
 SELECT DISTINCT json_extract(data,'$.providerSpecificData.prefix') FROM providerConnections WHERE json_extract(data,'$.providerSpecificData.prefix') IS NOT NULL;
-SELECT DISTINCT provider FROM providerConnections;`;
-  const validR = await sqlFile(q);
-  const valid = new Set(validR.out.split('\n').map(s => s.trim()).filter(Boolean));
-  const cm = await sqlFile(`SELECT key FROM kv WHERE scope='customModels';`);
-  const dm = await sqlFile(`SELECT key FROM kv WHERE scope='disabledModels';`);
-  const aliases = new Set();
-  for (const k of cm.out.split('\n').concat(dm.out.split('\n')).map(s => s.trim()).filter(Boolean)) {
-    aliases.add(k.split('|')[0]);
+SELECT DISTINCT provider FROM providerConnections;
+SELECT key FROM kv WHERE scope='customModels';
+SELECT key FROM kv WHERE scope='disabledModels';`;
+  const r = await sqlFile(q);
+  const lines = r.out.split('\n').map(s => s.trim()).filter(Boolean);
+  const valid = new Set(), aliases = new Set();
+  let mode = 0; // 前 6 组=有效别名，后 2 组=kv keys（靠 known format 区分：含 '|' 的是 kv key）
+  for (const l of lines) {
+    if (l.includes('|') && /^(oc\||openai-compatible|ds\||qd\||cd\||or\||cb)/.test(l) === false && l.split('|').length >= 2 && !l.includes(' ')) {
+      // kv key 形如 alias|model|kind —— 但有效别名也可能含 '|'？有效别名不含 '|'（SQL 提取值），kv key 必含 2 个 '|'
+      const parts = l.split('|');
+      if (parts.length >= 3) { aliases.add(parts[0]); continue; }
+    }
+    valid.add(l);
   }
-  const orphans = [...aliases].filter(a => !valid.has(a));
-  if (!orphans.length) {
+  for (const l of lines) {
+    if (!l.includes('|')) continue;
+    const parts = l.split('|');
+    if (parts.length >= 2) aliases.add(parts[0]);
+  }
+  orphanAliases = [...aliases].filter(a => a && !valid.has(a));
+  if (!orphanAliases.length) {
     box.innerHTML = '<div class="hint">✅ 未发现孤儿数据</div>';
     return;
   }
-  box.innerHTML = orphans.map(a =>
-    `<div class="list-item"><span class="tag err">孤儿</span><span style="flex:1;word-break:break-all">${esc(a)}</span></div>`).join('') +
-    `<div class="row" style="margin-top:10px"><button class="danger" id="btn-clean-orphans">一键清理 ${orphans.length} 项</button></div>
-     <div class="hint">将删除这些别名下的 customModels / disabledModels（引擎本来就忽略它们，只造成模型列表噪音）。</div>`;
-  document.getElementById('btn-clean-orphans').onclick = async () => {
-    const stmt = orphans.map(a =>
-      `DELETE FROM kv WHERE scope='customModels' AND key LIKE '${a}|%'; DELETE FROM kv WHERE scope='disabledModels' AND key='${a}';`).join('\n');
-    await sqlFile(stmt);
-    toast('✅ 已清理 ' + orphans.length + ' 项');
-    scanOrphans();
-  };
+  box.innerHTML = orphanAliases.map(a =>
+    `<div class="list-item"><span class="tag err">孤儿</span><span style="flex:1;word-break:break-all">${esc(a)}</span></div>`).join('');
+  btn.disabled = false; btn.style.display = '';
+}
+async function cleanOrphans() {
+  if (!orphanAliases.length) return;
+  const stmt = orphanAliases.map(a =>
+    `DELETE FROM kv WHERE scope='customModels' AND key LIKE '${a}|%'; DELETE FROM kv WHERE scope='disabledModels' AND key='${a}';`).join('\n');
+  await sqlFile(stmt);
+  toast('✅ 已清理 ' + orphanAliases.length + ' 项');
+  orphanAliases = [];
+  scanOrphans();
 }
 async function scanCred() {
   const box = document.getElementById('cred-list');
@@ -487,45 +562,29 @@ async function scanCred() {
   const conns = await sqlFile(`SELECT id || '|' || provider || '|' || authType FROM providerConnections WHERE isActive=1;`);
   const rows = [];
   for (const line of conns.out.split('\n').map(s => s.trim()).filter(Boolean)) {
-    const [id, provider, authType] = line.split('|');
+    const idx1 = line.indexOf('|'), idx2 = line.indexOf('|', idx1 + 1);
+    if (idx1 < 0 || idx2 < 0) continue;
+    const id = line.slice(0, idx1), provider = line.slice(idx1 + 1, idx2), authType = line.slice(idx2 + 1);
     const d = await sqlFile(`SELECT json_extract(data,'$.apiKey'), json_extract(data,'$.accessToken'), json_extract(data,'$.refreshToken') FROM providerConnections WHERE id='${id}';`);
-    const [k, at, rt] = d.out.split('\n')[0].trim().split('|');
-    const hasKey = k && k !== 'null' && k !== '';
-    const hasTok = (at && at !== 'null' && at !== '') || (rt && rt !== 'null' && rt !== '');
+    const parts = d.out.split('\n')[0].trim().split('|');
+    const hasKey = parts[0] && parts[0] !== 'null';
+    const hasTok = (parts[1] && parts[1] !== 'null') || (parts[2] && parts[2] !== 'null');
     const ok = authType === 'oauth' ? hasTok : hasKey;
-    if (!ok) rows.push({ provider, authType, id });
+    if (!ok) rows.push({ provider, authType });
   }
   box.innerHTML = rows.length
     ? rows.map(r => `<div class="list-item"><span class="tag err">${esc(r.authType)}</span><span style="flex:1">${esc(r.provider)}</span></div>`).join('')
     : '<div class="hint">✅ 活跃连接凭据齐全</div>';
 }
-document.getElementById('btn-fix-key').onclick = fixFactoryKey;
 document.getElementById('btn-scan').onclick = scanOrphans;
+document.getElementById('btn-clean-orphans').onclick = cleanOrphans;
 document.getElementById('btn-scan-conn').onclick = scanCred;
 
 // ═══════════ 更新 ═══════════
-let accelChoice = ''; // 当前选中节点（本次会话）
-async function renderAccel() {
+async function renderAccelCur() {
   const sel = (await sh(`cat ${ACCEL_SEL} 2>/dev/null`)).out.trim();
-  accelChoice = sel;
-  const custom = (await sh(`cat ${ACCEL_LIST} 2>/dev/null`)).out.split('\n').map(s => s.trim()).filter(Boolean);
-  const all = [...new Set([...BUILTIN_ACCEL, ...custom])];
-  const box = document.getElementById('accel-list');
-  box.innerHTML = all.map(u => {
-    const on = sel && u === sel;
-    return `<div class="list-item"><span class="tag${on ? '' : ''}" style="${on ? 'color:var(--ok);border-color:var(--ok)' : ''}">${on ? '选中' : '可选'}</span><span style="flex:1;word-break:break-all">${esc(u)}</span><button data-u="${esc(u)}" class="pick">选</button></div>`;
-  }).join('') + (sel ? '' : '<div class="hint">当前：直连 GitHub</div>');
-  box.querySelectorAll('.pick').forEach(b => {
-    b.onclick = async () => {
-      if (accelChoice === b.dataset.u) {
-        await sh(`rm -f ${ACCEL_SEL}`); accelChoice = ''; toast('已清除选中，直连 GitHub');
-      } else {
-        await sh(`printf '%s\\n' '${b.dataset.u}' > ${ACCEL_SEL}`); accelChoice = b.dataset.u;
-        toast('已选中：' + esc(b.dataset.u));
-      }
-      renderAccel();
-    };
-  });
+  document.getElementById('accel-cur').textContent = sel || '直连 GitHub';
+  return sel;
 }
 async function speedTest() {
   const btn = document.getElementById('btn-speed');
@@ -535,7 +594,7 @@ async function speedTest() {
   const target = 'https://raw.githubusercontent.com/luqman-v1/9router-go/main/VERSION';
   const results = [];
   for (const node of all) {
-    const r = await sh(`curl -o /dev/null -s -m 8 -w '%{http_code} %{time_total}' '${node}${target}' 2>/dev/null`);
+    const r = await sh(`curl -o /dev/null -s -m 8 -w '%{http_code} %{time_total}' '${node}${target}'`);
     const m = r.out.trim().match(/^(\d{3}) ([0-9.]+)$/);
     if (m && m[1] === '200') results.push({ node, ms: parseFloat(m[2]) * 1000 });
   }
@@ -544,30 +603,30 @@ async function speedTest() {
   const box = document.getElementById('accel-list');
   box.innerHTML = (top.length ? top.map((x, i) =>
     `<div class="list-item"><span class="tag">${i + 1}</span><span style="flex:1">${esc(x.node)}</span><span class="tag">${x.ms.toFixed(0)} ms</span><button data-u="${esc(x.node)}" class="pick2">选</button></div>`).join('')
-    : '<div class="hint">所有节点都不可达，可尝试直连或添加自定义节点</div>');
+    : '<div class="hint">所有节点都不可达，可直连或添加自定义节点</div>');
   box.querySelectorAll('.pick2').forEach(b => {
     b.onclick = async () => {
-      await sh(`printf '%s\\n' '${b.dataset.u}' > ${ACCEL_SEL}`); accelChoice = b.dataset.u;
-      toast('已选中：' + esc(b.dataset.u)); renderAccel();
+      await sh(`printf '%s\\n' '${b.dataset.u}' > ${ACCEL_SEL}`);
+      toast('已选中：' + esc(b.dataset.u)); renderAccelCur();
     };
   });
   btn.disabled = false; btn.textContent = '本机测速';
 }
 async function addAccel() {
-  const u = prompt('自定义加速节点前缀（以 / 结尾，会把 GitHub URL 拼在后面）：');
+  const u = prompt('自定义加速节点前缀（以 / 结尾，GitHub URL 会拼在后面）：');
   if (!u) return;
   await sh(`printf '%s\\n' '${u.replace(/'/g, '')}' >> ${ACCEL_LIST}`);
-  toast('已添加'); renderAccel();
+  toast('已添加'); renderAccelCur();
 }
 async function clearAccel() {
-  await sh(`rm -f ${ACCEL_SEL}`); accelChoice = '';
-  toast('已清除选中，直连 GitHub'); renderAccel();
+  await sh(`rm -f ${ACCEL_SEL}`);
+  toast('已清除选中，直连 GitHub'); renderAccelCur();
 }
 document.getElementById('btn-speed').onclick = speedTest;
 document.getElementById('btn-accel-add').onclick = addAccel;
 document.getElementById('btn-accel-clear').onclick = clearAccel;
 
-function cmpVer(a, b) { // v1.9.1 vs v1.10.0 数值化比较
+function cmpVer(a, b) {
   const pa = a.replace(/^v/, '').split('.').map(Number), pb = b.replace(/^v/, '').split('.').map(Number);
   for (let i = 0; i < 3; i++) { if ((pb[i] || 0) > (pa[i] || 0)) return 1; if ((pb[i] || 0) < (pa[i] || 0)) return -1; }
   return 0;
@@ -576,10 +635,10 @@ async function engCheck() {
   const out = document.getElementById('eng-out');
   out.style.display = 'block'; out.textContent = '检查中…';
   const p = await accelPrefix();
-  const r = await sh(`curl -s -m 15 '${withAccel(ENGINE_REPO_RAW, p)}' 2>/dev/null`);
+  const r = await sh(`curl -s -m 15 '${withAccel(ENGINE_VERSION_URL, p)}'`);
   let latest = '';
   try { latest = JSON.parse(r.out).latestVersion || ''; } catch {}
-  if (!latest) { out.textContent = '❌ 无法获取上游版本（可尝试先选择加速节点）'; return; }
+  if (!latest) { out.textContent = '❌ 无法获取上游版本（可先测速选择加速节点）'; return; }
   document.getElementById('eng-latest').textContent = latest;
   const cur = modVersion();
   out.textContent = `当前 ${cur} / 上游 ${latest}\n` + (cmpVer(cur, latest) > 0 ? '有更新可用' : '已是最新');
@@ -589,34 +648,35 @@ async function engCheck() {
 async function engUpdate() {
   const ver = window._engLatest; if (!ver) return;
   const out = document.getElementById('eng-out');
-  out.textContent = '下载中（' + (accelChoice ? '加速: ' + accelChoice : '直连') + ')…';
+  out.textContent = '下载中（' + ((await accelPrefix()) || '直连') + ')…';
   const p = await accelPrefix();
   const base = `https://github.com/luqman-v1/9router-go/releases/download/${ver}`;
   const dl = await sh(`curl -sL -m 300 -o /data/local/tmp/9r-eng.new '${withAccel(base + '/9router-go-linux-arm64', p)}' && echo dl-ok`);
   if (!dl.out.includes('dl-ok')) { out.textContent = '❌ 下载失败'; return; }
   out.textContent += '\n校验 SHA256…';
-  const sum = await sh(`curl -sL -m 60 '${withAccel(base + '/SHA256SUMS.txt', p)}' 2>/dev/null | grep '9router-go-linux-arm64'`);
+  const sum = await sh(`curl -sL -m 60 '${withAccel(base + '/SHA256SUMS.txt', p)}' | grep '9router-go-linux-arm64'`);
   const expected = (sum.out.match(/^([0-9a-f]{64})/) || [])[1];
   if (expected) {
-    const actual = (await sh(`sha256sum /data/local/tmp/9r-eng.new | cut -d' ' -f1`)).out.trim();
+    const actual = (await sh(`sha256sum /data/local/tmp/9r-eng.new`)).out.trim().split(' ')[0];
     if (actual !== expected) { out.textContent += `\n❌ SHA256 不匹配（${actual}），已放弃`; return; }
     out.textContent += '✅';
   } else out.textContent += '\n⚠️ 未取到校验和，跳过校验';
   out.textContent += '\n替换二进制并重启…';
-  await sh(`[ -f ${ENG_PID} ] && kill $(cat ${ENG_PID}) 2>/dev/null; sleep 1; rm -f ${ENG_PID}; cp ${MODDIR}/bin/9router-go ${MODDIR}/bin/9router-go.bak && mv /data/local/tmp/9r-eng.new ${MODDIR}/bin/9router-go && chmod 0755 ${MODDIR}/bin/9router-go && echo replaced`);
+  await sh(`[ -f ${ENG_PID} ] && kill $(cat ${ENG_PID}) 2>/dev/null; sleep 1; rm -f ${ENG_PID}; cp ${MODDIR}/bin/9router-go ${MODDIR}/bin/9router-go.bak && mv /data/local/tmp/9r-eng.new ${MODDIR}/bin/9router-go && chmod 0755 ${MODDIR}/bin/9router-go`);
   await sh(`sh ${MODDIR}/service.sh`);
   setTimeout(async () => { await refresh(); toast('✅ 引擎更新完成', 3200); out.textContent += '\n✅ 完成'; }, 3000);
 }
 async function modCheck() {
   const out = document.getElementById('mod-out');
   out.style.display = 'block'; out.textContent = '检查中…';
-  const url = (await sh(`cat ${MOD_UPDATE_URL_FILE} 2>/dev/null || echo ${DEFAULT_MOD_UPDATE_URL}`)).out.trim();
+  const url = window._modUrl || DEFAULT_MOD_UPDATE_URL;
   const p = await accelPrefix();
   const target = url.includes('github.com') || url.includes('raw.githubusercontent.com') ? withAccel(url, p) : url;
-  const r = await sh(`curl -sL -m 20 '${target}' 2>/dev/null`);
+  const r = await sh(`curl -sL -m 20 '${target}'`);
   let j; try { j = JSON.parse(r.out); } catch { out.textContent = '❌ 更新源不可达或格式错误\n' + r.out.slice(0, 200); return; }
   document.getElementById('mod-latest').textContent = (j.version || '?') + ' (code ' + j.versionCode + ')';
-  const curCode = parseInt(((await sh(`grep -E '^versionCode=' ${MODDIR}/module.prop | cut -d= -f2`)).out.trim() || '0'), 10);
+  const mpTxt = (await sh(`cat ${MODDIR}/module.prop`)).out;
+  const curCode = parseInt(parseProp(mpTxt, 'versionCode') || '0', 10);
   out.textContent = `当前 versionCode ${curCode} / 远端 ${j.versionCode}\n` + (j.versionCode > curCode ? '有更新可用' : '已是最新');
   document.getElementById('btn-mod-update').disabled = !(j.versionCode > curCode && j.zipUrl);
   window._modUpdate = j;
@@ -629,17 +689,17 @@ async function modUpdate() {
   out.textContent = '下载模块 zip…';
   const dl = await sh(`curl -sL -m 600 -o /data/local/tmp/mod-update.zip '${dlUrl}' && echo dl-ok`);
   if (!dl.out.includes('dl-ok')) { out.textContent = '❌ 下载失败'; return; }
-  const chk = await sh(`unzip -l /data/local/tmp/mod-update.zip 2>/dev/null | grep -q module.prop && echo ok || echo bad`);
-  if (chk.out.trim() !== 'ok') { out.textContent = '❌ zip 内容异常（缺 module.prop），已放弃'; return; }
+  const chk = await sh(`unzip -l /data/local/tmp/mod-update.zip`);
+  if (!chk.out.includes('module.prop')) { out.textContent = '❌ zip 内容异常（缺 module.prop），已放弃'; return; }
   out.textContent += '\n停进程 → 解压覆盖 → 重启…';
-  await sh(`cp /data/local/tmp/mod-update.zip ${DATA_DIR}/last-module.zip; [ -f ${ENG_PID} ] && kill $(cat ${ENG_PID}) 2>/dev/null; [ -f ${DNS_PID} ] && kill $(cat ${DNS_PID}) 2>/dev/null; sleep 2; rm -f ${ENG_PID} ${DNS_PID}; cd ${MODDIR} && unzip -oq /data/local/tmp/mod-update.zip && chmod 0755 *.sh bin/* 2>/dev/null; rm -f /data/local/tmp/mod-update.zip; sh ${MODDIR}/service.sh`);
+  await sh(`cp /data/local/tmp/mod-update.zip ${DATA_DIR}/last-module.zip; [ -f ${ENG_PID} ] && kill $(cat ${ENG_PID}) 2>/dev/null; [ -f ${DNS_PID} ] && kill $(cat ${DNS_PID}) 2>/dev/null; sleep 2; rm -f ${ENG_PID} ${DNS_PID}; cd ${MODDIR} && unzip -oq /data/local/tmp/mod-update.zip && chmod 0755 *.sh bin/*; rm -f /data/local/tmp/mod-update.zip; sh ${MODDIR}/service.sh`);
   setTimeout(async () => { await refresh(); toast('✅ 模块更新完成', 3200); out.textContent += '\n✅ 完成'; }, 4000);
 }
 async function setModUrl() {
-  const u = prompt('模块更新源 URL（指向 update.json）：', (await sh(`cat ${MOD_UPDATE_URL_FILE} 2>/dev/null || echo ${DEFAULT_MOD_UPDATE_URL}`)).out.trim());
+  const u = prompt('模块更新源 URL（指向 update.json）：', window._modUrl || DEFAULT_MOD_UPDATE_URL);
   if (!u) return;
   await sh(`printf '%s\\n' '${u.replace(/'/g, '')}' > ${MOD_UPDATE_URL_FILE}`);
-  toast('已保存'); refresh();
+  window._modUrl = u; toast('已保存');
 }
 document.getElementById('btn-eng-check').onclick = engCheck;
 document.getElementById('btn-eng-update').onclick = engUpdate;
@@ -648,7 +708,7 @@ document.getElementById('btn-mod-update').onclick = modUpdate;
 document.getElementById('btn-mod-seturl').onclick = setModUrl;
 
 refresh();
-renderAccel();
+renderAccelCur();
 </script>
 </body>
 </html>
