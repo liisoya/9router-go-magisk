@@ -1,0 +1,6 @@
+id=ninerouter-go
+name=9Router Go AI Proxy
+version=v1.9.1-r1
+versionCode=109010
+author=luqman-v1
+description=9Router Go 引擎（上游 v1.9.1 原样，零魔改）+ 内置官方 Dashboard + 本地 DNS 转发器。引擎端口 20130，Dashboard 由引擎直接服务；模块 WebUI 提供 DNS 上游管理与探测。数据目录 /data/adb/9router-go。

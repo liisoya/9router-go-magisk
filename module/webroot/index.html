@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>9Router Go · DNS 管理</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --line: #262b36; --txt: #e6e9ef;
+    --dim: #8b93a3; --acc: #4f8cff; --ok: #3fb96f; --warn: #e0a53a; --err: #e05a5a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--txt); font: 14px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 16px; padding-bottom: 32px; }
+  h1 { font-size: 17px; margin-bottom: 4px; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .card h2 { font-size: 14px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .kv { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
+  .kv b { font-weight: 600; }
+  .kv span { color: var(--dim); }
+  button { background: #222734; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  button:active { opacity: .7; }
+  button.primary { background: var(--acc); border-color: var(--acc); color: #fff; }
+  button.danger { background: transparent; border-color: var(--err); color: var(--err); }
+  button:disabled { opacity: .45; cursor: default; }
+  textarea { width: 100%; min-height: 130px; background: #0d0f14; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 12px/1.5 ui-monospace, monospace; resize: vertical; }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 6px; }
+  pre { background: #0d0f14; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 11px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; margin-top: 8px; display: none; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; background: transparent; }
+  .seg button.on { background: var(--acc); color: #fff; }
+  #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: #222734; border: 1px solid var(--line); color: var(--txt); padding: 8px 16px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; max-width: 90vw; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<h1>DNS 转发器管理</h1>
+<div class="sub">dnsfwd · 独立于引擎 · 上游零魔改</div>
+
+<div class="card">
+  <h2><span class="dot" id="dot-dns"></span>dnsfwd 状态</h2>
+  <div class="kv"><span>进程</span><b id="st-dns">检测中…</b></div>
+  <div class="kv"><span>绑定范围</span><b id="st-bind">-</b></div>
+  <div class="kv"><span>上游数量</span><b id="st-ns">-</b></div>
+  <div class="kv"><span>引擎 /health</span><b id="st-eng">检测中…</b></div>
+  <div class="row" style="margin-top:10px">
+    <button class="primary" id="btn-refresh">刷新状态</button>
+    <button id="btn-reload">热重载上游 (SIGHUP)</button>
+    <button class="danger" id="btn-restart">重启 dnsfwd</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>绑定范围</h2>
+  <div class="row">
+    <div class="seg">
+      <button id="bind-loopback">仅本机 (loopback)</button>
+      <button id="bind-any">开放局域网 (any)</button>
+    </div>
+  </div>
+  <div class="hint">loopback：只有手机自身使用此 DNS（默认，安全）。any：局域网设备可将 DNS 指向本机 IP。修改后需重启 dnsfwd 生效。</div>
+</div>
+
+<div class="card">
+  <h2>上游服务器</h2>
+  <textarea id="upstreams" spellcheck="false"></textarea>
+  <div class="hint">每行一条：nameserver IP 或 DoH/DoT URL。严禁填写 127.0.0.1（会导致转发器自我循环）。保存后可用「热重载」生效。</div>
+  <div class="row" style="margin-top:10px">
+    <button class="primary" id="btn-save">保存</button>
+    <button id="btn-probe">探测全部上游 (-P)</button>
+  </div>
+  <pre id="probe-out"></pre>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+const DATA_DIR = '/data/adb/9router-go';
+const UPSTREAMS = DATA_DIR + '/dns-upstreams.conf';
+const BIND_FILE = DATA_DIR + '/dns-bind';
+const DNS_PID = DATA_DIR + '/dnsfwd.pid';
+const PORT_FILE = DATA_DIR + '/port';
+
+// ── root shell 桥（KernelSU / WebUIX 均提供 ksu.exec；兼容 promise 与 callback 两种形态）──
+async function sh(cmd) {
+  if (typeof ksu === 'undefined' || !ksu.exec) return { code: -1, out: '', err: 'WebUI 桥不可用' };
+  try {                                  // 形态 A：返回 Promise<string>
+    const r = await ksu.exec(cmd);
+    if (typeof r === 'string') return { code: 0, out: r, err: '' };
+    return { code: r.errno ?? 0, out: r.stdout ?? '', err: r.stderr ?? '' };
+  } catch (e) { /* fallthrough */ }
+  return new Promise(resolve => {        // 形态 B：callback（结果回传给全局函数）
+    const cb = '_ksu_cb_' + Math.random().toString(36).slice(2);
+    window[cb] = res => {
+      delete window[cb];
+      if (typeof res === 'string') return resolve({ code: 0, out: res, err: '' });
+      resolve({ code: (res && res.errno) || 0, out: (res && res.stdout) || '', err: (res && res.stderr) || '' });
+    };
+    try { ksu.exec(cmd, '{}', cb); }
+    catch (err) { resolve({ code: -1, out: '', err: String(err) }); }
+  });
+}
+
+function toast(msg, ms) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._tm); t._tm = setTimeout(() => t.classList.remove('show'), ms || 2200);
+}
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// ── 状态 ──
+async function refresh() {
+  const dns = await sh(`if [ -f ${DNS_PID} ] && kill -0 $(cat ${DNS_PID}) 2>/dev/null; then echo running; else echo down; fi`);
+  const running = dns.out.trim() === 'running';
+  document.getElementById('dot-dns').className = 'dot ' + (running ? 'ok' : 'err');
+  document.getElementById('st-dns').textContent = running ? '运行中 (PID ' + (await sh(`cat ${DNS_PID}`)).out.trim() + ')' : '未运行';
+
+  const bind = await sh(`cat ${BIND_FILE} 2>/dev/null || echo loopback`);
+  const b = bind.out.trim() === 'any' ? 'any' : 'loopback';
+  document.getElementById('st-bind').textContent = b;
+  setBindUI(b);
+
+  const ns = await sh(`grep -cE '^(nameserver|https\\?://|tls://)' ${UPSTREAMS} 2>/dev/null || echo 0`);
+  document.getElementById('st-ns').textContent = ns.out.trim();
+
+  const port = (await sh(`cat ${PORT_FILE} 2>/dev/null || echo 20130`)).out.trim() || '20130';
+  const eng = await sh(`curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:${port}/health 2>/dev/null`);
+  const ec = eng.out.trim();
+  const ok = ec === '200';
+  document.getElementById('st-eng').textContent = ok ? '正常 (:' + port + ')' : (ec || '无响应');
+  document.getElementById('st-eng').style.color = ok ? 'var(--ok)' : 'var(--err)';
+
+  const up = await sh(`cat ${UPSTREAMS} 2>/dev/null`);
+  if (up.code === 0 && up.out) document.getElementById('upstreams').value = up.out;
+}
+
+function setBindUI(b) {
+  document.getElementById('bind-loopback').className = b === 'loopback' ? 'on' : '';
+  document.getElementById('bind-any').className = b === 'any' ? 'on' : '';
+}
+
+// ── 动作 ──
+async function saveUpstreams() {
+  const text = document.getElementById('upstreams').value;
+  if (/127\.0\.0\.1|::1|%lo\b/.test(text)) { toast('❌ 禁止包含 127.0.0.1 / ::1（自我循环）', 3000); return; }
+  if (!text.trim()) { toast('上游不能为空'); return; }
+  const r = await sh(`cat > ${UPSTREAMS}.tmp <<'__EOF__'\n${text}\n__EOF__\nmv ${UPSTREAMS}.tmp ${UPSTREAMS}`);
+  if (r.code !== 0) { toast('❌ 保存失败: ' + esc(r.err || r.out)); return; }
+  toast('✅ 已保存，建议热重载或重启 dnsfwd');
+  refresh();
+}
+
+async function reloadDns() {
+  const r = await sh(`if [ -f ${DNS_PID} ]; then kill -HUP $(cat ${DNS_PID}) && echo reloaded; else echo down; fi`);
+  toast(r.out.trim() === 'reloaded' ? '✅ 已发送 SIGHUP 热重载' : 'dnsfwd 未运行');
+  if (r.out.trim() === 'reloaded') setTimeout(refresh, 800);
+}
+
+async function restartDns() {
+  await sh(`[ -f ${DNS_PID} ] && kill $(cat ${DNS_PID}) 2>/dev/null; sleep 1; rm -f ${DNS_PID}`);
+  // :53 占用检查（与 service.sh 同策略，ss 优先）：被其他转发器占用则不重复启动
+  const busy = await sh(`(ss -tuln 2>/dev/null || netstat -tuln 2>/dev/null) | grep -qE '[:.]53[[:space:]]' && echo busy || echo free`);
+  if (busy.out.trim() === 'busy') {
+    toast('⚠️ :53 已被其他进程占用，未重启（引擎仍可用现有转发器解析）', 3200);
+    refresh();
+    return;
+  }
+  toast('已请求重启…');
+  // WebUI 环境拿不到 MODDIR，直接用二进制的固定安装路径重启
+  const r = await sh(`BIN=$(ls /data/adb/modules/*/bin/dnsfwd 2>/dev/null | head -1); [ -n "$BIN" ] && setsid $BIN -f ${UPSTREAMS} -b $(cat ${BIND_FILE} 2>/dev/null || echo loopback) >> ${DATA_DIR}/dnsfwd.log 2>&1 & echo $! > ${DNS_PID}; echo started`);
+  if (r.out.includes('started')) { toast('✅ dnsfwd 已重启'); setTimeout(refresh, 800); }
+  else toast('❌ 重启失败（可尝试重启手机或用管理器操作按钮）', 3200);
+}
+
+async function setBind(v) {
+  await sh(`printf '%s\\n' '${v}' > ${BIND_FILE}`);
+  setBindUI(v);
+  toast('已写入 ' + v + '，点击「重启 dnsfwd」生效');
+}
+
+async function probe() {
+  const out = document.getElementById('probe-out');
+  out.style.display = 'block'; out.textContent = '探测中，约需数秒…';
+  document.getElementById('btn-probe').disabled = true;
+  const r = await sh(`dnsfwd_bin=$(ls /data/adb/modules/*/bin/dnsfwd 2>/dev/null | head -1); $dnsfwd_bin -f ${UPSTREAMS} -P -j 8 2>&1`);
+  out.textContent = r.out || r.err || '（无输出）';
+  document.getElementById('btn-probe').disabled = false;
+}
+
+document.getElementById('btn-refresh').onclick = refresh;
+document.getElementById('btn-save').onclick = saveUpstreams;
+document.getElementById('btn-reload').onclick = reloadDns;
+document.getElementById('btn-restart').onclick = restartDns;
+document.getElementById('btn-probe').onclick = probe;
+document.getElementById('bind-loopback').onclick = () => setBind('loopback');
+document.getElementById('bind-any').onclick = () => setBind('any');
+refresh();
+</script>
+</body>
+</html>
