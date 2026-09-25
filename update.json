@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.1-r1",
-  "versionCode": 109010,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.1-r1/9router-go-1.9.1-r1-magisk.zip",
-  "changelog": "首个发布版本：上游 v1.9.1 引擎（含 codebuddy-cn 提示词清洗修复）+ Magisk/KSU 模块层。内置 Dashboard（管理地址 http://<设备IP>:20130，初始密码 123456）、DNS 转发器管理与优选、一致性检查、引擎/模块在线更新（支持 GitHub 加速节点）。"
+  "version": "v1.9.1-r2",
+  "versionCode": 109011,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.1-r2/9router-go-1.9.1-r2-magisk.zip",
+  "changelog": "引擎修复：Dashboard 导入数据库 400（multipart 解析）、模型测试 401（/api/models/test 改为 admin 会话语义，导入备份不再影响）。模块层：面板首屏提速（形态探测缓存+快照渲染）、服务地址卡片（本机/局域网一键复制）、安装脚本 chmod 兜底补 lib/、dnsfwd 孤儿进程兜底与关闭状态如实告警、第三方 DNS 自动让路（5 秒宽限）、版本显示与更新比对修正、出厂 key 全程无感。"
 }
