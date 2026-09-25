@@ -246,7 +246,10 @@ const BUILTIN_ACCEL = [
 ];
 
 // ── root shell 桥（KernelSU / WebUIX；兼容 promise 与 callback 两种形态）──
-async function sh(cmd) {
+// 关键：全局串行队列。并发 ksu.exec 在部分 KernelSU 版本上输出会交叉/丢失
+// （曾导致版本/资源/DNS 状态随机变"未知"），所有调用排队执行。
+let _shChain = Promise.resolve();
+async function _sh(cmd) {
   if (typeof ksu === 'undefined' || !ksu.exec) return { code: -1, out: '', err: 'WebUI 桥不可用' };
   try {
     const r = await ksu.exec(cmd);
@@ -263,6 +266,11 @@ async function sh(cmd) {
     try { ksu.exec(cmd, '{}', cb); }
     catch (err) { resolve({ code: -1, out: '', err: String(err) }); }
   });
+}
+function sh(cmd) {
+  const p = _shChain.then(() => _sh(cmd), () => _sh(cmd));
+  _shChain = p.catch(() => {});
+  return p;
 }
 function toast(msg, ms) {
   const t = document.getElementById('toast');
@@ -325,6 +333,7 @@ async function refresh() {
     dnsTxt = busy ? '已让路（:53 被其他转发器占用）' : '未运行';
   }
   document.getElementById('st-dns').textContent = dnsTxt;
+  document.getElementById('dnsw-state').textContent = dnsTxt; // 转发器开关卡片同步
   document.getElementById('st-eng').textContent = engUp ? '运行中 (PID ' + (await sh(`cat ${ENG_PID}`)).out.trim() + ')' : '未运行';
   document.getElementById('st-eng').style.color = engUp ? 'var(--ok)' : 'var(--err)';
   const port = await readPort();
@@ -447,17 +456,19 @@ async function optimize() {
   btn.disabled = true; btn.textContent = '测速中…';
   const r = await sh(`${MODDIR}/bin/dnsfwd -f ${UPSTREAMS} -P -j 8 2>&1`);
   btn.disabled = false; btn.textContent = '候选池测速';
-  const lines = r.out.split('\n').filter(l => l.includes('\t'));
+  // 实测输出为空格对齐（无 tab）：
+  //   223.5.5.5                v4  www.baidu.com   28ms  2/2  答案...
+  //   doh https://x/dns-query  doh www.baidu.com  455ms  2/2  答案...
+  // upstream 本身可能含空格（doh/dot 前缀），从行尾锚定解析
+  const re = /^(.+?)\s+(v4|v6|doh|dot)\s+(\S+)\s+([\d.]+)ms\s+(\d+)\/(\d+)\s*(.*)$/;
   const rows = [];
-  for (const line of lines) {
-    const c = line.split('\t');
-    if (!c[0] || /^upstream$/i.test(c[0].trim()) || c.length < 5) continue;
-    const upstream = c[0].trim();
-    const rtt = parseFloat(c[3]) || 9999;
-    const okm = (c[4] || '0/1').split('/');
-    const okRate = (+okm[0] || 0) / ((+okm[1]) || 1);
-    const fakeip = String(c[7] || '') === '1';
-    if (fakeip || okRate < 0.5) continue;
+  for (const line of r.out.split('\n')) {
+    const m = line.trim().match(re);
+    if (!m) continue;
+    const upstream = m[1].trim();
+    const rtt = parseFloat(m[4]) || 9999;
+    const okRate = (+m[5] || 0) / ((+m[6]) || 1);
+    if (okRate < 0.5) continue;
     rows.push({ upstream, rtt, okRate, score: okRate * 100 - rtt / 50 });
   }
   rows.sort((a, b) => b.score - a.score);
@@ -567,10 +578,12 @@ SELECT key FROM kv WHERE scope='disabledModels';`;
 }
 async function cleanOrphans() {
   if (!orphanAliases.length) return;
-  const stmt = orphanAliases.map(a =>
-    `DELETE FROM kv WHERE scope='customModels' AND key LIKE '${a}|%'; DELETE FROM kv WHERE scope='disabledModels' AND key='${a}';`).join('\n');
-  await sqlFile(stmt);
-  toast('✅ 已清理 ' + orphanAliases.length + ' 项');
+  const n = orphanAliases.length;
+  // 单语句 OR 链式删除：一次点击全清（不逐条）
+  const like = orphanAliases.map(a => `key LIKE '${a}|%'`).join(' OR ');
+  const eq = orphanAliases.map(a => `key='${a}'`).join(' OR ');
+  await sqlFile(`DELETE FROM kv WHERE scope='customModels' AND (${like}); DELETE FROM kv WHERE scope='disabledModels' AND (${eq});`);
+  toast(`✅ 已一次性清理 ${n} 项`);
   orphanAliases = [];
   scanOrphans();
 }
