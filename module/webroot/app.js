@@ -324,11 +324,15 @@ SELECT key FROM kv WHERE scope='disabledModels';`);
 async function cleanOrphans() {
   if (!orphanAliases.length) return;
   const n = orphanAliases.length;
-  // 单语句 OR 链式删除：一次点击全清（不逐条）
+  // 删除前快照：把将被删除的行以 INSERT 语句形式存档，任何误删都可精确回滚
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const like = orphanAliases.map(a => `key LIKE '${a}|%'`).join(' OR ');
   const eq = orphanAliases.map(a => `key='${a}'`).join(' OR ');
+  const snap = await KB.sh(`mkdir -p ${CFG.DATA_DIR}/backups; ${CFG.MODDIR}/bin/sqlite3 ${CFG.DATA_DIR}/db/data.sqlite ".mode insert kv" "SELECT * FROM kv WHERE scope IN ('customModels','disabledModels') AND (${like.replace(/'/g, "''")} OR ${eq.replace(/'/g, "''")});" > ${CFG.DATA_DIR}/backups/kv-before-orphan-clean-${ts}.sql`);
+  if (snap.err) { toast('⚠️ 快照失败，已中止删除（安全优先）', 3200); return; }
+  // 单语句 OR 链式删除：一次点击全清（不逐条）
   await KB.sqlFile(`DELETE FROM kv WHERE scope='customModels' AND (${like}); DELETE FROM kv WHERE scope='disabledModels' AND (${eq});`);
-  toast(`✅ 已一次性清理 ${n} 项`);
+  toast(`✅ 已一次性清理 ${n} 项（删除前快照已存 $DATA_DIR/backups/）`, 3600);
   orphanAliases = [];
   scanOrphans();
 }
