@@ -102,12 +102,16 @@ async function resources(st) {
   sysBar.className = mi.avail && mi.avail < 153600 ? 'err' : mi.avail && mi.avail < 307200 ? 'warn' : '';
 }
 async function restartAll() {
-  toast('重启中…');
+  toast('重启中…（引擎最多等网络就绪 15 秒）');
   await KB.sh(`[ -f ${ENG_PID} ] && kill $(cat ${ENG_PID}) 2>/dev/null; [ -f ${DNS_PID} ] && kill $(cat ${DNS_PID}) 2>/dev/null; sleep 2; rm -f ${ENG_PID} ${DNS_PID}; sh ${CFG.MODDIR}/service.sh`);
-  setTimeout(async () => {
-    await refresh();
-    toast((KP.parseOpsStatus((await KB.ops('status')).out).engine === 'up') ? '✅ 已重启' : '❌ 重启失败，请查看引擎日志', 3200);
-  }, 3500);
+  // 引擎启动含网络就绪等待（最长 15s）：轮询 20s 再判结果，避免误报"重启失败"
+  let up = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    if (KP.parseOpsStatus((await KB.ops('status')).out).engine === 'up') { up = true; break; }
+  }
+  await refresh();
+  toast(up ? '✅ 已重启' : '❌ 20 秒内引擎未拉起，请查看引擎日志', 4000);
 }
 async function savePort() {
   const p = document.getElementById('in-port').value.trim();

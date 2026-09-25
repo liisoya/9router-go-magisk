@@ -51,11 +51,21 @@
     return { code: 0, out: String(r == null ? '' : r), err: '' };
   }
 
-  // 串行执行：所有调用排队，杜绝并发串扰
+  // 串行执行：所有调用排队，杜绝并发串扰。
+  // 空响应（out 与 err 均空且 code=0）在 KSU 上偶发（调用被丢弃），自动重试一次。
   function sh(cmd) {
-    const p = _chain.then(() => rawExec(cmd), () => rawExec(cmd));
+    const run = () => rawExec(cmd).then(r => ({
+      code: r.code, out: String(r.out || '').replace(/\r/g, ''), err: String(r.err || '')
+    }));
+    const attempt = () => run().then(r => {
+      if ((r.out === '' && r.err === '' && r.code === 0) && !/sleep|rm -f/.test(cmd)) {
+        return run(); // 疑似丢包，重试一次（对写文件类命令也安全：多为幂等读）
+      }
+      return r;
+    });
+    const p = _chain.then(attempt, attempt);
     _chain = p.then(() => {}, () => {});
-    return p.then(r => ({ code: r.code, out: String(r.out || '').replace(/\r/g, ''), err: String(r.err || '') }));
+    return p;
   }
 
   // SQL 经 $DATA_DIR/cc.sql 临时文件执行（Android 无 /tmp）
