@@ -71,14 +71,20 @@ if [ -x "$SQLITE3" ] && [ -s "$DB_FILE" ]; then
   "$SQLITE3" "$DB_FILE" "$_AUTOUPD_SQL" 2>>"$LOG"
 fi
 
-# --- Dashboard 出厂客户端 key ---
+# --- Dashboard 出厂客户端 key（仅 apiKeys 表为空时补入）---
 # 前端 getAuthHeaders() 在浏览器无 localStorage['9router_key'] 时回退到出厂 key
 # sk-8b71f86e...（web/src/api/client.ts 硬编码）。该 key 由 Node 版官方 DB 模板
 # 出厂自带；Go 版无 seed，全新安装缺它 → 所有走 RequireApiKey 的 dashboard
-# 调用（模型测试、SSE 控制台等）报 "Invalid API key"。INSERT OR IGNORE 幂等，
-# 不覆盖用户自己的 key。不想要它可在 Dashboard 的 API Keys 页删除。
+# 调用（模型测试、SSE 控制台等）报 "Invalid API key"。
+# 只在表为空（全新安装）时补入：用户在 Dashboard 删除该 key 后不会被加回
+# （表非空但 key 缺失 = 用户有意删除，尊重之；备份导入清空表的场景由
+# 模块 WebUI 一致性页提供手动补入按钮）。
 if [ -x "$SQLITE3" ] && [ -s "$DB_FILE" ]; then
-  "$SQLITE3" "$DB_FILE" "INSERT OR IGNORE INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('seed-default-client-key', 'sk-8b71f86e0a1f2fb5-nhz496-cfa1c800', 'Default client key (dashboard)', 1, datetime('now'));" 2>>"$LOG"
+  _keycount="$("$SQLITE3" "$DB_FILE" "SELECT COUNT(*) FROM apiKeys;" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$_keycount" = "0" ]; then
+    "$SQLITE3" "$DB_FILE" "INSERT OR IGNORE INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('seed-default-client-key', 'sk-8b71f86e0a1f2fb5-nhz496-cfa1c800', 'Default client key (dashboard)', 1, datetime('now'));" 2>>"$LOG"
+    echo "[$(date)] seeded factory client key (empty apiKeys table)" >>"$LOG"
+  fi
 fi
 
 # --- 承载性 2/2：CA 目录 ---

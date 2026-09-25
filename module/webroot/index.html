@@ -145,9 +145,10 @@
 <!-- ═══════════════ 一致性检查 ═══════════════ -->
 <div class="page" id="p-consistency">
   <div class="card">
-    <h2><span class="dot" id="dot-key"></span>仪表出厂 key <span class="tag">自动维护</span></h2>
+    <h2><span class="dot" id="dot-key"></span>仪表出厂 key</h2>
     <div class="kv"><span>sk-8b71f86e…（Dashboard 复制/测试按钮依赖）</span><b id="ck-key">-</b></div>
-    <div class="hint">每次打开本页自动检查并补入（幂等），无需手动操作。Dashboard 导入备份会清空 apiKeys 表，此修复保证模型测试不再报 Invalid API key。</div>
+    <button id="btn-fix-key" class="primary" style="margin-top:8px;display:none">补入出厂 key</button>
+    <div class="hint">仅在 apiKeys 表为空（全新安装）时自动补入；你在 Dashboard 删除它之后不会自动加回。若备份导入清空了整张表导致模型测试报 Invalid API key，点上面按钮补入即可。</div>
   </div>
 
   <div class="card">
@@ -503,14 +504,33 @@ document.getElementById('btn-rollback').onclick = rollback;
 // ═══════════ 一致性检查 ═══════════
 async function checkFactoryKey() {
   const dot = document.getElementById('dot-key');
-  const chk = await sqlFile(`SELECT COUNT(*) FROM apiKeys WHERE key='${FACTORY_KEY}';`);
-  const has = chk.out.trim() === '1';
-  if (!has) await sqlFile(`INSERT OR IGNORE INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('seed-default-client-key', '${FACTORY_KEY}', 'Default client key (dashboard)', 1, datetime('now'));`);
-  const re = await sqlFile(`SELECT COUNT(*) FROM apiKeys WHERE key='${FACTORY_KEY}';`);
-  const ok = re.out.trim() === '1';
-  dot.className = 'dot ' + (ok ? 'ok' : 'err');
-  document.getElementById('ck-key').textContent = ok ? (has ? '存在 ✅' : '已自动补入 ✅') : '缺失 ❌（修复失败）';
+  const btn = document.getElementById('btn-fix-key');
+  const total = (await sqlFile(`SELECT COUNT(*) FROM apiKeys;`)).out.trim();
+  const has = (await sqlFile(`SELECT COUNT(*) FROM apiKeys WHERE key='${FACTORY_KEY}';`)).out.trim() === '1';
+  if (has) {
+    dot.className = 'dot ok';
+    document.getElementById('ck-key').textContent = '存在 ✅';
+    btn.style.display = 'none';
+    return;
+  }
+  if (total === '0') {
+    // 表为空（全新安装）：自动补入，保证开箱即用
+    await sqlFile(`INSERT OR IGNORE INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('seed-default-client-key', '${FACTORY_KEY}', 'Default client key (dashboard)', 1, datetime('now'));`);
+    dot.className = 'dot ok';
+    document.getElementById('ck-key').textContent = '已自动补入 ✅';
+    btn.style.display = 'none';
+    return;
+  }
+  // 表非空但 key 缺失：多半是你在 Dashboard 有意删除 —— 不自动加回
+  dot.className = 'dot warn';
+  document.getElementById('ck-key').textContent = '已删除（不再自动补入）';
+  btn.style.display = '';
 }
+document.getElementById('btn-fix-key').onclick = async () => {
+  await sqlFile(`INSERT OR IGNORE INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('seed-default-client-key', '${FACTORY_KEY}', 'Default client key (dashboard)', 1, datetime('now'));`);
+  toast('✅ 已补入');
+  checkFactoryKey();
+};
 let orphanAliases = [];
 // 只认这种形状为"可清理孤儿"：已删除节点的 openai-compatible-chat-<uuid> 残留。
 // 内置供应商别名（oc/ds/qd/cd/or/cbai…）来自引擎内置注册表，DB 里查不到是正常的 ——
