@@ -122,7 +122,12 @@
   <div class="card">
     <h2>上游配置 <span class="tag acc">自定义最优先</span></h2>
     <textarea id="upstreams" spellcheck="false"></textarea>
-    <div class="hint">每行一条：nameserver IP / doh URL / dot host。严禁 127.0.0.1 / ::1。自定义项永远排在优选结果之前；保存后热重载。</div>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="in-add" style="flex:1" placeholder="自定义 DNS：如 114.114.114.114 或 doh https://doh.pub/dns-query">
+      <button id="btn-add-upstream">添加</button>
+    </div>
+    <div id="cand-chips" style="margin-top:6px"></div>
+    <div class="hint">每行一条：nameserver IP / doh URL / dot host。严禁 127.0.0.1 / ::1。自定义项永远排在优选结果之前；保存后热重载。点候选池标签可一键加入。</div>
     <div class="row" style="margin-top:10px">
       <button class="primary" id="btn-save">保存并热重载</button>
       <button id="btn-probe">逐个探测</button>
@@ -423,6 +428,7 @@ async function loadCurrentUpstreams() {
 async function loadUpstreamEditor() {
   const conf = (await sh(`cat ${UPSTREAMS} 2>/dev/null`)).out;
   document.getElementById('upstreams').value = conf;
+  renderCandChips();
 }
 async function saveUpstreams() {
   const text = document.getElementById('upstreams').value;
@@ -454,7 +460,16 @@ async function restoreInit() {
 async function optimize() {
   const btn = document.getElementById('btn-opt');
   btn.disabled = true; btn.textContent = '测速中…';
-  const r = await sh(`${MODDIR}/bin/dnsfwd -f ${UPSTREAMS} -P -j 8 2>&1`);
+  // 候选池 = 用户自定义项（textarea，最优先）∪ 内置候选清单 ∪ 当前配置项
+  const custom = document.getElementById('upstreams').value.split('\n')
+    .map(s => normUpstream(s.trim())).filter(l => l && !l.startsWith('#'));
+  const cur = (await sh(`cat ${UPSTREAMS} 2>/dev/null`)).out.split('\n')
+    .map(s => normUpstream(s.trim())).filter(l => l && !l.startsWith('#'));
+  const cands = [...new Set([...custom, ...DNS_CANDIDATES.map(c => normUpstream(c.v)), ...cur])];
+  const cf = DATA_DIR + '/dns-candidates.tmp';
+  await sh(`cat > ${cf} <<'__EOF__'\n${cands.join('\n')}\n__EOF__`);
+  const r = await sh(`${MODDIR}/bin/dnsfwd -f ${cf} -P -j 8 2>&1`);
+  await sh(`rm -f ${cf}`);
   btn.disabled = false; btn.textContent = '候选池测速';
   // 实测输出为空格对齐（无 tab）：
   //   223.5.5.5                v4  www.baidu.com   28ms  2/2  答案...
@@ -478,10 +493,8 @@ async function optimize() {
   tbl.innerHTML = '<table><tr><th>#</th><th>上游</th><th>类型</th><th>可用率</th><th>RTT</th><th>评分</th></tr>' +
     top.map((x, i) => `<tr><td>${i + 1}</td><td>${esc(x.upstream)}</td><td>${upType(x.upstream)}</td><td>${Math.round(x.okRate * 100)}%</td><td>${x.rtt.toFixed(0)}ms</td><td><b>${x.score.toFixed(1)}</b></td></tr>`).join('') + '</table>' +
     '<div class="hint">✅ 已自动应用：自定义项（最优先）+ 上方 Top5。不满意可「回滚上一版」或「恢复初始默认」。</div>';
-  // 自动应用：用户自定义项（textarea 中非空行）永远在最前，其后接 Top5
-  const custom = document.getElementById('upstreams').value.split('\n')
-    .map(s => normUpstream(s.trim())).filter(l => l && !l.startsWith('#'));
-  const chosen = top.map(x => x.upstream.startsWith('doh ') || x.upstream.startsWith('dot ') || /^[\d.a-fA-F:]+$/.test(x.upstream) ? (x.upstream.startsWith('doh ') || x.upstream.startsWith('dot ') ? x.upstream : 'nameserver ' + x.upstream) : x.upstream);
+  // 自动应用：用户自定义项（最优先，已在 custom 中）+ Top5
+  const chosen = top.map(x => normUpstream(x.upstream));
   const merged = [...new Set([...custom, ...chosen])].join('\n');
   await sh(`[ -f ${UPSTREAMS} ] && [ ! -f ${UPSTREAMS}.initial ] && cp ${UPSTREAMS} ${UPSTREAMS}.initial; [ -f ${UPSTREAMS} ] && cp ${UPSTREAMS} ${UPSTREAMS}.prev; cat > ${UPSTREAMS} <<'__EOF__'\n# 优选自动生成（自定义项在前） $(date)\n${merged}\n__EOF__\necho written`);
   await reloadDns(true);
@@ -504,6 +517,37 @@ async function dnsToggle(on) {
   }
   refresh();
 }
+function renderCandChips() {
+  const box = document.getElementById('cand-chips');
+  const cur = document.getElementById('upstreams').value;
+  box.innerHTML = DNS_CANDIDATES.map(c => {
+    const added = cur.includes(normUpstream(c.v).replace(/^nameserver\s/, '')) || cur.includes(c.v);
+    return `<span class="chip${added ? ' added' : ''}" data-v="${esc(c.v)}">${added ? '✓' : '+'} ${esc(c.note)}</span>`;
+  }).join('');
+  box.querySelectorAll('.chip').forEach(ch => {
+    ch.onclick = () => {
+      const v = ch.dataset.v;
+      const ta = document.getElementById('upstreams');
+      if (ta.value.includes(v.replace(/^nameserver\s/, ''))) { toast('已在配置中'); return; }
+      ta.value = (ta.value.trim() ? ta.value.trim() + '\n' : '') + v;
+      renderCandChips();
+      toast('已加入配置，记得「保存并热重载」');
+    };
+  });
+}
+async function addUpstream() {
+  const inp = document.getElementById('in-add');
+  const v = normUpstream(inp.value.trim());
+  if (!v) { toast('请输入 DNS 地址'); return; }
+  if (/127\.0\.0\.1|::1/.test(v)) { toast('❌ 禁止 127.0.0.1 / ::1'); return; }
+  const ta = document.getElementById('upstreams');
+  if (ta.value.includes(v.replace(/^nameserver\s/, ''))) { toast('已存在'); return; }
+  ta.value = (ta.value.trim() ? ta.value.trim() + '\n' : '') + v;
+  inp.value = '';
+  renderCandChips();
+  toast('已加入配置，记得「保存并热重载」');
+}
+document.getElementById('btn-add-upstream').onclick = addUpstream;
 document.getElementById('btn-dns-on').onclick = () => dnsToggle(true);
 document.getElementById('btn-dns-off').onclick = () => dnsToggle(false);
 document.getElementById('btn-save').onclick = saveUpstreams;
