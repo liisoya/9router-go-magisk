@@ -1,11 +1,15 @@
 #!/bin/bash
 # 9router-go-magisk · 模块构建脚本
-# 产物：dist/9router-go-<version>-arm64.zip（可直接在 KernelSU / Magisk 刷入）
+# 产物：dist/<模块id>-<版本>-arm64.zip（可直接在 KernelSU / Magisk 刷入）
 #
-# 步骤：
-#   1) 构建 web 前端（Svelte/Vite）→ web/dist
-#   2) 交叉编译引擎 linux/arm64（CGO_ENABLED=0 静态，嵌入 web/dist）
-#   3) 打包 module/ 为 Magisk 模块 zip
+# 流程（每步有校验，失败即停）：
+#   1) web 前端构建（Svelte/Vite → web/dist）
+#   2) clipboard polyfill 注入（构建时补丁，CLIPBOARD_PATCH=0 关闭）
+#   3) 解析层离线回归（node --test，SKIP_TESTS=1 跳过）
+#   4) schema 漂移断言（对照上游 DATABASE.md，SKIP_SCHEMA_CHECK=1 跳过——不建议）
+#   5) 引擎交叉编译 linux/arm64（CGO_ENABLED=0，嵌入 web/dist）
+#   6) MODID 注入（webroot 的 __MOD_ID__ 占位符按 module.prop id 替换，staging 中进行）
+#   7) 打包 + verify_zip（完整性 / module.prop / 版本一致性 / 占位符残留断言）
 #
 # dnsfwd 不在此构建（arm64 C 交叉编译需 sysroot），使用 module/bin/dnsfwd 预编译产物；
 # 需要重编时见 tools/build-dnsfwd.sh。
@@ -15,9 +19,17 @@ cd "$(dirname "$0")"
 VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 OUT_DIR="dist"
 MOD_ID="$(grep '^id=' module/module.prop | cut -d= -f2)"
+MOD_VERSION="$(grep '^version=' module/module.prop | cut -d= -f2)"
 ZIP_NAME="${MOD_ID}-${VERSION}-arm64.zip"
+STAGING="$(mktemp -d)"
 
-echo "== 1/3 web 前端 =="
+cleanup() { rm -rf "$STAGING"; }
+trap cleanup EXIT
+
+step() { echo "== $* =="; }
+die() { echo "❌ $*" >&2; exit 1; }
+
+step "1/7 web 前端"
 if [ ! -f web/dist/index.html ] || [ "${FORCE:-0}" = "1" ]; then
   if command -v bun >/dev/null 2>&1; then
     (cd web && bun install --frozen-lockfile && bun run build)
@@ -28,41 +40,77 @@ if [ ! -f web/dist/index.html ] || [ "${FORCE:-0}" = "1" ]; then
 else
   echo "web/dist 已存在，跳过（FORCE=1 强制重建）"
 fi
+[ -f web/dist/index.html ] || die "web/dist/index.html 不存在（前端构建失败？）"
 
-# clipboard polyfill：HTTP 非 secure context 下 Dashboard 复制按钮失效的
-# 构建时补丁（不改上游源码，见 tools/patch-clipboard.py；CLIPBOARD_PATCH=0 关闭）
-if [ "${CLIPBOARD_PATCH:-1}" = "1" ] && [ -f web/dist/index.html ]; then
+step "2/7 clipboard polyfill 注入"
+if [ "${CLIPBOARD_PATCH:-1}" = "1" ]; then
   python3 tools/patch-clipboard.py web/dist/index.html
+  grep -q "9router-go-magisk clipboard polyfill" web/dist/index.html \
+    || die "polyfill 注入后未找到标记（patch-clipboard.py 行为异常）"
+else
+  echo "CLIPBOARD_PATCH=0，跳过注入"
 fi
 
-echo "== 2/3 引擎交叉编译 (linux/arm64) =="
+step "3/7 解析层离线回归"
+if [ "${SKIP_TESTS:-0}" = "1" ]; then
+  echo "SKIP_TESTS=1，跳过"
+elif command -v node >/dev/null 2>&1; then
+  node --test module/webroot/test/parsers.test.js
+else
+  echo "node 不可用，跳过"
+fi
+
+step "4/7 schema 漂移断言"
+if [ "${SKIP_SCHEMA_CHECK:-0}" = "1" ]; then
+  echo "SKIP_SCHEMA_CHECK=1，跳过（不建议）"
+else
+  python3 tools/gen-schema.py --check
+fi
+
+step "5/7 引擎交叉编译 (linux/arm64)"
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
   -ldflags "-s -w -X '9router/proxy/internal/updater.CurrentVersion=${VERSION}'" \
   -o module/bin/9router-go ./cmd/9router-go/
 chmod 0755 module/bin/9router-go
 
-echo "== 3/3 打包模块 zip =="
+step "6/7 staging + MODID 注入"
+mkdir -p "$STAGING"
+cp -r module "$STAGING/module"
+for f in "$STAGING"/module/webroot/index.html "$STAGING"/module/webroot/app.js; do
+  [ -f "$f" ] && sed -i "s/__MOD_ID__/${MOD_ID}/g" "$f"
+done
+if grep -rq "__MOD_ID__" "$STAGING/module/webroot"; then
+  die "webroot 仍有未注入的 __MOD_ID__ 占位符"
+fi
+find "$STAGING/module" -name '*.sh' -exec chmod 0755 {} +
+find "$STAGING/module/bin" -type f -exec chmod 0755 {} +
+
+step "7/7 打包 + 校验"
 mkdir -p "$OUT_DIR"
 rm -f "${OUT_DIR}/${ZIP_NAME}"
-if command -v zip >/dev/null 2>&1; then
-  (cd module && zip -r9 "../${OUT_DIR}/${ZIP_NAME}" \
-    module.prop customize.sh service.sh action.sh uninstall.sh webroot etc bin \
-    -x 'bin/*.o' > /dev/null)
-else
-  echo "未安装 zip，改用 python 打包"
-  (cd module && python3 - "$OUT_DIR/$ZIP_NAME" <<'PY'
-import sys, zipfile, os
-out = sys.argv[1]
-with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-    for root, dirs, files in os.walk('.'):
-        for f in files:
-            p = os.path.join(root, f)
-            if f.endswith('.o'): continue
-            z.write(p, os.path.relpath(p, '.'))
-print('packed', out)
-PY
-)
-fi
+(cd "$STAGING/module" && zip -r9 "${OLDPWD}/${OUT_DIR}/${ZIP_NAME}" \
+  module.prop customize.sh service.sh action.sh uninstall.sh lib webroot etc bin \
+  -x 'bin/*.o' > /dev/null)
+
+verify_zip() {
+  local zip_path="$1"
+  local ex="$STAGING/verify"
+  mkdir -p "$ex"
+  unzip -t "$zip_path" > /dev/null || die "zip 完整性校验失败"
+  unzip -q -o "$zip_path" -d "$ex" || die "zip 解压失败"
+  [ -f "$ex/module.prop" ] || die "zip 缺 module.prop"
+  [ -f "$ex/lib/ops.sh" ] || die "zip 缺 lib/ops.sh"
+  [ -f "$ex/webroot/index.html" ] || die "zip 缺 webroot/index.html"
+  grep -q "^version=${MOD_VERSION}$" "$ex/module.prop" \
+    || die "module.prop 版本与预期不符（期望 ${MOD_VERSION}）"
+  grep -rq "__MOD_ID__" "$ex/webroot" && die "webroot 有未注入的 __MOD_ID__ 占位符"
+  if [ "${CLIPBOARD_PATCH:-1}" = "1" ]; then
+    grep -q "clipboard polyfill" "$ex/bin/9router-go" \
+      || die "引擎二进制未包含 polyfill 注入标记（web/dist 可能是旧的，用 FORCE=1 重建）"
+  fi
+  echo "verify_zip ✅"
+}
+verify_zip "${OUT_DIR}/${ZIP_NAME}"
 
 ls -lh "${OUT_DIR}/${ZIP_NAME}"
 echo "完成：${OUT_DIR}/${ZIP_NAME}"

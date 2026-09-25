@@ -8,18 +8,34 @@
 9router-go-magisk/
 ├── cmd/ internal/ web/ ...   # 上游 v1.9.1 引擎源码（原样，零魔改）
 ├── module/                   # Magisk/KernelSU 模块层
-│   ├── module.prop           # id=ninerouter-go
+│   ├── module.prop           # id=ninerouter-go + updateJson
 │   ├── customize.sh          # 安装期：ABI 检查 + chmod 兜底
-│   ├── service.sh            # 开机：dnsfwd + 引擎拉起
-│   ├── action.sh             # 管理器「操作」按钮：状态显示
+│   ├── service.sh            # 开机：schema 引导 + ops.sh(start-dns/seed-key) + 引擎拉起
+│   ├── lib/ops.sh            # 运维唯一实现（seam）：status/start-dns/stop-dns/seed-key/get-port
+│   ├── action.sh             # 管理器「操作」按钮：状态显示（数据来自 ops.sh）
 │   ├── uninstall.sh          # 卸载：停进程（保留数据）
 │   ├── bin/                  # 9router-go（构建产物）、dnsfwd、sqlite3
-│   └── webroot/index.html    # 模块 WebUI（KSU/WebUIX）：概览/DNS/一致性检查/更新
-├── tools/dnsfwd.c            # DNS 转发器源码（含构建脚本）
-├── build.sh                  # 一键构建模块 zip
+│   ├── etc/schema.sql        # 数据库 schema 引导（上游 DATABASE.md 派生，构建期断言防漂移）
+│   └── webroot/              # 模块 WebUI（KSU/WebUIX）：概览/DNS/一致性检查/更新
+│       ├── index.html        # HTML 结构（MODDIR 由构建期注入 __MOD_ID__）
+│       ├── parsers.js        # 纯函数解析层（可离线 node --test 回归）
+│       ├── bridge.js         # root-shell 桥（串行队列 / CRLF / sqlFile 环境补偿）
+│       ├── app.js            # UI 装配与事件
+│       └── test/             # 解析层 fixture 回归测试
+├── tools/                    # dnsfwd.c、patch-clipboard.py、gen-schema.py、patches/
+├── build.sh                  # 一键构建（7 步全校验管线）
 ├── CONTEXT.md                # 术语表
 └── docs/adr/                 # 架构决策记录
 ```
+
+## 离线测试
+
+```bash
+node --test module/webroot/test/parsers.test.js   # 解析层 fixture 回归（真机实测输出）
+```
+
+解析层（parsers.js）在浏览器与 node 双端加载：环境差异 bug（CRLF / 输出格式 /
+解析规则）可离线红绿回归，不再依赖刷真机验证。
 
 ## 构建
 
