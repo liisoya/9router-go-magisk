@@ -40,6 +40,14 @@ test('parseOpsStatus 覆盖 dns=yielded（:53 被占自动让路）', () => {
   const st = KP.parseOpsStatus('dns=yielded\nengine=down\n');
   assert.strictEqual(st.dns, 'yielded');
 });
+test('parseOpsStatus 兼容单行空格分隔（promise 降级形态）', () => {
+  const st = KP.parseOpsStatus('port=20128 bind=loopback module_version=v1.9.1-r1 engine_version=v1.9.1 dns=up engine=up factory_key=1 apikeys_total=2');
+  assert.strictEqual(st.port, '20128');
+  assert.strictEqual(st.dns, 'up');
+  assert.strictEqual(st.engine_version, 'v1.9.1');
+  assert.strictEqual(st.factory_key, '1');
+  assert.strictEqual(st.apikeys_total, '2');
+});
 
 // ── parseMeminfo / parseProcRss：资源占用曾全部显示 "-" ──
 const MEMINFO = 'MemTotal:        5809472 kB\r\nMemFree:          912004 kB\r\nMemAvailable:    1465228 kB\r\n';

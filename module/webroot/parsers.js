@@ -31,12 +31,14 @@
     return 0;
   }
 
-  // ── lib/ops.sh status 输出（key=value 行）──
+  // ── lib/ops.sh status 输出 ──
+  // 兼容两种布局：单行空格分隔（promise 降级形态下 ops.sh 的输出形态）
+  // 与多行 key=value（回调形态）。
   function parseOpsStatus(text) {
     const out = {};
-    for (const l of stripCr(text).split('\n')) {
-      const i = l.indexOf('=');
-      if (i > 0) out[l.slice(0, i)] = l.slice(i + 1);
+    for (const tok of stripCr(text).split(/\s+/)) {
+      const i = tok.indexOf('=');
+      if (i > 0) out[tok.slice(0, i)] = tok.slice(i + 1);
     }
     return out;
   }

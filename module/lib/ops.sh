@@ -42,26 +42,19 @@ get_port() {
 
 # ── 子命令 ────────────────────────────────────
 cmd_status() {
-  echo "port=$(get_port)"
-  echo "bind=$(cat "$DNS_BIND_FILE" 2>/dev/null | tr -d ' \n')"
-  echo "module_version=$(module_version)"
-  echo "engine_version=$(module_version | sed 's/-r[0-9]*$//')"
-  if [ -f "$DNS_DISABLED" ]; then
-    echo "dns=disabled"
-  elif pid_alive "$DNS_PIDFILE"; then
-    echo "dns=up"; echo "dns_pid=$(cat "$DNS_PIDFILE")"
-  elif port53_busy; then
-    echo "dns=yielded"
-  else
-    echo "dns=down"
-  fi
-  if pid_alive "$ENG_PIDFILE"; then
-    echo "engine=up"; echo "engine_pid=$(cat "$ENG_PIDFILE")"
-  else
-    echo "engine=down"
-  fi
-  echo "factory_key=$("$SQLITE3" "$DB_FILE" "SELECT COUNT(*) FROM apiKeys WHERE key='$FACTORY_KEY';" 2>/dev/null | tr -d '[:space:]')"
-  echo "apikeys_total=$("$SQLITE3" "$DB_FILE" "SELECT COUNT(*) FROM apiKeys;" 2>/dev/null | tr -d '[:space:]')"
+  # 单行输出（空格分隔 key=value）：兼容 WebUI 的 promise 降级形态
+  # （该形态多行输出只剩末行）。值均不含空格。
+  _bind="$(cat "$DNS_BIND_FILE" 2>/dev/null | tr -d ' \n')"
+  [ "$_bind" = "any" ] || _bind=loopback
+  _dns=down; _dns_pid=""
+  if [ -f "$DNS_DISABLED" ]; then _dns=disabled
+  elif pid_alive "$DNS_PIDFILE"; then _dns=up; _dns_pid="$(cat "$DNS_PIDFILE")"
+  elif port53_busy; then _dns=yielded; fi
+  _eng=down; _eng_pid=""
+  if pid_alive "$ENG_PIDFILE"; then _eng=up; _eng_pid="$(cat "$ENG_PIDFILE")"; fi
+  _fk="$("$SQLITE3" "$DB_FILE" "SELECT COUNT(*) FROM apiKeys WHERE key='$FACTORY_KEY';" 2>/dev/null | tr -d '[:space:]')"
+  _kt="$("$SQLITE3" "$DB_FILE" "SELECT COUNT(*) FROM apiKeys;" 2>/dev/null | tr -d '[:space:]')"
+  echo "port=$(get_port) bind=$_bind module_version=$(module_version) engine_version=$(module_version | sed 's/-r[0-9]*$//') dns=$_dns dns_pid=$_dns_pid engine=$_eng engine_pid=$_eng_pid factory_key=${_fk:-0} apikeys_total=${_kt:-0}"
 }
 
 cmd_start_dns() {
