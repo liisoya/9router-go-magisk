@@ -1,33 +1,21 @@
 #!/system/bin/sh
 # 9router-go · 管理器「操作」按钮：显示运行状态
-# 详细管理（DNS 上游/探测/热重载）请用模块 WebUI
+# 数据来自 lib/ops.sh（唯一实现），详细管理请用模块 WebUI
 
-MODDIR="${0%/*}"
-DATA_DIR="${DATA_DIR:-/data/adb/9router-go}"
-PORT="$(cat "$DATA_DIR/port" 2>/dev/null | tr -d ' \n')"
-case "$PORT" in ''|*[!0-9]*) PORT=20130 ;; esac
-PIDFILE="$DATA_DIR/9router.pid"
-DNS_PIDFILE="$DATA_DIR/dnsfwd.pid"
+MODDIR="$(cd "$(dirname "$0")" && pwd)"
+OPS="$MODDIR/lib/ops.sh"
 
 echo "9Router Go AI Proxy 状态"
-echo "  数据目录 : $DATA_DIR"
-echo "  引擎端口 : $PORT"
+ST="$("$OPS" status)"
+kv() { echo "$ST" | grep "^$1=" | cut -d= -f2-; }
 
-if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-  echo "  引擎 PID : $(cat "$PIDFILE")"
-else
-  echo "  引擎 PID : （未运行）"
-fi
-
-if [ -f "$DNS_PIDFILE" ] && kill -0 "$(cat "$DNS_PIDFILE" 2>/dev/null)" 2>/dev/null; then
-  echo "  DNS PID  : $(cat "$DNS_PIDFILE")  [bind=$(cat "$DATA_DIR/dns-bind" 2>/dev/null || echo loopback)]"
-else
-  echo "  DNS PID  : （未运行 —— 引擎将无法解析域名）"
-fi
-
-code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" 2>/dev/null)"
+echo "  引擎     : $(kv engine) (PID $(kv engine_pid))"
+echo "  端口     : $(kv port)"
+echo "  版本     : $(kv engine_version)"
+echo "  DNS      : $(kv dns) (PID $(kv dns_pid))"
+code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$(kv port)/health" 2>/dev/null)"
 echo "  /health  : ${code:-无响应}"
-echo "  Dashboard: http://127.0.0.1:$PORT"
-echo "  WebUI    : 管理器 → 模块 → WebUI（DNS 管理）"
+echo "  Dashboard: http://127.0.0.1:$(kv port)"
+echo "  WebUI    : 管理器 → 模块 → WebUI（DNS 管理/一致性/更新）"
 
 exit 0
