@@ -87,6 +87,7 @@
 | 等就绪 / 等消失 | `module/lib/wait.sh` | `WAIT` + 真机 `T9` | 用 `wait_for` / `wait_gone`，不要写轮询 |
 | 日志路径 / 上限 / 轮转 | `module/lib/log.sh` | 真机 `T*` | 经它写日志 |
 | 状态词与界面文案 | `parsers.js` 的 `LIFECYCLE_STATES` | `contract-keys`（双向） | 加词 = 改表 + `life_state`，两侧都要动 |
+| 派生状态的来源展示（版本从哪来、是否刚自愈） | `ops.sh` emit（`engine_ver_src` / `engine_ver_healed`）+ `parsers.js engineVersionSourceLabel` | `JS-UNIT` + 真机 `T12` | 新字段 = 同时加 emit 与文案映射，并让自检断言它如实 |
 | 「什么算一个引擎」 | `parsers.js`（`ELF_MAGIC` / `ENGINE_MIN_BYTES`） | `engine-spec-contract` | 改 `parsers.js`，再按门禁同步 `ops.sh` 常量 |
 | 「先门禁后动作」的顺序 | `parsers.js` 的 `*_PLAN` + `planSteps` | `parsers` 计划结构断言 | 加步骤 = 改数据 + 加断言 |
 | 前端请求形状 | `parsers.js` / `bridge.js` 命令构造器 / `web/src/lib/*.ts` | `JS-UNIT` / `BUN-UNIT` / `check-ui-parity` | 纯函数 + 用例，别散在组件里 |

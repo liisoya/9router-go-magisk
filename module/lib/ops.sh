@@ -47,7 +47,13 @@ engine_version_sync() {
   #     ② 记录与当前一致 → 这份引擎是本模块版本下由 install-engine 装的 → 别动它；
   #     ③ 运行期文件缺失 → 从包内补齐。
   #   补充判据 = 包比运行期文件新（同 versionCode 的重装场景，见 T12a2）。
-  [ -s "$MODDIR/etc/engine-version" ] || return 0
+  # 同时记下"这次的值是从哪来的、是不是刚自愈"，供面板做来源自检提示（谎报一眼可见）
+  ENGINE_VER_HEALED=0
+  ENGINE_VER_SRC=runtime
+  if [ ! -s "$MODDIR/etc/engine-version" ]; then
+    [ -s "$DATA_DIR/engine-version" ] || ENGINE_VER_SRC=none
+    return 0
+  fi
   _code="$(module_versioncode)"
   _seen="$(cat "$DATA_DIR/engine-version-code" 2>/dev/null)"
   if [ ! -s "$DATA_DIR/engine-version" ] \
@@ -55,6 +61,8 @@ engine_version_sync() {
      || [ "$MODDIR/module.prop" -nt "$DATA_DIR/engine-version" ]; then
     cp "$MODDIR/etc/engine-version" "$DATA_DIR/engine-version" 2>/dev/null
     printf '%s\n' "$_code" > "$DATA_DIR/engine-version-code" 2>/dev/null
+    ENGINE_VER_HEALED=1
+    ENGINE_VER_SRC=package
   fi
 }
 lan_ips() {
@@ -82,7 +90,7 @@ cmd_status() {
   # engine_version 来自真实来源（engine_version()），versioncode 来自 module.prop
   # 字段——此前从 "v1.9.1-r1" 正则提取 r1 当 versionCode 与远端 109010 比较，
   # 导致"没发新版却永远提示有更新"
-  echo "port=$(life_get_port) bind=$(life_read_bind) module_version=$(module_version) versioncode=$(module_versioncode) engine_version=$(engine_version) lan_ip=$(lan_ips) $(life_state) factory_key=$_fk apikeys_total=$_kt"
+  echo "port=$(life_get_port) bind=$(life_read_bind) module_version=$(module_version) versioncode=$(module_versioncode) engine_version=$(engine_version) engine_ver_src=${ENGINE_VER_SRC:-none} engine_ver_healed=${ENGINE_VER_HEALED:-0} lan_ip=$(lan_ips) $(life_state) factory_key=$_fk apikeys_total=$_kt"
 }
 
 cmd_panel() {

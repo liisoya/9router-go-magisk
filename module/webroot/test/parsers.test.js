@@ -209,6 +209,17 @@ test('stateLabel：未知 kind 也不抛（表格被删/拼错时不炸界面）
   assert.strictEqual(s0.unknown, true);
   assert.strictEqual(typeof s0.text, 'string');
 });
+
+// ── 引擎版本"来源"自检文案（Phase 26：面板谎报旧版本时用户要能一眼看出）──
+test('engineVersionSourceLabel：三种来源 + 是否刚自愈', () => {
+  assert.strictEqual(KP.engineVersionSourceLabel('runtime', false), '运行期记录');
+  assert.strictEqual(KP.engineVersionSourceLabel('package', true), '包内 · 刚自愈');
+  assert.strictEqual(KP.engineVersionSourceLabel('none', false), '无来源');
+});
+test('engineVersionSourceLabel：来源缺失/未知不冒充正常', () => {
+  assert.strictEqual(KP.engineVersionSourceLabel(undefined, undefined), '未知来源(undefined)');
+  assert.ok(KP.engineVersionSourceLabel('bogus', false).includes('bogus'));
+});
 // ── "先门禁后动作"的计划（候选 3）：顺序不变量离线可断言 ──
 // 这些断言以前做不到 —— 顺序只写在 app.js 的装配流程里，只能靠真机 T8 兜。
 test('planSteps：任一引擎门禁未过 → install 不可达（事故路径）', () => {

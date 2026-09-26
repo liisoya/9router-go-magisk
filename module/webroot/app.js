@@ -149,6 +149,10 @@ function renderPanel(st, live) {
   document.getElementById('in-port').value = st.port;
   document.getElementById('st-ver').textContent = st.engine_version || '未知';
   document.getElementById('eng-cur').textContent = st.engine_version || '未知';
+  // 版本来源自检（Phase 26）：版本号是从运行期记录还是包内读到的、是否刚自愈 ——
+  // 「更新了但概览还是旧版本」这类谎报一眼可见（此前只能靠人对比 module.prop 与 /version）
+  const verSrc = document.getElementById('ver-src');
+  if (verSrc) verSrc.textContent = KP.engineVersionSourceLabel(st.engine_ver_src, st.engine_ver_healed === '1');
   document.getElementById('mod-cur').textContent = st.module_version || '未知';
   state.moduleVersion = (st.module_version || '').replace(/^v/, '').split('-r')[0];
   state.engineVersion = (st.engine_version || '').trim();

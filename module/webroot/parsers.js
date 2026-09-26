@@ -82,6 +82,13 @@
              color: TONE_COLORS[hit.tone], unknown: false };
   }
 
+  // 引擎版本"来源"文案（Phase 26 的派生状态自检）：告诉用户这个版本号是从哪读到的、
+  // 是不是本次读取刚自愈过来的 —— 否则一旦面板照旧文件念（"假更新"观感），用户无从判断。
+  function engineVersionSourceLabel(src, healed) {
+    const base = ({ runtime: '运行期记录', package: '包内', none: '无来源' })[src] || `未知来源(${src})`;
+    return healed ? `${base} · 刚自愈` : base;
+  }
+
   // ── /proc/meminfo ──
   function parseMeminfo(text) {
     const mem = key => {
@@ -253,7 +260,7 @@
     parseDnsProbeLine, parseDnsProbeOutput,
     normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans,
     ELF_MAGIC, ENGINE_MIN_BYTES, engineFileGate, checksumGate,
-    LIFECYCLE_STATES, TONE_COLORS, stateLabel,
+    LIFECYCLE_STATES, TONE_COLORS, stateLabel, engineVersionSourceLabel,
     ENGINE_UPDATE_PLAN, MODULE_UPDATE_PLAN, ORPHAN_CLEAN_PLAN, DNS_OPTIMIZE_PLAN, planSteps
   };
 });

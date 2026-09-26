@@ -39,7 +39,10 @@ engpid() { cat "$PIDFILE" 2>/dev/null; }
 . "$MODDIR/lib/wait.sh" || { echo "FAIL: 缺 $MODDIR/lib/wait.sh（等就绪/等消失的唯一实现）"; exit 2; }
 livepid() { N="$(engpid)"; [ -n "$N" ] && kill -0 "$N" 2>/dev/null; }
 newpid() { N="$(engpid)"; [ -n "$N" ] && [ "$N" != "$1" ] && kill -0 "$N" 2>/dev/null; }
-panel_field() { "$OPS" panel | tr ' ' '\n' | grep "^$1=" | cut -d= -f2; }
+# 自检查询：必须**一次 panel 快照**取多个字段 —— 每次 panel 都是新进程，
+# "刚自愈"标记只在那一次调用里为 1，分多次取会读到第二次的 0（这正是 T12 第一版写错的地方）
+panel_snapshot() { "$OPS" panel; }
+snap_field() { printf '%s' "$1" | tr ' ' '\n' | grep "^$2=" | cut -d= -f2; }
 
 echo "== 目标：$MODDIR （数据目录 $DATA_DIR）=="
 
@@ -226,32 +229,44 @@ kill -9 "$_ap" 2>/dev/null
 # 2026-09-26 用户实测：包已是 r2、引擎实际在跑 1.9.2，面板却写 1.9.1（运行期文件停在上一个版本）。
 PKG_VER="$(cat "$MODDIR/etc/engine-version" 2>/dev/null)"
 if [ -n "$PKG_VER" ]; then
-  # T12a：整包更新（由旧代码/管理器执行，不会写运行期文件）→ 记录落后 → 自愈
+  # T12a：整包更新（由旧代码/管理器执行，不会写运行期文件）→ 记录落后 → 自愈 + 来源自检如实
   printf '0.0.1\n' > "$DATA_DIR/engine-version"
   printf '1\n' > "$DATA_DIR/engine-version-code"     # 模拟"包已换成新 versionCode，但运行期还是旧的"
-  GOT="$(panel_field engine_version)"
-  [ "$GOT" = "$PKG_VER" ] && ok "T12a 整包更新后运行期版本自愈（0.0.1 → $PKG_VER）" \
-                          || no "T12a 未自愈：panel=$GOT，包内=$PKG_VER"
-  # T12a2：同 versionCode 的重装（只能靠 mtime 判；-nt 精度是秒，所以这里 sleep 1）
+  SNAP="$(panel_snapshot)"
+  [ "$(snap_field "$SNAP" engine_version)" = "$PKG_VER" ] && ok "T12a 整包更新后运行期版本自愈（0.0.1 → $PKG_VER）" \
+                                                          || no "T12a 未自愈：panel=$(snap_field "$SNAP" engine_version)，包内=$PKG_VER"
+  if [ "$(snap_field "$SNAP" engine_ver_src)" = "package" ] && [ "$(snap_field "$SNAP" engine_ver_healed)" = "1" ]; then
+    ok "T12a2 自检字段如实：来源=包内 · 刚自愈"
+  else
+    no "T12a2 自检字段不对（src=$(snap_field "$SNAP" engine_ver_src) healed=$(snap_field "$SNAP" engine_ver_healed)）"
+  fi
+  # T12b：稳态再读一次 → 不该再"自愈"（值来自运行期记录）
+  SNAP="$(panel_snapshot)"
+  if [ "$(snap_field "$SNAP" engine_ver_src)" = "runtime" ] && [ "$(snap_field "$SNAP" engine_ver_healed)" = "0" ]; then
+    ok "T12b 稳态：来源=运行期记录 · 未重复自愈"
+  else
+    no "T12b 稳态字段不对（src=$(snap_field "$SNAP" engine_ver_src) healed=$(snap_field "$SNAP" engine_ver_healed)）"
+  fi
+  # T12c：同 versionCode 的重装（只能靠 mtime 判；-nt 精度是秒，所以这里 sleep 1）
   printf '0.0.2\n' > "$DATA_DIR/engine-version"
   printf '%s\n' "$(grep '^versionCode=' "$MODDIR/module.prop" | cut -d= -f2)" > "$DATA_DIR/engine-version-code"
   sleep 1
   touch "$MODDIR/module.prop"                        # 包比运行期文件新 = 刚重装过
-  GOT="$(panel_field engine_version)"
-  [ "$GOT" = "$PKG_VER" ] && ok "T12a2 同版本重装也自愈（0.0.2 → $PKG_VER）" \
-                          || no "T12a2 未自愈：panel=$GOT，包内=$PKG_VER"
-  # T12b：运行期更新过引擎（install-engine 会同时写记录）→ 绝不能被包内旧值覆盖
+  SNAP="$(panel_snapshot)"
+  [ "$(snap_field "$SNAP" engine_version)" = "$PKG_VER" ] && ok "T12c 同版本重装也自愈（0.0.2 → $PKG_VER）" \
+                                                          || no "T12c 未自愈：panel=$(snap_field "$SNAP" engine_version)，包内=$PKG_VER"
+  # T12d：运行期更新过引擎（install-engine 会同时写记录）→ 绝不能被包内旧值覆盖
   printf '9.9.9\n' > "$DATA_DIR/engine-version"
   printf '%s\n' "$(grep '^versionCode=' "$MODDIR/module.prop" | cut -d= -f2)" > "$DATA_DIR/engine-version-code"
   touch "$DATA_DIR/engine-version"
-  GOT="$(panel_field engine_version)"
-  [ "$GOT" = "9.9.9" ] && ok "T12b 运行期更新不被包内旧值覆盖" \
-                       || no "T12b 运行期版本被覆盖：panel=$GOT（应为 9.9.9）"
-  # T12c：运行期文件缺失 → 从包内补齐（并留下记录，供下次判断）
+  SNAP="$(panel_snapshot)"
+  [ "$(snap_field "$SNAP" engine_version)" = "9.9.9" ] && ok "T12d 运行期更新不被包内旧值覆盖" \
+                                                       || no "T12d 运行期版本被覆盖：panel=$(snap_field "$SNAP" engine_version)（应为 9.9.9）"
+  # T12e：运行期文件缺失 → 从包内补齐（并留下记录，供下次判断）
   rm -f "$DATA_DIR/engine-version"
-  GOT="$(panel_field engine_version)"
-  [ "$GOT" = "$PKG_VER" ] && ok "T12c 运行期文件缺失时从包内补齐（$PKG_VER）" \
-                          || no "T12c 未补齐：panel=$GOT"
+  SNAP="$(panel_snapshot)"
+  [ "$(snap_field "$SNAP" engine_version)" = "$PKG_VER" ] && ok "T12e 运行期文件缺失时从包内补齐（$PKG_VER）" \
+                                                          || no "T12e 未补齐：panel=$(snap_field "$SNAP" engine_version)"
 else
   info "T12 跳过：包内 etc/engine-version 不存在"
 fi
