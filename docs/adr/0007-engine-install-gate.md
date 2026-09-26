@@ -32,10 +32,17 @@
    回滚时保持旧值 —— 状态与事实绝不允许不一致（延续"不伪造版本"的既有原则，Phase 20 Q4）。
 6. **`bin/9router-go.bak` 语义改为"最后一次已验证可用"**（只在成功后更新），
    不再是"替换前的当前文件"。
+7. **「判据 vs 执行」的分工 ≠ 把规则抄两遍**（2026-09-26 架构候选 5 澄清）：
+   规则（体积 ≥ 5MB 且文件头 `7f454c46`）的**声明只有一处** —— `parsers.js` 的
+   `ELF_MAGIC` / `ENGINE_MIN_BYTES`；`ops.sh engine_src_ok` 是**执行前的复核**，
+   不是第二份判据。两侧由 `module/webroot/test/engine-spec-contract.test.js` 缝死：
+   常量值、魔数字面量、两项检查的存在性、边界语义（shell 的 `-ge` ↔ JS 的 `<`）任一处漂移即红。
+   改规则 → 只改 `parsers.js`，再按门禁把 shell 那侧的常量同步过去。
 
 ## 后果
 
 - 加速节点挂掉、资产改名、网络截断时，用户看到的是明确的"拒绝安装"，设备保持原样；
 - 版本号与运行状态不再可能互相矛盾；
 - 门禁集中在 `parsers.js`（判据）+ `ops.sh`（执行前）两处，可离线（node --test）与真机
-  （`tools/device/test-lifecycle.sh` T8）双向回归。
+  （`tools/device/test-lifecycle.sh` T8）双向回归；两处**同属一条规则**，由
+  `module/webroot/test/engine-spec-contract.test.js` 缝住（决策 7）。

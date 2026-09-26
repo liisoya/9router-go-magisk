@@ -50,6 +50,10 @@
    `tools/deploy-device.sh` 直推都调它）。注入对象是**全树所有含占位符的文件**，不维护文件清单
    （清单本身正是会漂移的东西）；MOD_ID 唯一来源 = `module/module.prop` 的 `id=`；零残留由注入器
    自己断言。**禁止**在调用方再写一遍 `sed` 注入或残留检查
+13. **「什么算一个引擎」的规则只在 `parsers.js` 声明**（`ELF_MAGIC` / `ENGINE_MIN_BYTES`）；
+   `ops.sh engine_src_ok` 是执行前复核，不是第二份判据。两侧由
+   `module/webroot/test/engine-spec-contract.test.js` 缝住（常量、魔数字面量、检查项存在性、
+   边界语义）。改规则 = 改 `parsers.js` + 按门禁同步 shell 常量
 8. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
 
 ## 3. 所有权地图（改哪里会与上游冲突）
