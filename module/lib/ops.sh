@@ -131,26 +131,50 @@ cmd_install_engine() {
 }
 
 cmd_install_module() {
-  # 模块 zip 安装唯一入口：备份 → 解压覆盖 → 权限兜底（含 lib/，勿漏）→ 清理 → 重启
+  # 模块 zip 安装唯一入口：解压到暂存区 → **用 mv 落位（换 inode）** → 权限兜底 → 同步引擎版本 → 重启。
+  # 为什么不能直接 `unzip -oq` 到 $MODDIR：本文件（lib/ops.sh）正被当前 shell 逐行读取，unzip
+  # 原地覆写（同 inode + 截断重写）会让 shell 从被改写的位置继续读 → 真机实测报
+  # "ops.sh[193]: syntax error: unexpected ';'"（行号落在 case 块内），安装中途夭折、引擎可能被
+  # 留在停住的状态。mv 换 inode 后执行中的实例读的还是旧文件，安全。
   [ -f "${1:-}" ] || { echo "no-src"; return 0; }
   life_wd_hold 300
   life_stop_all >/dev/null
   cp "$1" "$DATA_DIR/last-module.zip" 2>/dev/null
-  if (cd "$MODDIR" && unzip -oq "$1") && chmod 0755 "$MODDIR"/*.sh "$MODDIR"/lib/*.sh "$MODDIR"/bin/* 2>/dev/null; then
-    # 整包更新同样换了 bin/9router-go：把运行期版本文件同步成"包里那份引擎的真实版本"。
-    # 否则 DATA_DIR/engine-version 会停在上一个版本 —— 面板谎报"当前 1.9.1"（引擎其实是 1.9.2），
-    # 并永远提示"有更新可用"。包内 etc/engine-version 是构建期写的，描述的就是刚装进来的二进制。
-    if [ -s "$MODDIR/etc/engine-version" ]; then
-      cp "$MODDIR/etc/engine-version" "$DATA_DIR/engine-version" 2>/dev/null
-    else
-      rm -f "$DATA_DIR/engine-version"   # 包里没有 → 宁可显示"未知"，也不要留旧版本的谎报
-    fi
-    rm -f "$1"
-    life_restart_engine
-  else
+  _stage="$DATA_DIR/module-stage"
+  rm -rf "$_stage"
+  if ! mkdir -p "$_stage" || ! (cd "$_stage" && unzip -oq "$1"); then
+    rm -rf "$_stage"
     life_wd_hold_release
     echo "install-failed"
+    return 0
   fi
+  # 目录整体换 inode：先把新目录搬成 .new，再把旧目录挪开，最后就位
+  # （直接 `mv 新目录 $MODDIR/` 且旧目录同名时，会把新目录塞进旧目录里 —— 必须绕开）
+  for _d in lib bin webroot etc; do
+    [ -d "$_stage/$_d" ] || continue
+    rm -rf "$MODDIR/$_d.new" "$MODDIR/$_d.old"
+    mv "$_stage/$_d" "$MODDIR/$_d.new" || continue
+    [ -d "$MODDIR/$_d" ] && mv "$MODDIR/$_d" "$MODDIR/$_d.old"
+    mv "$MODDIR/$_d.new" "$MODDIR/$_d"
+    rm -rf "$MODDIR/$_d.old"
+  done
+  # 顶层文件（module.prop / service.sh / uninstall.sh / …）同样用 mv 换 inode
+  for _f in "$_stage"/*; do
+    [ -f "$_f" ] || continue
+    mv -f "$_f" "$MODDIR/" 2>/dev/null
+  done
+  rm -rf "$_stage"
+  chmod 0755 "$MODDIR"/*.sh "$MODDIR"/lib/*.sh "$MODDIR"/bin/* 2>/dev/null
+  # 整包更新同样换了 bin/9router-go：把运行期版本文件同步成"包里那份引擎的真实版本"。
+  # 否则 DATA_DIR/engine-version 会停在上一个版本 —— 面板谎报"当前 1.9.1"（引擎其实是 1.9.2），
+  # 并永远提示"有更新可用"。包内 etc/engine-version 是构建期写的，描述的就是刚装进来的二进制。
+  if [ -s "$MODDIR/etc/engine-version" ]; then
+    cp "$MODDIR/etc/engine-version" "$DATA_DIR/engine-version" 2>/dev/null
+  else
+    rm -f "$DATA_DIR/engine-version"   # 包里没有 → 宁可显示"未知"，也不要留旧版本的谎报
+  fi
+  rm -f "$1"
+  life_restart_engine
 }
 
 cmd_seed_key() {

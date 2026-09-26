@@ -385,6 +385,15 @@
   versionCode 109020；`build.sh` 七步全绿，产物 `dist/9router-go-1.9.2-r1-magisk.zip`（15M，verify_zip ✅）；
   真机用模块自己的 `install-module` 装入 → `engine=up`、`engine_version=1.9.2`、`dns=up`、`watchdog=up`，
   设备门禁 **15/15**（T8b 引擎 25,559,200 字节 = v1.9.2 `linux-arm64` 资产大小）。
+- [x] **23.7 计划外真 bug：整包安装会覆写正在执行的自己**
+  - 现场：`install-module` 执行中报 `ops.sh[193]: syntax error: unexpected ';'`（行号落在 `case`
+    块内），安装中途夭折；但同一文件 `sh -n` 通过、两侧都是 200 行 → 不是文件坏了，而是
+    `unzip -oq` **原地覆写**了正在被 shell 逐行读取的 `lib/ops.sh`（同 inode + 截断重写）；
+  - 修：`cmd_install_module` 改为"解压到 `$DATA_DIR/module-stage` → 用 `mv` 换 inode 落位"
+    （换 inode 后执行中的实例读的仍是旧文件；目录必须先搬成 `.new` 再让旧目录让位，
+    否则 `mv` 会把新目录塞进同名旧目录里）；
+  - 门禁：设备门禁 **T10** —— 用 `last-module.zip` 的副本跑一次 `install-module`，断言输出无
+    `syntax error` 且装完 `engine=up`（真机 **17/17** 全绿）。
 - [ ] **待用户发布**：tag `v1.9.2-r1` → 上传 zip → 推送 `update.json`
 - [ ] **待决策**：`/api/health` 与 SSO 回调是否补（上游同样缺失，可顺手提 PR）；大块缺口是否排期
 

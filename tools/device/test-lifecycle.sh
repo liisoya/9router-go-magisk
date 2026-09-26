@@ -215,6 +215,24 @@ else
   info "T9 跳过：/version 未公开（v1.9.2 之前的引擎）或不可达"
 fi
 
+# ── T10 整包安装不得自毁：install-module 必须能跑完（执行中被覆写的回归）──
+# 2026-09-26 实测：直接 `unzip -oq` 到 $MODDIR 会覆写正在执行的 lib/ops.sh（同 inode）→
+# mksh 报 "ops.sh[193]: syntax error"、安装中途夭折。现改为"暂存 + mv 换 inode"。
+# 用 $DATA_DIR/last-module.zip 的副本跑（install-module 成功后会 rm 掉入参，不能直接用它）。
+ZIP="$DATA_DIR/last-module.zip"
+if [ -f "$ZIP" ]; then
+  cp "$ZIP" /data/local/tmp/9r-gate.zip
+  OUT10="$("$OPS" install-module /data/local/tmp/9r-gate.zip 2>&1 | tr -d '\r')"
+  case "$OUT10" in
+    *syntax\ error*) no "T10a install-module 报了语法错误（执行中被覆写）：$OUT10" ;;
+    *) ok "T10a install-module 跑完无语法错误（$(echo "$OUT10" | tail -n 1)）" ;;
+  esac
+  [ "$("$OPS" panel | tr ' ' '\n' | grep '^engine=')" = "engine=up" ] && ok "T10b 安装后引擎 up" || no "T10b 安装后引擎不在跑"
+  rm -f /data/local/tmp/9r-gate.zip
+else
+  info "T10 跳过：$ZIP 不存在（先跑一次 install-module 生成）"
+fi
+
 echo "== 结果：通过 $PASS / 失败 $FAIL =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0
