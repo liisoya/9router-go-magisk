@@ -113,7 +113,8 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 修改 | UIPARITY（基线 3 → 2） | 挂载 `/web/fetch` + `/v1/web/fetch`（HandleWebFetch 从未挂载）→ 该缺口消失，收紧基线 | 见本次提交 |
 | 2026-09-26 | 修改 | T10a | 匹配面从 `syntax error` 扩大到 `no closing quote` / `bad substitution` / `unexpected`（当日一次安装出现 `ops.sh[291]: no closing quote`，且行号 291 > 文件 284 行 → 当时读的是另一份内容；不可复现，先让门禁能抓到同类签名） | 见本次提交 |
 | 2026-09-26 | 新增 | DEADH | handler/注册函数挂载巡检（棘轮）。首跑即抓到 2 条真实案例并已带理由豁免：`chat.HandleHealth`（无引用）、`dashboard.RegisterRoutes`（只有测试引用、无路由） | 见本次提交 |
-| 2026-09-26 | 修改 | PARITY 侧代码 | 挂载 `/web/fetch` + `/v1/web/fetch`（ADR-0003 补丁），UIPARITY 基线 3 → 2 | 见本次提交 |
+| 2026-09-26 | 修改 | PARITY 侧代码 | 挂载 `/web/fetch` + `/v1/web/fetch`（ADR-0003 补丁），UIPARITY 基线 3 → 2 | bcf97e2 |
+| 2026-09-26 | 修改 | DEADH（豁免 2 → 1，定义 156 → 155） | 删除真死代码 `chat.HandleHealth`；**更正** `dashboard.RegisterRoutes` 为"测试 seam"（12 文件 33 处调用），不是死代码 —— 两侧路由表实测：生产 76 条 / 测试 46 条、「只在测试里」0 条，漂移风险已记为架构候选 | 见本次提交 |
 | 2026-09-26 | 新增 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（离线档） | f509e85 |
 | 2026-09-26 | 新增 | 变更映射自检 | `tools/check.sh` 末尾提醒"改了 A 没改 B"（只提醒不拦，规则见契约 §4） | f509e85 |
 

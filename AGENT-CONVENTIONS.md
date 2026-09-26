@@ -112,6 +112,7 @@
 | 文件 | 我们的改动 | 合并时怎么办 |
 |---|---|---|
 | `internal/handlers/router.go` | ① ADR-0003 定点补丁：`/api/models/test` 鉴权 —— **上游 v1.9.2 已吸收，本地补丁已撤**；② 2026-09-26 挂载 `/web/fetch` + `/v1/web/fetch`（`HandleWebFetch` 此前从未挂载 → Dashboard 网页抓取必 404；补丁存档 `tools/patches/media-web-fetch-route.patch`） | 取上游后复核：`TestSetupServerRouter_ModelTestSessionAuth` 仍在跑、两条 web/fetch 路由仍在 |
+| `internal/handlers/chat/chat.go` | 删除从未被引用的 `HandleHealth`（`/health` 由 router.go 的内联 healthHandler 提供）；补丁存档 `tools/patches/remove-dead-handlehealth.patch` | 取上游后确认该函数未回归（若回归，DEADH 会红） |
 | `internal/proxy/executor/codebuddy.go` | codebuddy-cn agent 提示词清洗（ADR-0003，**待上游吸收**） | 保留；补丁存档 `tools/patches/codebuddy-cn-agent-prompt-sanitizer.patch`，上游合并后撤 |
 | `internal/handlers/dashboard/settings_test.go` | 回插 `TestHandleExportDatabase_AcceptsPasswordHeader`（锁 `x-9r-password` 契约） | 合并后确认该测试仍在 |
 | `web/src/components/ProfileSettingsView.svelte` | 备份导出/导入的密码弹层与请求形状（Phase 20） | 保留我们的交互，其余取上游 |

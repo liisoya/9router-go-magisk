@@ -24,9 +24,9 @@ APP="${3:-me.weishu.kernelsu}"
 OPS="$MODDIR/lib/ops.sh"
 PIDFILE="$DATA_DIR/9router.pid"
 
-PASS=0; FAIL=0
+PASS=0; FAIL=0; FAILED_TXT=""
 ok() { echo "  ✅ $1"; PASS=$((PASS + 1)); }
-no() { echo "  ❌ $1"; FAIL=$((FAIL + 1)); }
+no() { echo "  ❌ $1"; FAIL=$((FAIL + 1)); FAILED_TXT="$FAILED_TXT|$1"; }
 info() { echo "  · $1"; }
 
 [ -x "$OPS" ] || { echo "FAIL: ops.sh 不可执行: $OPS"; exit 2; }
@@ -235,5 +235,16 @@ else
 fi
 
 echo "== 结果：通过 $PASS / 失败 $FAIL =="
+# 证据留存：2026-09-26 观测到一次偶发失败（1/4 次）但在 stdout 之外没有痕迹 ——
+# 每次运行把「时间 + 计数 + 失败项」追加到设备日志，偶发失败的现场不再随终端滚走。
+if [ -n "${DATA_DIR:-}" ] && [ -d "$DATA_DIR" ]; then
+  {
+    printf '== %s 通过 %s / 失败 %s\n' "$(date '+%F %T')" "$PASS" "$FAIL"
+    if [ -n "$FAILED_TXT" ]; then echo "$FAILED_TXT" | tr '|' '\n' | sed '/^$/d'; fi
+  } >> "$DATA_DIR/gate-lifecycle.log" 2>/dev/null
+  tail -n 200 "$DATA_DIR/gate-lifecycle.log" > "$DATA_DIR/gate-lifecycle.log.tmp" 2>/dev/null \
+    && mv "$DATA_DIR/gate-lifecycle.log.tmp" "$DATA_DIR/gate-lifecycle.log" 2>/dev/null
+  echo "（摘要已追加到 $DATA_DIR/gate-lifecycle.log）"
+fi
 [ "$FAIL" = 0 ] || exit 1
 exit 0

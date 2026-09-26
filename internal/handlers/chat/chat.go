@@ -237,11 +237,6 @@ func (h *ChatHandler) handleMessagesSingleModel(ctx context.Context, w http.Resp
 	}
 }
 
-// HandleHealth responds with a simple health check status.
-func (h *ChatHandler) HandleHealth(w http.ResponseWriter, r *http.Request) {
-	handlerutil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
 // HandleVersion responds with the proxy version details and update status.
 func (h *ChatHandler) HandleVersion(w http.ResponseWriter, r *http.Request) {
 	info := updater.GetCachedInfo()
