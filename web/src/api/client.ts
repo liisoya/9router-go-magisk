@@ -1,5 +1,15 @@
 // Typed API client for 9router-go Native Dashboard
 
+// 登录态唯一所有者（候选 8）：键名与读写原先散在本文件与其他 4 个文件里
+import {
+  browserStores,
+  clearAll,
+  clearAuthed,
+  getStoredApiKey as readStoredApiKey,
+  isAuthed,
+  markAuthed
+} from '../lib/session'
+
 export interface ProviderConnection {
   id: string
   provider: string
@@ -301,9 +311,7 @@ export interface LoginResponse {
 
 export function isAuthenticated(): boolean {
   if (typeof window === 'undefined') return false
-  if (sessionStorage.getItem('9router_auth') === 'true' || localStorage.getItem('9router_auth') === 'true') {
-    return true
-  }
+  if (isAuthed(browserStores())) return true
   if (typeof document !== 'undefined' && document.cookie.includes('auth_token=')) {
     return true
   }
@@ -317,8 +325,7 @@ export function isUsableAPIKey(value: string): boolean {
 }
 
 export function getStoredAPIKey(): string {
-  if (typeof localStorage === 'undefined') return ''
-  const value = (localStorage.getItem('9router_key') || '').trim()
+  const value = readStoredApiKey(browserStores())
   return isUsableAPIKey(value) ? value : ''
 }
 
@@ -402,13 +409,7 @@ export function handleUnauthorized(path?: string) {
   }
 
   // Clear stale local auth session tokens and invalid stored keys
-  if (typeof sessionStorage !== 'undefined') {
-    sessionStorage.removeItem('9router_auth')
-  }
-  if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem('9router_auth')
-    localStorage.removeItem('9router_key')
-  }
+  clearAll(browserStores())
 
   // Debounce multiple concurrent 401 responses
   if (unauthorizedTimer !== null) return
@@ -970,8 +971,7 @@ export const api = {
       const data = await res.json()
       // The server sets the httpOnly auth_token cookie; this flag only drives
       // the client-side gate (isAuthenticated) since JS cannot read it.
-      sessionStorage.setItem('9router_auth', 'true')
-      localStorage.setItem('9router_auth', 'true')
+      markAuthed(browserStores())
       return { success: true, mustChangePassword: !!data.mustChangePassword }
     }
     let errText = 'Invalid password'
@@ -1000,7 +1000,7 @@ export const api = {
     try {
       await fetch('/api/auth/logout', { method: 'POST' })
     } catch {}
-    sessionStorage.removeItem('9router_auth')
-    localStorage.removeItem('9router_auth')
+    // 只清登录标记：登出不该顺手删掉用户存的 API key（那是另一个决定）
+    clearAuthed(browserStores())
   },
 }

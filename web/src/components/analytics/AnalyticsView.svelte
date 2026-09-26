@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, getAuthHeaders, type ProviderConnection, type ProviderNode } from '../../api/client'
+  import { browserStores, getStoredApiKey } from '../../lib/session'
   import { PROVIDER_CATALOG } from '../../lib/providers'
   import Card from '../../lib/ui/Card.svelte'
   import {
@@ -116,7 +117,7 @@
     let controller: AbortController | null = null
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null
 
-    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('9router_key') || '' : ''
+    const token = getStoredApiKey(browserStores())
     let streamInitialized = false
 
     const connectStream = async () => {

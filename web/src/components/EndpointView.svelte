@@ -21,6 +21,7 @@
   import Card from '../lib/ui/Card.svelte'
   import Toggle from '../lib/ui/Toggle.svelte'
   import { api, type APIKey, type Settings, type TunnelStatusResponse } from '../api/client'
+  import { browserStores, setStoredApiKey } from '../lib/session'
 
   interface Props {
     apiKeys?: APIKey[]
@@ -399,7 +400,7 @@
       const res = await api.createApiKey({ name: newKeyName.trim() })
       if (res.key) {
         newlyCreatedKey = res.key
-        localStorage.setItem('9router_key', res.key)
+        setStoredApiKey(browserStores(), res.key)
         newKeyName = ''
         isCreateKeyOpen = false
         await loadStatus()

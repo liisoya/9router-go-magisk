@@ -11,6 +11,7 @@
     type ProviderNode,
     type Settings
   } from './api/client'
+  import { browserStores, clearAuthed } from './lib/session'
   import AnalyticsView from './components/analytics/AnalyticsView.svelte'
   import ApiKeysView from './components/ApiKeysView.svelte'
   import CliToolsView from './components/CliToolsView.svelte'
@@ -132,8 +133,7 @@
         // When login is required, only the server-verified session cookie is authoritative.
         isAuthenticatedState = !!authStatus.authenticated
         if (!isAuthenticatedState) {
-          sessionStorage.removeItem('9router_auth')
-          localStorage.removeItem('9router_auth')
+          clearAuthed(browserStores())
         }
       } else {
         isAuthenticatedState = true

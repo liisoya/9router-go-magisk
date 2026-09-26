@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api } from '../api/client'
+  import { browserStores, markAuthed } from '../lib/session'
 
   let {
     onSuccess,
@@ -123,8 +124,7 @@
 
     try {
       await api.patchSettings({ currentPassword: password, newPassword })
-      sessionStorage.setItem('9router_auth', 'true')
-      localStorage.setItem('9router_auth', 'true')
+      markAuthed(browserStores())
       if (onSuccess) {
         onSuccess()
       } else {

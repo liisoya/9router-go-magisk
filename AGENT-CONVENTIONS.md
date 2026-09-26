@@ -58,6 +58,11 @@
    `wait_pid_gone`，零依赖可离线测）。生产（`lifecycle.sh` / `watchdog.sh`）与真机门禁
    （`tools/device/test-lifecycle.sh`）都必须用它 —— **禁止**再写 `while + sleep` 轮询：
    ADR-0004 的"固定 3s 误报拉起失败"正是四处各写一份的代价（当时只修了 watchdog 那一份）
+15. **登录态唯一所有者** = `web/src/lib/session.ts`（`AUTH_FLAG_KEY` / `API_KEY_STORAGE_KEY` /
+   `isAuthed` / `markAuthed` / `clearAuthed` / `clearAll` / `getStoredApiKey` / `setStoredApiKey`，
+   存储注入 = 纯函数可离线测）。**禁止**在别处出现 `'9router_auth'` / `'9router_key'` 字面量或
+   直接摸 `localStorage`：`session.test.ts` 里的防回潮门禁会扫全树并红。两种"登出"是**有意区分**的：
+   `clearAuthed`（只清标记，保留 API key）vs `clearAll`（连 key 一起清，401 后清理过期凭据）
 8. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
 
 ## 3. 所有权地图（改哪里会与上游冲突）
