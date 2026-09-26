@@ -39,9 +39,11 @@
    `life_state`（`module/lib/lifecycle.sh`）是唯一 emit 方。两侧由 `contract-keys.test.js` **双向**缝死：
    shell 会 emit 而表里没有 → 红；表里有幽灵词（shell 永不会 emit）→ 红。加意图态只改这两处
 10. **"先门禁后动作"的顺序是数据**，不是装配流程里的隐式约定：更新/清理的步骤顺序与前置判据写成
-   `ENGINE_UPDATE_PLAN` / `MODULE_UPDATE_PLAN` / `ORPHAN_CLEAN_PLAN`，由 `parsers.js planSteps` 求值
-   （未给 fact 的门禁 = 未通过，默认拒绝）。app.js 只按求值结果执行，顺序不变量在离线有断言
-   （ADR-0007 的核心不变量由此从"只能真机验"变成"离线可验"）
+   `ENGINE_UPDATE_PLAN` / `MODULE_UPDATE_PLAN` / `ORPHAN_CLEAN_PLAN` / `DNS_OPTIMIZE_PLAN`，
+   由 `parsers.js planSteps` 求值（未给 fact 的门禁 = 未通过，默认拒绝）。app.js 只按求值结果执行，
+   顺序不变量在离线有断言（ADR-0007 的核心不变量由此从"只能真机验"变成"离线可验"）。
+   配套：**`bridge.js` 的桥接函数不许"永远 true"** —— `backupOnce` 改为按 shell 回的
+   ok/exists/no-src/fail 诚实返回，否则挂在它上面的门禁等于不存在
 11. **dashboard 测试路由表必须 ⊆ 生产路由表**（`TestDashboardRouteTables_TestTableIsSubsetOfProduction`）：
    测试 seam 是 `internal/handlers/dashboard/routes.go` 的 `RegisterRoutes`，生产是 `router.go` 的
    `SetupDashboardRoutes`。往测试 seam 加一条生产没有的路径 → 测试会在**假路线**上变绿，门禁必须红。

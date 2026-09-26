@@ -205,8 +205,12 @@
       `printf '%s\\n' ${shq(String(line == null ? '' : line).replace(/\n/g, ' '))} >> ${shq(p)}`,
     remove: p => `rm -f ${shq(p)}`,
     // 备份一次（dst 存在即跳过）——"恢复初始默认"的回滚点
+    // 备份一次（dst 已存在则不覆盖）→ 回滚点是否可用**由输出回答**（不再是"永远 true"）：
+    //   ok=刚备份成功 / exists=已有备份 / no-src=没有原配置（没有可丢的东西）→ 都算可用
+    //   fail=cp 失败 → 调用方据此拒绝改写："备份失败还继续写"会把用户配置置于无回滚点的状态
     backupOnce: (src, dst) =>
-      `[ -f ${shq(src)} ] && [ ! -f ${shq(dst)} ] && cp ${shq(src)} ${shq(dst)}; true`,
+      `if [ ! -f ${shq(src)} ]; then echo no-src; elif [ -f ${shq(dst)} ]; then echo exists; ` +
+      `elif cp ${shq(src)} ${shq(dst)} 2>/dev/null; then echo ok; else echo fail; fi`,
     // 从备份恢复 → true/false
     restoreBackup: (src, dst) =>
       `[ -f ${shq(src)} ] && cp ${shq(src)} ${shq(dst)} && echo ok || echo none`,
@@ -251,7 +255,12 @@
     return !r.err;
   }
   async function remove(path) { await sh(_cmds.remove(path)); return true; }
-  async function backupOnce(src, dst) { await sh(_cmds.backupOnce(src, dst), 30000); return true; }
+  // 诚实返回：只有 shell 明确回了 ok / exists / no-src 才算"回滚点可用"
+  async function backupOnce(src, dst) {
+    const r = await sh(_cmds.backupOnce(src, dst), 30000);
+    const v = r.out.trim();
+    return v === 'ok' || v === 'exists' || v === 'no-src';
+  }
   async function restoreBackup(src, dst) {
     const r = await sh(_cmds.restoreBackup(src, dst), 30000);
     return r.out.trim() === 'ok';

@@ -223,6 +223,14 @@
     { id: 'snapshot', gate: true },    // 删除前快照失败 → 不得删除（安全优先）
     { id: 'delete' },
   ];
+  const DNS_OPTIMIZE_PLAN = [
+    { id: 'probe' },                   // 跑测速（有副作用：写临时候选文件）
+    { id: 'rows-gate', gate: true },   // 没有任何可用上游 → 不得改写配置
+    { id: 'backup' },                  // 写配置前留回滚点
+    { id: 'backup-gate', gate: true }, // 回滚点不可用 → 不得改写（否则用户配置无可回滚）
+    { id: 'write' },                   // 原子写入新配置
+    { id: 'reload' },                  // 热重载 dnsfwd
+  ];
 
   // facts[id] = { ok, reason? }；**没给 fact 的门禁算未通过**（默认拒绝，不是默认放行）
   function planSteps(plan, facts) {
@@ -246,6 +254,6 @@
     normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans,
     ELF_MAGIC, ENGINE_MIN_BYTES, engineFileGate, checksumGate,
     LIFECYCLE_STATES, TONE_COLORS, stateLabel,
-    ENGINE_UPDATE_PLAN, MODULE_UPDATE_PLAN, ORPHAN_CLEAN_PLAN, planSteps
+    ENGINE_UPDATE_PLAN, MODULE_UPDATE_PLAN, ORPHAN_CLEAN_PLAN, DNS_OPTIMIZE_PLAN, planSteps
   };
 });

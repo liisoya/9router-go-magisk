@@ -248,3 +248,29 @@ test('计划结构：模块更新的 zip 门禁在 install 之前', () => {
   assert.strictEqual(v.blockedBy.id, 'zip-gate');
   assert.ok(!v.ran.includes('install'));
 });
+
+// ── DNS 优选："先留回滚点、再改写"（候选 3 的最后一处编排）──
+test('DNS 计划：没有可用上游 → 不得改写配置（write/reload 不可达）', () => {
+  const v = KP.planSteps(KP.DNS_OPTIMIZE_PLAN,
+    { 'rows-gate': { ok: false, reason: '没有可用率 ≥50% 的上游' } });
+  assert.strictEqual(v.blockedBy.id, 'rows-gate');
+  assert.ok(!v.ran.includes('write') && !v.ran.includes('reload'));
+});
+test('DNS 计划：回滚点不可用 → 不得改写（用户配置不能被置于无回滚点的状态）', () => {
+  const v = KP.planSteps(KP.DNS_OPTIMIZE_PLAN,
+    { 'rows-gate': { ok: true }, 'backup-gate': { ok: false, reason: '备份失败' } });
+  assert.strictEqual(v.blockedBy.id, 'backup-gate');
+  assert.ok(!v.ran.includes('write'));
+});
+test('DNS 计划：两个门禁都过 → 才 ran 到 write 与 reload', () => {
+  const v = KP.planSteps(KP.DNS_OPTIMIZE_PLAN,
+    { 'rows-gate': { ok: true }, 'backup-gate': { ok: true } });
+  assert.strictEqual(v.blockedBy, null);
+  assert.ok(v.ran.includes('write') && v.ran.includes('reload'));
+});
+test('DNS 计划结构：write 之前必须有 rows-gate 与 backup-gate（改顺序会红）', () => {
+  const idx = KP.DNS_OPTIMIZE_PLAN.findIndex(s => s.id === 'write');
+  assert.ok(idx > 0, 'DNS_OPTIMIZE_PLAN 里没有 write 步骤');
+  assert.deepStrictEqual(KP.DNS_OPTIMIZE_PLAN.slice(0, idx).filter(s => s.gate).map(s => s.id),
+    ['rows-gate', 'backup-gate']);
+});

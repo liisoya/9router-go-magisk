@@ -315,15 +315,26 @@ async function optimize() {
   await KB.remove(cf);
   const rows = KP.parseDnsProbeOutput(r.out);
   const tbl = document.getElementById('opt-table');
-  if (!rows.length) { tbl.innerHTML = '<div class="hint">❌ 没有可用率 ≥50% 的上游，保持原配置不动。</div>'; return; }
+  // 门禁①：没有任何可用上游 → 不得改写配置（顺序不变量见 KP.DNS_OPTIMIZE_PLAN，离线有断言）
+  const gRows = { ok: rows.length > 0, reason: '没有可用率 ≥50% 的上游' };
+  if (KP.planSteps(KP.DNS_OPTIMIZE_PLAN, { 'rows-gate': gRows }).blockedBy) {
+    tbl.innerHTML = `<div class="hint">❌ ${gRows.reason}，保持原配置不动。</div>`;
+    return;
+  }
   const top = rows.slice(0, 5);
   tbl.innerHTML = '<table><tr><th>#</th><th>上游</th><th>类型</th><th>可用率</th><th>RTT</th><th>评分</th></tr>' +
     top.map((x, i) => `<tr><td>${i + 1}</td><td>${esc(x.upstream)}</td><td>${KP.upType(x.upstream)}</td><td>${Math.round(x.okRate * 100)}%</td><td>${x.rtt.toFixed(0)}ms</td><td><b>${x.score.toFixed(1)}</b></td></tr>`).join('') + '</table>' +
     '<div class="hint">✅ 已自动应用：自定义项（最优先）+ 上方 Top5。不满意可「回滚上一版」或「恢复初始默认」。</div>';
   // 自动应用：自定义项在前 + Top5，原子写入后热重载
   const merged = [...new Set([...custom, ...top.map(x => KP.normUpstream(x.upstream))])].join('\n');
-  await KB.backupOnce(UPSTREAMS, UPSTREAMS + '.initial');
-  await KB.backupOnce(UPSTREAMS, UPSTREAMS + '.prev');
+  // 门禁②：先留回滚点；回滚点不可用就**不改写**（backupOnce 现在诚实返回，不再是永远 true）
+  const okInitial = await KB.backupOnce(UPSTREAMS, UPSTREAMS + '.initial');
+  const okPrev = await KB.backupOnce(UPSTREAMS, UPSTREAMS + '.prev');
+  const gBackup = { ok: okInitial && okPrev, reason: '备份失败（没有回滚点，不改写配置）' };
+  if (KP.planSteps(KP.DNS_OPTIMIZE_PLAN, { 'rows-gate': gRows, 'backup-gate': gBackup }).blockedBy) {
+    toast(`⚠️ ${gBackup.reason}`, 3200);
+    return;
+  }
   await KB.writeFile(UPSTREAMS, '# 优选自动生成（自定义项在前）' + new Date().toLocaleString() + '\n' + merged + '\n');
   await reloadDns(true);
   loadCurrentUpstreams();

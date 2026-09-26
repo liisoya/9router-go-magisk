@@ -52,9 +52,14 @@ test('appendLine：单引号不丢失、换行折叠为空格', () => {
 });
 
 // ── 备份/恢复 ──
-test('backupOnce：dst 存在即跳过，结尾 ; true 吞掉退出码', () => {
+test('backupOnce：四种结局都有明确标记（不再是「永远 true」）', () => {
   const cmd = C.backupOnce('/d/up', '/d/up.initial');
-  assert.strictEqual(cmd, "[ -f '/d/up' ] && [ ! -f '/d/up.initial' ] && cp '/d/up' '/d/up.initial'; true");
+  for (const marker of ['no-src', 'exists', 'ok', 'fail']) {
+    assert.ok(cmd.includes(`echo ${marker}`), `缺标记 ${marker}：${cmd}`);
+  }
+  assert.ok(!cmd.trim().endsWith('; true'),
+    '不允许再拿 `; true` 吞掉结果 —— 那会让"备份失败就不改写"的门禁永远通过');
+  assert.ok(cmd.includes("cp '/d/up' '/d/up.initial'"), cmd);
 });
 test('restoreBackup：ok/none 语义', () => {
   assert.strictEqual(C.restoreBackup('/d/a', '/d/b'),
