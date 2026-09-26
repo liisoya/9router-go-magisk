@@ -43,6 +43,48 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	return database, cleanup
 }
 
+// TestSetupServerRouter_HealthAndSsoStubs — 回归（端点 parity 巡检 2026-09-26 抓到）：
+//  1. /api/health 必须公开且带 `Access-Control-Allow-Origin: *` —— 内嵌 Dashboard 的
+//     clientPingUrl 会从 tunnel/公网/Tailscale 地址跨域探测它；此前只有 /health 且无 CORS 头，
+//     探测永远失败（用户看到"tunnel 不可达"）。
+//  2. SSO 回调在 Go 版未实现，必须明确 501，而不是 404 让人误判成"IdP 配置写错了"。
+func TestSetupServerRouter_HealthAndSsoStubs(t *testing.T) {
+	t.Setenv("JWT_SECRET", "router-health-secret")
+	t.Setenv("DATA_DIR", t.TempDir())
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	for _, path := range []string{"/health", "/api/health"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", path, w.Code, w.Body.String())
+		}
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Errorf("%s: expected Access-Control-Allow-Origin *, got %q（跨域探测会失败）", path, got)
+		}
+		if !strings.Contains(w.Body.String(), `"status":"ok"`) {
+			t.Errorf("%s: unexpected body %s", path, w.Body.String())
+		}
+	}
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/auth/oidc/callback"},
+		{http.MethodPost, "/api/auth/saml/acs"},
+	} {
+		req := httptest.NewRequest(c.method, c.path, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusNotImplemented {
+			t.Errorf("%s %s: expected 501 (not implemented), got %d", c.method, c.path, w.Code)
+		}
+	}
+}
+
 // TestSetupServerRouter_ModelTestSessionAuth — 回归：/api/models/test 曾挂在
 // RequireApiKey 组内，备份导入清空 apiKeys 表后仪表盘模型测试全部 401
 // "Invalid API key."（引擎门口拦截，请求根本没到上游）。Node 原版该端点是

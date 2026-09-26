@@ -292,14 +292,32 @@ func mountOAuthRoutes(r interface {
 	r.Post("/api/oauth/xiaomi-mimo/exchange", oauthH.HandleMimoExchange)
 }
 
+// healthHandler 同时服务 /health 与 /api/health。
+// CORS 头是给浏览器侧可达性探测用的：内嵌 Dashboard 会从 tunnel/公网/Tailscale 地址
+// （与当前 origin 不同源）fetch /api/health，缺了这个头跨域请求必然失败。
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
 // SetupServerRouter mounts public endpoints (/health, /api/hello) and
 // API-key protected routes (all engine + admin routes) on the chi router.
 func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	// Public (unauthenticated) endpoints
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
-		w.Write([]byte(`{"status":"ok"}`))
-	})
+	r.Get("/health", healthHandler)
+	// /api/health：内嵌 Dashboard 的浏览器侧可达性探测端点
+	// （web/src/components/EndpointView.svelte 的 clientPingUrl 会从 tunnel/公网/Tailscale 地址
+	// 跨域 fetch 它）。上游 Node 版同样公开且带 `Access-Control-Allow-Origin: *`；Go 版此前只有
+	// /health 且没有 CORS 头 → 探测永远失败（端点 parity 巡检 2026-09-26 抓到）。
+	r.Get("/api/health", healthHandler)
+	// SSO 登录回调：上游 Go 版只实现了"配置测试"（oidc/test、saml/test、saml/metadata），
+	// 回调端点**从未实现**（sso.go 只拿常量拼地址交给 IdP）。这里注册并明确回 501 —— 否则
+	// IdP 跳回来打到 404，会被误判成"配置写错了"。真正的登录回调需要 authorization code 交换、
+	// 断言签名校验与会话签发，属独立功能（见 FIXPLAN Phase 24）。
+	ssoH := sso.NewHandler(repo)
+	r.Get("/api/auth/oidc/callback", ssoH.HandleLoginNotImplemented)
+	r.Post("/api/auth/saml/acs", ssoH.HandleLoginNotImplemented)
 	// Version info is public (upstream PUBLIC_API_PATHS): the Sidebar polls
 	// /api/version on every dashboard page including /login, before any
 	// session or API key exists.

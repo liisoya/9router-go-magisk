@@ -388,6 +388,27 @@
 - [ ] **待用户发布**：tag `v1.9.2-r1` → 上传 zip → 推送 `update.json`
 - [ ] **待决策**：`/api/health` 与 SSO 回调是否补（上游同样缺失，可顺手提 PR）；大块缺口是否排期
 
+## Phase 24 · 补 `/api/health` 与 SSO 回调诚实化（端点巡检提出的两个实证缺口）✅ 2026-09-26
+
+> 来源：Phase 21 的端点 parity 巡检首轮抓到的两个缺口；v1.9.2 已确认**上游也没修**
+> （上游 Go 仓自己也没注册 `/api/health`；SSO 只实现了"配置测试"，回调从未实现）。
+
+- [x] **24.1 `/api/health`（含 CORS）**：内嵌 Dashboard 的浏览器侧可达性探测
+  （`web/src/components/EndpointView.svelte` 的 `clientPingUrl`，探测 tunnel/公网/Tailscale 地址）
+  打的一直是 `/api/health`，而本仓只有 `/health` 且**没有** `Access-Control-Allow-Origin: *`
+  → 跨域探测必然失败（用户看到"不可达"）。现在两者共用 `healthHandler`，都带 CORS 头。
+- [x] **24.2 SSO 回调诚实化**：`oidcCallback` / `samlACSPath` 只被用来拼给 IdP 的地址，
+  **回调本身从未实现**（上游同样）→ 注册 `GET /api/auth/oidc/callback`、
+  `POST /api/auth/saml/acs` 并明确回 **501** + `sso_login_not_implemented`，
+  避免 IdP 跳回来打到 404、被误判成"配置写错了"。
+- [x] **24.3 回归**：`internal/handlers/router_test.go` 新增
+  `TestSetupServerRouter_HealthAndSsoStubs`（`/health` 与 `/api/health` 都 200 且带 CORS；
+  两个 SSO 回调都 501）；`go build ./...` ✓、`go test ./internal/handlers/` ✓。
+- [x] **24.4 棘轮收紧**：巡检确认**无新增缺口**，且基线内 6 条已被覆盖（`/api/health`、两个 SSO 回调，
+  另 3 条 `/api/translator/console-logs*` 由上游合并带来）→ `--write-baseline` 收紧到 **135 条**。
+- [ ] **待决策**：真正的 SSO 登录回调（authorization code 交换 + id_token/断言签名校验 + 会话签发）
+  是否要做；若不打算支持登录，建议把设置页的 OIDC/SAML 入口标注为"仅测试连接"。
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |

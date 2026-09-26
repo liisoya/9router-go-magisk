@@ -167,6 +167,19 @@ func (h *Handler) HandleSamlTest(w http.ResponseWriter, r *http.Request) {
 
 // HandleSamlMetadata handles GET /api/auth/saml/metadata: serve the SAML
 // Service Provider metadata XML for the configured issuer and ACS URL.
+// HandleLoginNotImplemented 明确回 501：本仓（与上游 Go 版一致）只实现了 OIDC/SAML 的
+// "配置测试"端点（oidc/test、saml/test、saml/metadata），真正的登录回调
+// （/api/auth/oidc/callback、/api/auth/saml/acs）从未实现 —— 那两个常量只是拼给 IdP 的地址。
+// 注册它们并回 501，是为了让 IdP 跳回来时得到明确答复，而不是 404 让人误判"配置写错了"。
+// 实现真正的回调需要 authorization code 交换 + id_token/断言签名校验 + 会话签发，
+// 属独立功能（见 FIXPLAN Phase 24）。
+func (h *Handler) HandleLoginNotImplemented(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	_, _ = w.Write([]byte(`{"error":"sso_login_not_implemented",` +
+		`"message":"SSO login is not implemented in 9router-go; OIDC/SAML settings support connection testing only."}`))
+}
+
 func (h *Handler) HandleSamlMetadata(w http.ResponseWriter, r *http.Request) {
 	settings, err := h.Repo.GetSettingsRaw()
 	if err != nil {

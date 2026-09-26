@@ -22,8 +22,6 @@ DELETE /api/headroom/proxy/{}
 DELETE /api/models/custom
 DELETE /api/models/disabled
 DELETE /api/pricing
-DELETE /api/translator/console-logs
-GET    /api/auth/oidc/callback
 GET    /api/auth/oidc/start
 GET    /api/auth/saml/start
 GET    /api/cli-tools/antigravity-mitm
@@ -45,7 +43,6 @@ GET    /api/cli-tools/openclaw-settings
 GET    /api/cli-tools/opencode-settings
 GET    /api/combos/{}
 GET    /api/headroom/proxy/{}
-GET    /api/health
 GET    /api/init
 GET    /api/keys/{}
 GET    /api/mcp/{}/sse
@@ -63,8 +60,6 @@ GET    /api/pxpipe/logs
 GET    /api/pxpipe/stats
 GET    /api/pxpipe/status
 GET    /api/tags
-GET    /api/translator/console-logs
-GET    /api/translator/console-logs/stream
 GET    /api/translator/load
 GET    /api/usage/chart
 GET    /api/usage/history
@@ -81,7 +76,6 @@ PATCH  /api/cli-tools/opencode-settings
 PATCH  /api/headroom/proxy/{}
 PATCH  /api/pricing
 POST   /api/auth/reset-password
-POST   /api/auth/saml/acs
 POST   /api/cli-tools/antigravity-mitm
 POST   /api/cli-tools/claude-settings
 POST   /api/cli-tools/cline-settings
