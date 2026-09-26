@@ -127,6 +127,41 @@ func TestHandleUpdateSettings_PasswordChange(t *testing.T) {
 	}
 }
 
+// 回归（2026-09-26 用户报障：Settings → Download Backup 报 "Invalid password"，明明已登录）：
+// 服务端要求 x-9r-password 头（上游 spec: 9router/src/app/api/settings/database/route.js:16）。
+// 本 fork 的 Svelte 仪表盘当时用裸 <a href> 下载、不带这个头 → 必 401；前端已按上游补上
+// 密码弹层与请求头（web/src/lib/db-backup.ts + db-backup.test.ts），此处锁住服务端这一半契约：
+// 错的密码 401、对的密码 200 且导出体非空。
+func TestHandleExportDatabase_AcceptsPasswordHeader(t *testing.T) {
+	t.Setenv("INITIAL_PASSWORD", "s3cret-pass")
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/database", nil)
+	req.Header.Set(passwordHeader, "wrong-pass")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password must be 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/settings/database", nil)
+	req.Header.Set(passwordHeader, "s3cret-pass")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("correct password header must export (200), got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode export payload: %v", err)
+	}
+	if len(payload) == 0 {
+		t.Error("export payload must not be empty")
+	}
+}
+
 func TestHandleExportDatabase_RequiresPassword(t *testing.T) {
 	repo, cleanup := setupSettingsTestDB(t)
 	defer cleanup()

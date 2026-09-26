@@ -21,8 +21,17 @@
     Zap
   } from 'lucide-svelte'
   import Card from '../lib/ui/Card.svelte'
+  import Input from '../lib/ui/Input.svelte'
+  import Modal from '../lib/ui/Modal.svelte'
   import Toggle from '../lib/ui/Toggle.svelte'
   import { api, type Settings } from '../api/client'
+  import {
+    backupFileName,
+    buildExportRequest,
+    buildImportRequest,
+    downloadJSON,
+    responseErrorMessage
+  } from '../lib/db-backup'
 
   interface Props {
     settings?: Settings
@@ -74,6 +83,9 @@
   let isDownloadingBackup = $state(false)
   let isImportingBackup = $state(false)
   let fileInput: HTMLInputElement | null = $state(null)
+  // 下载/导入前必须输密码：服务端要求 x-9r-password 头（上游 parity，见 lib/db-backup.ts）
+  let dbAuth = $state({ open: false, mode: '' as '' | 'export' | 'import', password: '' })
+  let pendingImportFile = $state<File | null>(null)
 
   $effect(() => {
     if (settings) {
@@ -196,47 +208,62 @@
     }
   }
 
-  function handleDownloadBackup() {
-    isDownloadingBackup = true
-    try {
-      const a = document.createElement('a')
-      a.href = '/api/settings/database'
-      a.download = `9router-backup-${new Date().toISOString().slice(0, 10)}.sqlite`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-    } finally {
-      isDownloadingBackup = false
-    }
+  // ── 备份 / 恢复（上游 parity：都先弹层输密码，请求形状见 lib/db-backup.ts）──
+  function openDbAuth(mode: 'export' | 'import') {
+    dbAuth = { open: true, mode, password: '' }
   }
-
-  async function handleFileSelected(e: Event) {
+  function closeDbAuth() {
+    dbAuth = { open: false, mode: '', password: '' }
+  }
+  function handleDownloadBackup() {
+    openDbAuth('export')
+  }
+  function handleFileSelected(e: Event) {
     const target = e.target as HTMLInputElement
     const file = target.files?.[0]
     if (!file) return
-
-    if (!confirm(`Import database backup "${file.name}"? This will overwrite existing local data.`)) {
-      target.value = ''
-      return
+    pendingImportFile = file
+    openDbAuth('import')
+    target.value = ''
+  }
+  async function handleExportDatabase(password: string) {
+    isDownloadingBackup = true
+    try {
+      const { url, init } = buildExportRequest(password)
+      const res = await fetch(url, init)
+      if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to export database'))
+      downloadJSON(await res.json(), backupFileName())
+    } catch (err) {
+      alert(`Failed to export database: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      isDownloadingBackup = false
+      pendingImportFile = null
     }
-
+  }
+  async function handleImportDatabase(password: string) {
+    const file = pendingImportFile
+    if (!file) return
     isImportingBackup = true
     try {
-      const formData = new FormData()
-      formData.append('file', file)
-      const res = await fetch('/api/settings/database', {
-        method: 'POST',
-        body: formData,
-      })
-      if (!res.ok) throw new Error(`Import failed with status ${res.status}`)
+      const payload = JSON.parse(await file.text())
+      const { url, init } = buildImportRequest(payload, password)
+      const res = await fetch(url, init)
+      if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to import database'))
       alert('Database backup imported successfully! Reloading page...')
       window.location.reload()
     } catch (err) {
       alert(`Failed to import database: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       isImportingBackup = false
-      target.value = ''
+      pendingImportFile = null
     }
+  }
+  async function handleDbAuthConfirm() {
+    const { mode, password } = dbAuth
+    if (!password) return
+    closeDbAuth()
+    if (mode === 'export') await handleExportDatabase(password)
+    else if (mode === 'import') await handleImportDatabase(password)
   }
 </script>
 
@@ -317,7 +344,7 @@
 
           <input
             type="file"
-            accept=".sqlite,.db"
+            accept=".json"
             bind:this={fileInput}
             onchange={handleFileSelected}
             class="hidden"
@@ -647,4 +674,28 @@
       </div>
     </Card>
   </div>
+
+  <!-- 备份/恢复前的密码确认：服务端要求 x-9r-password 头（上游 parity，profile/page.js:1673-1699）。
+       没有这一步，Download Backup 必然 401 Invalid password（2026-09-26 用户报障）。 -->
+  <Modal isOpen={dbAuth.open} onClose={closeDbAuth} title="Confirm Password" size="sm">
+    <p class="text-text-muted mb-3 text-sm">
+      Enter your current password to {dbAuth.mode === 'export' ? 'export' : 'import'} the database.
+      {#if dbAuth.mode === 'import'}<span class="text-warn"> This will overwrite existing local data.</span>{/if}
+    </p>
+    <Input type="password" bind:value={dbAuth.password} placeholder="Current password" />
+    {#snippet footer()}
+      <button
+        type="button"
+        onclick={closeDbAuth}
+        disabled={isDownloadingBackup || isImportingBackup}
+        class="py-2 px-3 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs font-semibold text-text-main transition cursor-pointer disabled:opacity-50"
+      >Cancel</button>
+      <button
+        type="button"
+        onclick={handleDbAuthConfirm}
+        disabled={!dbAuth.password || isDownloadingBackup || isImportingBackup}
+        class="py-2 px-3 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold transition cursor-pointer disabled:opacity-50"
+      >Confirm</button>
+    {/snippet}
+  </Modal>
 </div>

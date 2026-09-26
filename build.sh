@@ -54,7 +54,16 @@ else
   echo "CLIPBOARD_PATCH=0，跳过注入"
 fi
 
-step "3/7 模块层离线回归（解析层 / 命令构造器 / 键契约）"
+step "3/7 仪表盘备份契约 + 模块层离线回归（解析层 / 命令构造器 / 键契约）"
+# 仪表盘的 Download Backup 必须带 x-9r-password 头（上游 spec：settings/database/route.js:16）；
+# 缺了就是 401 Invalid password（2026-09-26 用户报障）。这里在**构建产物**上再验一次，
+# 挡住"改了 web/src 忘了重建 dist / 回退到裸 <a> 下载"这类静默回归。
+# 注意：本断言在修复前是红的（旧 dist 里根本没有这个字符串）。
+if grep -rq -- 'x-9r-password' web/dist/assets/ 2>/dev/null; then
+  echo "仪表盘备份契约 ✅（x-9r-password 在构建产物里）"
+else
+  die "web/dist 里没有 x-9r-password：仪表盘下载备份会 401 Invalid password（见 docs/FIXPLAN Phase 20）"
+fi
 if [ "${SKIP_TESTS:-0}" = "1" ]; then
   echo "SKIP_TESTS=1，跳过"
 elif command -v node >/dev/null 2>&1; then
