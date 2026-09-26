@@ -31,12 +31,8 @@ log() { log_write watchdog "[$(date '+%F %T')] $*"; }
 wait_engine() {
   # 引擎起来后要 bind + 载入目录才可用；固定 3s 在高负载时会误报"拉起失败"
   # （真机见过：日志说失败，但 2s 后 /health 200）。轮询到 10s，如实判定。
-  _i=0
-  while [ "$_i" -lt 10 ]; do
-    life_engine_healthy && return 0
-    sleep 1; _i=$((_i + 1))
-  done
-  return 1
+  # 轮询语义的唯一实现在 lib/wait.sh —— ADR-0004 那次误报正是"四处各写一份"的代价
+  wait_for 10 1 life_engine_healthy
 }
 interval() {
   _i="$(cat "$DATA_DIR/watchdog-interval" 2>/dev/null | tr -d ' \n')"

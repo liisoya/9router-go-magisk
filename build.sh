@@ -115,6 +115,7 @@ verify_zip() {
   [ -f "$ex/lib/ops.sh" ] || die "zip 缺 lib/ops.sh"
   [ -f "$ex/lib/lifecycle.sh" ] || die "zip 缺 lib/lifecycle.sh（生命周期唯一所有者）"
   [ -f "$ex/lib/log.sh" ] || die "zip 缺 lib/log.sh（日志策略唯一所有者）"
+  [ -f "$ex/lib/wait.sh" ] || die "zip 缺 lib/wait.sh（等就绪/等消失唯一所有者）"
   [ -f "$ex/lib/watchdog.sh" ] || die "zip 缺 lib/watchdog.sh（生命周期守护）"
   [ -f "$ex/service.sh" ] || die "zip 缺 service.sh"
   [ -f "$ex/webroot/index.html" ] || die "zip 缺 webroot/index.html"

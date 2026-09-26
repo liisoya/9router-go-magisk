@@ -25,6 +25,8 @@
 DATA_DIR="${DATA_DIR:-/data/adb/9router-go}"
 # 日志策略（路径/上限/轮转）在 lib/log.sh —— 唯一所有者；本库只经它写日志
 . "$MODDIR/lib/log.sh" || { echo "lifecycle.sh: 缺 lib/log.sh" >&2; return 1 2>/dev/null || exit 1; }
+# 「等就绪 / 等消失」的唯一实现在 lib/wait.sh（本库、守护、真机门禁共用；零依赖）
+. "$MODDIR/lib/wait.sh" || { echo "lifecycle.sh: 缺 lib/wait.sh" >&2; return 1 2>/dev/null || exit 1; }
 LIFE_DB="$DATA_DIR/db/data.sqlite"
 LIFE_SQLITE3="$MODDIR/bin/sqlite3"
 LIFE_SCHEMA="$MODDIR/etc/schema.sql"
@@ -51,13 +53,8 @@ LIFE_DNS_LOG="$LOG_DNS_PATH"
 life_pid_alive() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
 life_pid_of() { cat "$1" 2>/dev/null; }
 life_pid_gone() {
-  # "已经退出"判定，含僵尸态：kill -0 对僵尸仍返回成功，会把等待循环拖满超时
-  _p="${1:-}"
-  [ -n "$_p" ] || return 0
-  kill -0 "$_p" 2>/dev/null || return 0
-  _st="$(sed -n 's/^[^)]*) \([A-Z]\).*/\1/p' "/proc/$_p/stat" 2>/dev/null)"
-  [ "$_st" = "Z" ] && return 0
-  return 1
+  # "已经退出"判定（含僵尸态）—— 实现唯一所有者在 lib/wait.sh，这里只保留历史名字给既有调用方
+  wait_pid_gone "${1:-}"
 }
 life_cgroup_of() { sed -n 's/^0:://p' "/proc/$1/cgroup" 2>/dev/null; }
 life_pid_is_exe() {
@@ -219,12 +216,8 @@ life_wd_start() {
   life_cgroup_escape "$!"
   # setsid 是异步的，pidfile 要下一拍才落盘：等它就位再返回，否则调用方会误判"守护不在"
   # 而退回本地启动 —— 那正好把引擎放回调用者的 cgroup。
-  i=0
-  while [ $i -lt 30 ]; do
-    life_wd_alive && { echo "started"; return 0; }
-    sleep 0.1
-    i=$((i + 1))
-  done
+  # 轮询语义唯一实现在 lib/wait.sh（30×0.1s ≈ 3s）
+  wait_for 30 0.1 life_wd_alive && { echo "started"; return 0; }
   echo "start-failed"
 }
 
@@ -396,12 +389,8 @@ life_stop_all() {
   _dp="$(life_pid_of "$LIFE_ST_DNS")"
   life_stop_engine
   life_stop_dns
-  i=0
-  while [ "$i" -lt 50 ]; do
-    life_pid_gone "$_ep" && life_pid_gone "$_dp" && break
-    sleep 0.2
-    i=$((i + 1))
-  done
+  # 等两个进程真的退出（含僵尸态）：语义唯一实现在 lib/wait.sh
+  wait_gone 50 0.2 "$_ep" "$_dp"
   echo "stopped"
 }
 life_stop_user() {
@@ -428,12 +417,11 @@ life_restart_engine() {
     life_stop_all >/dev/null
     ( LIFE_CALLER=restart-engine; export LIFE_CALLER; life_ensure_engine ) >/dev/null
   fi
-  i=0
-  while [ $i -lt 20 ]; do
-    sleep 2
-    life_engine_healthy && { life_wd_hold_release; echo "engine=up"; return 0; }
-    i=$((i + 1))
-  done
+  if wait_for 20 2 life_engine_healthy; then
+    life_wd_hold_release
+    echo "engine=up"
+    return 0
+  fi
   life_wd_hold_release
   echo "engine=down"
   return 0

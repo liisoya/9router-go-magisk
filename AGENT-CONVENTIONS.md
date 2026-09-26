@@ -54,6 +54,10 @@
    `ops.sh engine_src_ok` 是执行前复核，不是第二份判据。两侧由
    `module/webroot/test/engine-spec-contract.test.js` 缝住（常量、魔数字面量、检查项存在性、
    边界语义）。改规则 = 改 `parsers.js` + 按门禁同步 shell 常量
+14. **「等就绪 / 等消失」唯一所有者** = `module/lib/wait.sh`（`wait_for` / `wait_gone` /
+   `wait_pid_gone`，零依赖可离线测）。生产（`lifecycle.sh` / `watchdog.sh`）与真机门禁
+   （`tools/device/test-lifecycle.sh`）都必须用它 —— **禁止**再写 `while + sleep` 轮询：
+   ADR-0004 的"固定 3s 误报拉起失败"正是四处各写一份的代价（当时只修了 watchdog 那一份）
 8. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
 
 ## 3. 所有权地图（改哪里会与上游冲突）

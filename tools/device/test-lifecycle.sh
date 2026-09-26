@@ -35,6 +35,10 @@ port() { "$OPS" get-port; }
 health() { curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$(port)/health" 2>/dev/null; }
 cgof() { sed -n 's/^0:://p' "/proc/$1/cgroup" 2>/dev/null; }
 engpid() { cat "$PIDFILE" 2>/dev/null; }
+# 等就绪/等消失的唯一实现（零依赖，可直接 source）：谓词在**当前 shell** 执行，顺手把 pid 带出来
+. "$MODDIR/lib/wait.sh" || { echo "FAIL: 缺 $MODDIR/lib/wait.sh（等就绪/等消失的唯一实现）"; exit 2; }
+livepid() { N="$(engpid)"; [ -n "$N" ] && kill -0 "$N" 2>/dev/null; }
+newpid() { N="$(engpid)"; [ -n "$N" ] && [ "$N" != "$1" ] && kill -0 "$N" 2>/dev/null; }
 
 echo "== 目标：$MODDIR （数据目录 $DATA_DIR）=="
 
@@ -58,13 +62,8 @@ if [ -z "$OLD" ] || ! kill -0 "$OLD" 2>/dev/null; then
 else
   info "T2 强杀引擎 pid=$OLD（模拟系统连坐/OOM/崩溃）"
   kill -9 "$OLD" 2>/dev/null
-  i=0; NEW=""
-  while [ $i -lt 20 ]; do
-    sleep 2
-    N="$(engpid)"
-    if [ -n "$N" ] && [ "$N" != "$OLD" ] && kill -0 "$N" 2>/dev/null; then NEW="$N"; break; fi
-    i=$((i + 1))
-  done
+  N=""; NEW=""
+  if wait_for 20 2 newpid "$OLD"; then NEW="$N"; fi
   if [ -z "$NEW" ]; then
     no "T2 40s 内未被拉起（守护没干活？看 $DATA_DIR/watchdog.log）"
   else
@@ -121,12 +120,8 @@ else
   else
     ok "T5 维护窗口生效：窗口内未插手"
   fi
-  i=0; HEAL=""
-  while [ $i -lt 15 ]; do
-    sleep 2; N="$(engpid)"
-    if [ -n "$N" ] && kill -0 "$N" 2>/dev/null; then HEAL="$N"; break; fi
-    i=$((i + 1))
-  done
+  N=""; HEAL=""
+  if wait_for 15 2 livepid; then HEAL="$N"; fi
   if [ -n "$HEAL" ]; then ok "T5 窗口到期后自愈（pid=$HEAL）"
   else no "T5 窗口到期后仍未拉起（hold 把守护卡死了）"; fi
 fi
@@ -147,12 +142,8 @@ else
   ok "T4 用户停服意图被尊重（30s 未被复活）"
 fi
 "$OPS" start-user >/dev/null 2>&1
-i=0; UP=""
-while [ $i -lt 15 ]; do
-  sleep 2; N="$(engpid)"
-  if [ -n "$N" ] && kill -0 "$N" 2>/dev/null; then UP="$N"; break; fi
-  i=$((i + 1))
-done
+N=""; UP=""
+if wait_for 15 2 livepid; then UP="$N"; fi
 if [ -n "$UP" ]; then ok "T4 显式启动恢复正常（pid=$UP /health=$(health)）"
 else no "T4 显式启动失败"; fi
 
@@ -233,6 +224,21 @@ if [ -f "$ZIP" ]; then
 else
   info "T10 跳过：$ZIP 不存在（先跑一次 install-module 生成）"
 fi
+
+# ── T9 「等就绪 / 等消失」原语本身（唯一实现 lib/wait.sh）──
+# 门禁自己用同一实现跑一遍：语义坏了（比如假谓词也报成功）会在这里先红，
+# 而不是等到 T2/T4/T5 超时才发现"门禁自己不可信"
+if wait_for 3 0.2 true; then ok "T9a wait_for：谓词为真 → 成功"; else no "T9a wait_for 对真谓词报了失败"; fi
+if wait_for 2 0.1 false; then no "T9a2 wait_for 对假谓词报了成功（会谎报拉起）"; else ok "T9a2 wait_for：谓词为假 → 如实失败"; fi
+if wait_for 0 0.1 true; then no "T9a3 wait_for 次数 0 却成功"; else ok "T9a3 wait_for：次数非法 → 拒绝"; fi
+sleep 0.1 &
+_tp=$!
+wait "$_tp" 2>/dev/null
+if wait_gone 3 0.2 "$_tp"; then ok "T9b wait_gone：已退出 → 判消失"; else no "T9b wait_gone 对已退出的 pid 报了失败"; fi
+sleep 30 &
+_ap=$!
+if wait_gone 2 0.2 "$_ap"; then no "T9c wait_gone 对活着的 pid 报了消失"; else ok "T9c wait_gone：仍活着 → 不谎报消失"; fi
+kill -9 "$_ap" 2>/dev/null
 
 echo "== 结果：通过 $PASS / 失败 $FAIL =="
 # 证据留存：2026-09-26 观测到一次偶发失败（1/4 次）但在 stdout 之外没有痕迹 ——

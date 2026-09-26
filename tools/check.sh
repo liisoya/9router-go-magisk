@@ -140,6 +140,10 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/test-inject-mod-id.sh ]; then
       run "INJECT 占位符注入器自证（全树注入 + 0 残留）" sh tools/test-inject-mod-id.sh
     fi
+    # WAIT：等就绪/等消失的唯一实现（lib/wait.sh 零依赖，所以轮询语义第一次能离线验）
+    if [ -f tools/test-wait-lib.sh ]; then
+      run "WAIT 等就绪/等消失原语（lib/wait.sh）" sh tools/test-wait-lib.sh
+    fi
   fi
 fi
 

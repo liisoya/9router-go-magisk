@@ -42,6 +42,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | DEADH | handler / 注册函数是否真的被挂载（定义了却没人调 = 点了必 404） | `python3 tools/check-dead-handlers.py` | python3 | 新增了一条"有实现、有测试、没路由"的代码（`HandleWebFetch`/`RegisterRoutes` 同类） |
 | PY-UNIT | 棘轮 module（基线／豁免／只拦新增／收紧）的接口级单测 | `python3 -m unittest discover -s tools -p 'test_*.py'` | python3 | 三个门禁共用的棘轮语义坏了（PARITY/UIPARITY/DEADH 会一起失真） |
 | INJECT | `__MOD_ID__` 注入器（全树注入 + 零残留 + 不可读拒绝） | `sh tools/test-inject-mod-id.sh` | sh | 打包/直推两条路径的注入实现漂移（上线后设备上才看到占位符 → 面板取不到信息） |
+| WAIT | 「等就绪 / 等消失」原语（`lib/wait.sh`：零等待/如实失败/非法次数拒绝/pid 消失判定） | `sh tools/test-wait-lib.sh` | sh | 轮询语义坏了 → 会谎报"拉起成功"或白等满超时（ADR-0004 那类误报） |
 
 ### 2.3 真机断言（`tools/check.sh --device`）
 
@@ -124,6 +125,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 新增 | GO-TEST（+1 例） | 候选 4：`TestDashboardRouteTables_TestTableIsSubsetOfProduction` —— 把"dashboard 测试路由表 ⊆ 生产路由表"从"靠运气不漂移"变成结构断言（生产 334 / 测试 46 / 只在测试里注册 0 条）。红灯自证：往测试 seam 加 `GET /api/zz-fake-route` → 门禁精确报出该路径并红 | 见本次提交 |
 | 2026-09-26 | 新增 | INJECT（8 例） | 候选 7：`tools/inject-mod-id.sh` 收成注入唯一实现（**不维护文件清单**：注入对象 = 全树所有含占位符的文件；MOD_ID 唯一来源 = module.prop；自己断言零残留；不可读文件一律拒绝）。build.sh 的 2 文件 sed 循环与 deploy-device.sh 的 4 文件 sed 一并撤掉 | 见本次提交 |
 | 2026-09-26 | 新增 | JS-UNIT（58 → 63 例） | 候选 5：`engine-spec-contract.test.js` 把「什么算一个引擎」两侧缝死（常量两种写法不许漂、魔数字面量逐字相同、两项检查的存在性、边界语义 `-ge` ↔ `<`）。红灯自证：ops.sh 下限改 4MB → 精确报出「前端放行、后端拒绝」并红。ADR-0007 补第 7 条澄清「判据 vs 执行 ≠ 抄两遍」 | 见本次提交 |
+| 2026-09-26 | 新增 | WAIT（离线 10 例）+ 真机 T9（6 例） | 候选 6：`module/lib/wait.sh` 收成「等就绪/等消失」唯一实现（`wait_for` / `wait_gone` / `wait_pid_gone`；先判定再睡觉、次数非法即拒绝、僵尸态算已退出、谓词在当前 shell 执行）。**五处** ad-hoc 轮询全部收敛（watchdog 拉起等待、life_stop_all、life_restart_engine、life_wd_start、真机门禁 3 处）；`life_pid_gone` 保留名字但实现改为委派。附带收益：轮询语义第一次能离线验（此前只能上真机） | 见本次提交 |
 | 2026-09-26 | 新增 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（离线档） | f509e85 |
 | 2026-09-26 | 新增 | 变更映射自检 | `tools/check.sh` 末尾提醒"改了 A 没改 B"（只提醒不拦，规则见契约 §4） | f509e85 |
 
