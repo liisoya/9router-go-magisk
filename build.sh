@@ -66,10 +66,11 @@ else
 fi
 if [ "${SKIP_TESTS:-0}" = "1" ]; then
   echo "SKIP_TESTS=1，跳过"
-elif command -v node >/dev/null 2>&1; then
-  node --test module/webroot/test/*.test.js
 else
-  echo "node 不可用，跳过"
+  # 单一清单来源：离线门禁由 tools/check.sh 编排（清单见 docs/TESTING.md）。
+  # CHECK_FAST=1 → 跳过 GO-TEST 与 TSC（本流程里的 `go build`、`bun run build` 已覆盖对应风险），
+  # 避免构建时间翻倍；发布前请单独跑 `tools/check.sh --offline` 全套。
+  CHECK_FAST=1 bash tools/check.sh --offline || die "离线门禁未通过（见 docs/TESTING.md）"
 fi
 
 step "4/7 schema 漂移断言"
