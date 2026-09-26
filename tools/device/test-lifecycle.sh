@@ -203,6 +203,18 @@ else no "T8b 现有引擎被动过：$SZ_BEFORE → $SZ_AFTER"; fi
 [ "$("$OPS" panel | tr ' ' '\n' | grep '^engine=')" = "engine=up" ] && ok "T8d 引擎仍 up（门禁没有惊动服务）" || no "T8d 引擎不在跑了"
 rm -f /data/local/tmp/9r-bogus.new
 
+# ── T9 版本一致性：面板 engine_version 必须等于引擎自报版本 ──
+# 2026-09-26：整包更新（install-module，KernelSU 的常规升级路径）装了新引擎，但运行期
+# engine-version 文件停在旧值 → 面板谎报"当前 1.9.1"并永远提示有更新。
+SELF="$(curl -s -m 5 "http://127.0.0.1:$(port)/version" 2>/dev/null | sed -n 's/.*"currentVersion":"\([^"]*\)".*/\1/p')"
+PANEL_VER="$("$OPS" panel | tr ' ' '\n' | sed -n 's/^engine_version=//p')"
+if [ -n "$SELF" ]; then
+  if [ "$PANEL_VER" = "$SELF" ]; then ok "T9 引擎版本一致（面板 $PANEL_VER = 引擎自报 $SELF）"
+  else no "T9 版本不一致：面板 $PANEL_VER / 引擎自报 $SELF（状态谎报）"; fi
+else
+  info "T9 跳过：/version 未公开（v1.9.2 之前的引擎）或不可达"
+fi
+
 echo "== 结果：通过 $PASS / 失败 $FAIL =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

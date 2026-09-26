@@ -339,6 +339,55 @@
 - [ ] **待用户验收**：面板「下载并更新引擎」重跑一次应能真正更新；把加速节点换成坏节点时应看到
   「拒绝安装」而不是「装完引擎消失」。
 
+## Phase 23 · 升级上游 v1.9.2：撤补丁 + 修整包更新的版本谎报 + 功能门禁 ✅ 2026-09-26
+
+> 起因：用户报「上游出了 v1.9.2，看是否修了我们的 bug、旧补丁能否撤」，并追加报障
+> 「我在手机端更新引擎最后是安装失败，没有实现真的更新引擎」。
+
+- [x] **23.1 上游对照（依据本地 `git diff v1.9.1..v1.9.2`，5 个提交，不只看 release notes）**
+
+  | 我们携带的 | 上游 v1.9.2 | 处置 |
+  |---|---|---|
+  | `models-test-dashboard-auth`（`/api/models/test` 401） | **已吸收**（`1865f78` 移入 dashboard 鉴权组，且自带 `TestSetupServerRouter_ModelTestSessionAuth`） | 撤补丁（`tools/patches/` 删除，ADR-0003 登记"已由上游吸收"） |
+  | `dashboard-import-multipart` | 未做 | 撤（Phase 20 已把前端改回上游 JSON+password 形状，该分支无调用方） |
+  | `codebuddy-cn-agent-prompt-sanitizer` | 无对应实现 | 保留（自有功能，上游 PR 义务仍在） |
+
+  白拿的修复：`/version` 系列公开（不再 401 刷屏）、`/sw.js` 与 `/manifest.*` 404、缺失图标、
+  前端 `onUnauthorized` 清会话跳登录、`GET /api/keys` 对 dashboard 会话返回完整密钥、媒体多账号轮换。
+  我方提的三点上游**都没修**：`/api/health`（上游 Go 仓自己也没注册）、SSO `oidc/callback`+`saml/acs`
+  （同样只算地址没注册）、大块缺口（cli-tools 49 / pxpipe 9 / translator 7）。
+- [x] **23.2 合并与冲突解决**：三处冲突 —— `internal/handlers/router.go`（取上游，含 models/test 新挂载点）、
+  `ProfileSettingsView.svelte`（保留我们的密码弹层与请求形状，其余取上游措辞/`accept=".json"`）、
+  `COMPARISON.md`（上游 statuses 图例 + 我们的 §0 parity 节并存）；`settings.go`/`settings_test.go`
+  取上游后**回插** `TestHandleExportDatabase_AcceptsPasswordHeader`（锁 `x-9r-password` 契约）。
+- [x] **23.3 schema 门禁随上游收敛**：v1.9.2 的 `DATABASE.md` 删掉了索引与部分列（改为指向
+  Next.js 的 `src/lib/db/schema.js`），但 `lastUsedAt`/`consecutiveUseCount` 仍被引擎代码真实使用
+  （`internal/db/usage.go:67`、`internal/handlers/dashboard/connections.go:257`）。`tools/gen-schema.py`
+  改为"**表与列**必须对齐"，并显式登记 `SUPERSET_COLUMNS`（每条必须写代码依据）；索引不再比对，
+  但 `--diff` 仍逐条列出供人工核对。
+- [x] **23.4 计划外真 bug：整包更新后引擎版本谎报**
+  - 现场：`install-module`（KernelSU 的常规升级路径）装了 v1.9.2 引擎，但 `$DATA_DIR/engine-version`
+    停在 1.9.1 → 面板显示"当前 1.9.1"并**永远提示有更新**（引擎自报其实是 1.9.2）；
+  - 修：`cmd_install_module` 成功后把包内 `$MODDIR/etc/engine-version`（构建期写入，描述刚装进来的
+    二进制）同步到运行期文件；包里没有该文件时删除运行期文件（宁可显示"未知"，也不谎报）。
+  - 门禁：`tools/device/test-lifecycle.sh` **T9** —— 面板 `engine_version` 必须等于引擎自报
+    `/version.currentVersion`（版本一致性不再靠人看）。
+- [x] **23.5 撤补丁的功能验证（用户要求"注重检测最后功能可行"）**
+  - 上游自带 `TestSetupServerRouter_ModelTestSessionAuth` 通过 ✓（会话 cookie 越过鉴权、错误体不再
+    是 apiKeys 语义）——即我们那条补丁的回归已由上游测试覆盖；
+  - 离线：`node --test module/webroot/test/*.test.js` **46/46**；`bun test src/lib/db-backup.test.ts` **4/4**；
+    `tsc -b && vite build` ✓；`go build ./...` ✓；`go test ./internal/handlers/... ./internal/middleware/...` ✓
+    （唯一失败 `TestHandleAudioVoices_elevenlabs` 是沙箱访问 `api.elevenlabs.io` EOF，与本次无关）；
+  - 新增 `tools/device/test-dashboard-api.sh`（真机**功能**门禁）：A4 `/version` 公开可读 ✓、
+    A3b/A3c 错误/无密码 → 401 ✓；A1/A3a 需要**当前** dashboard 密码（`initial-password` 已不是用户
+    密码，第三个参数可传入）。
+- [x] **23.6 发布物料**：引擎升级到 v1.9.2 → 按 `build.sh` 的命名规则"大版本更新归 r1" → `v1.9.2-r1` /
+  versionCode 109020；`build.sh` 七步全绿，产物 `dist/9router-go-1.9.2-r1-magisk.zip`（15M，verify_zip ✅）；
+  真机用模块自己的 `install-module` 装入 → `engine=up`、`engine_version=1.9.2`、`dns=up`、`watchdog=up`，
+  设备门禁 **15/15**（T8b 引擎 25,559,200 字节 = v1.9.2 `linux-arm64` 资产大小）。
+- [ ] **待用户发布**：tag `v1.9.2-r1` → 上传 zip → 推送 `update.json`
+- [ ] **待决策**：`/api/health` 与 SSO 回调是否补（上游同样缺失，可顺手提 PR）；大块缺口是否排期
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |

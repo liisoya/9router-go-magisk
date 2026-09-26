@@ -137,6 +137,14 @@ cmd_install_module() {
   life_stop_all >/dev/null
   cp "$1" "$DATA_DIR/last-module.zip" 2>/dev/null
   if (cd "$MODDIR" && unzip -oq "$1") && chmod 0755 "$MODDIR"/*.sh "$MODDIR"/lib/*.sh "$MODDIR"/bin/* 2>/dev/null; then
+    # 整包更新同样换了 bin/9router-go：把运行期版本文件同步成"包里那份引擎的真实版本"。
+    # 否则 DATA_DIR/engine-version 会停在上一个版本 —— 面板谎报"当前 1.9.1"（引擎其实是 1.9.2），
+    # 并永远提示"有更新可用"。包内 etc/engine-version 是构建期写的，描述的就是刚装进来的二进制。
+    if [ -s "$MODDIR/etc/engine-version" ]; then
+      cp "$MODDIR/etc/engine-version" "$DATA_DIR/engine-version" 2>/dev/null
+    else
+      rm -f "$DATA_DIR/engine-version"   # 包里没有 → 宁可显示"未知"，也不要留旧版本的谎报
+    fi
     rm -f "$1"
     life_restart_engine
   else
