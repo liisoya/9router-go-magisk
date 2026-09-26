@@ -91,12 +91,9 @@ printf '%s\n' "$VERSION" > module/etc/engine-version
 step "6/7 staging + MODID 注入"
 mkdir -p "$STAGING"
 cp -r module "$STAGING/module"
-for f in "$STAGING"/module/webroot/index.html "$STAGING"/module/webroot/app.js; do
-  [ -f "$f" ] && sed -i "s/__MOD_ID__/${MOD_ID}/g" "$f"
-done
-if grep -rq "__MOD_ID__" "$STAGING/module/webroot"; then
-  die "webroot 仍有未注入的 __MOD_ID__ 占位符"
-fi
+# 注入唯一实现（全树注入 + 自己断言零残留）：此前是这里的 2 文件 sed 循环 + deploy-device.sh
+# 里的另一份 4 文件 sed —— 清单不同，加新占位符文件时只改一处就会漏（见 tools/inject-mod-id.sh 头注释）
+bash tools/inject-mod-id.sh module "$STAGING/module"
 find "$STAGING/module" -name '*.sh' -exec chmod 0755 {} +
 find "$STAGING/module/bin" -type f -exec chmod 0755 {} +
 

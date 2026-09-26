@@ -136,6 +136,10 @@ if [ "$OFFLINE" = 1 ]; then
       run "PY-UNIT 棘轮 module 单测（unittest discover tools）" \
         python3 -B -m unittest discover -s tools -p 'test_*.py'
     fi
+    # INJECT：__MOD_ID__ 注入器（打包 / 直推两条路径共用一份实现，出错的表现是"上线后才炸"）
+    if [ -f tools/test-inject-mod-id.sh ]; then
+      run "INJECT 占位符注入器自证（全树注入 + 0 残留）" sh tools/test-inject-mod-id.sh
+    fi
   fi
 fi
 

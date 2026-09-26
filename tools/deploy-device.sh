@@ -31,16 +31,13 @@ step "2/4 注入占位符 → 暂存"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 mkdir -p "$STAGING/webroot" "$STAGING/lib" "$STAGING/etc"
-for f in webroot/index.html webroot/app.js webroot/bridge.js webroot/parsers.js; do
-  sed "s/__MOD_ID__/${MOD_ID}/g" "module/$f" > "$STAGING/$f"
-done
+cp module/webroot/index.html module/webroot/app.js module/webroot/bridge.js module/webroot/parsers.js "$STAGING/webroot/"
 cp module/lib/*.sh "$STAGING/lib/"
 cp module/service.sh "$STAGING/"
 cp module/etc/engine-version "$STAGING/etc/" 2>/dev/null || true
-if grep -rq "__MOD_ID__" "$STAGING"; then
-  die "注入后仍有 __MOD_ID__ 残留"
-fi
-echo "占位符注入完成（0 残留）"
+# 注入唯一实现（与 build.sh 同一份；全树注入 + 自己断言零残留）。
+# 此前这里手写 sed + 列了 4 个文件，与 build.sh 的 2 个文件清单不同 —— 加新占位符文件时会漏。
+sh tools/inject-mod-id.sh module "$STAGING"
 
 step "3/4 推送到设备"
 $ADB push "$STAGING/lib" /data/local/tmp/d-lib >/dev/null

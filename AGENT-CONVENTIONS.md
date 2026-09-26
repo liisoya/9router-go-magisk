@@ -46,6 +46,10 @@
    测试 seam 是 `internal/handlers/dashboard/routes.go` 的 `RegisterRoutes`，生产是 `router.go` 的
    `SetupDashboardRoutes`。往测试 seam 加一条生产没有的路径 → 测试会在**假路线**上变绿，门禁必须红。
    结构收敛（两侧共用一份挂载清单）属上游 `internal/**`，按 ADR-0003 只加门禁、不做顺手重构
+12. **`__MOD_ID__` 注入唯一所有者** = `tools/inject-mod-id.sh`（`build.sh` 打包与
+   `tools/deploy-device.sh` 直推都调它）。注入对象是**全树所有含占位符的文件**，不维护文件清单
+   （清单本身正是会漂移的东西）；MOD_ID 唯一来源 = `module/module.prop` 的 `id=`；零残留由注入器
+   自己断言。**禁止**在调用方再写一遍 `sed` 注入或残留检查
 8. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
 
 ## 3. 所有权地图（改哪里会与上游冲突）
