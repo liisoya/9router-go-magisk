@@ -4,6 +4,11 @@
 > 本文件是**我们（模块层）独有**的文件，上游仓库没有它；不要把它写成上游 `AGENTS.md` 的副本。
 > 上游 `AGENTS.md` / `CLAUDE.md` / `ARCHITECTURE.md` 是**引擎侧**的规范；与本文件冲突时以本文件为准，
 > 本文件又以「当前代码与产物的实际行为」为准（见 §1）。
+>
+> **本文件是规范，不是描述**：任何更新 —— 上游合并、新功能、新门禁、新补丁 —— 都必须按 §2 的
+> 模块边界（§2.1 速查表）实现，按 §4 做配套。谁都不想每次更新又从头发明一遍、把已经收敛的
+> 结构重新打散；§2 的每一条不变量背后都有一条**会红**的门禁，所以"重新实现一遍"不是风格问题，
+> 是会立刻变红的问题。
 
 日期：2026-09-26 ｜ 状态：生效（建立者：维护者与 agent 的 grilling 共识，见 `docs/FIXPLAN.md` Phase 25–26）
 
@@ -65,7 +70,32 @@
    存储注入 = 纯函数可离线测）。**禁止**在别处出现 `'9router_auth'` / `'9router_key'` 字面量或
    直接摸 `localStorage`：`session.test.ts` 里的防回潮门禁会扫全树并红。两种"登出"是**有意区分**的：
    `clearAuthed`（只清标记，保留 API key）vs `clearAll`（连 key 一起清，401 后清理过期凭据）
-8. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
+16. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
+
+### 2.1 模块边界速查（加新东西时改哪里）
+
+**先问"这件事谁是所有者"。** 有所有者 → 只改那一处（并做 §4 的配套）；**没有** → 建一个**深 module**
+（小接口、把差异藏在里面、配一条会红的门禁），登记进本节与 §4。**禁止**在调用方再实现一遍
+—— 每一条不变量背后都对应一条会红的门禁，重新实现一遍就是把已经修好的漂移再引进来。
+
+| 关注点 | 唯一所有者 | 会红的门禁 | 加新东西时 |
+|---|---|---|---|
+| 服务该不该在跑 / 状态与意图 | `module/lib/lifecycle.sh` | 真机 `T1–T5` | 加动词；调用方只表达意图 |
+| 等就绪 / 等消失 | `module/lib/wait.sh` | `WAIT` + 真机 `T9` | 用 `wait_for` / `wait_gone`，不要写轮询 |
+| 日志路径 / 上限 / 轮转 | `module/lib/log.sh` | 真机 `T*` | 经它写日志 |
+| 状态词与界面文案 | `parsers.js` 的 `LIFECYCLE_STATES` | `contract-keys`（双向） | 加词 = 改表 + `life_state`，两侧都要动 |
+| 「什么算一个引擎」 | `parsers.js`（`ELF_MAGIC` / `ENGINE_MIN_BYTES`） | `engine-spec-contract` | 改 `parsers.js`，再按门禁同步 `ops.sh` 常量 |
+| 「先门禁后动作」的顺序 | `parsers.js` 的 `*_PLAN` + `planSteps` | `parsers` 计划结构断言 | 加步骤 = 改数据 + 加断言 |
+| 前端请求形状 | `parsers.js` / `bridge.js` 命令构造器 / `web/src/lib/*.ts` | `JS-UNIT` / `BUN-UNIT` / `check-ui-parity` | 纯函数 + 用例，别散在组件里 |
+| 登录态 | `web/src/lib/session.ts` | `BUN-UNIT`（含防回潮扫描） | 用它的动词，不要摸 `localStorage` |
+| 门禁的棘轮语义 | `tools/ratchet.py` | `PY-UNIT` | scanner 只提供 `gaps` |
+| `__MOD_ID__` 注入 | `tools/inject-mod-id.sh` | `INJECT` | 只在这一个文件里改 |
+| 端点对照清单 | `check-parity.py` + `tools/parity-baseline.txt` | `PARITY` | 烧掉缺口后 `--write-baseline` 收紧 |
+| dashboard 路由 | `router.go`（生产）/ `dashboard/routes.go`（测试 seam） | `TestDashboardRouteTables_*` | 测试 seam 只能 ⊆ 生产 |
+
+**新功能的默认流程**（三轮深化沉淀下来的做法）：① 找所有者 → 没有就建 module（先写它的可测接口）
+→ ② 配一条**会红**的门禁（红灯自证：先让它红一次）→ ③ 在 `docs/TESTING.md` 台账登记一行。
+只做①③不配门禁的，不算落地 —— 那是下一个"移植缺失"。
 
 ## 3. 所有权地图（改哪里会与上游冲突）
 
@@ -86,6 +116,12 @@
 | schema 相关 | `python3 tools/gen-schema.py --check` |
 | 任何 bug 修复 | 复现用例（沿用上游 `AGENTS.md §5.0` 的硬规则）+ 台账登记 |
 | 新增/删除/修改门禁断言 | `docs/TESTING.md` 台账 + 「变更记录」一行 |
+| 改 `parsers.js` 的引擎判据常量 | 同步 `ops.sh engine_src_ok`（`engine-spec-contract` 会红） |
+| 加/改生命周期状态词 | `LIFECYCLE_STATES` + `life_state`（`contract-keys` 双向门禁） |
+| 加/改"先门禁后动作"的步骤 | 对应 `*_PLAN` 数据 + 计划结构断言（改顺序即红） |
+| 触碰 `localStorage` / 登录态键 | 只经 `web/src/lib/session.ts`（防回潮门禁扫全树） |
+| 需要"等一会/等就绪" | 用 `module/lib/wait.sh`；真机门禁也用它（否则 `WAIT`/`T9` 失效） |
+| 改打包或直推的注入 | 只改 `tools/inject-mod-id.sh`（`INJECT` 档会红） |
 | 版本/发布物料 | `build.sh` 七步 + `update.json` 同步 |
 | 架构级取舍（难回退 + 反直觉 + 真实取舍） | 写 ADR（见 §6） |
 
@@ -113,6 +149,9 @@
 5. `python3 tools/check-parity.py`（新缺口必红；逐条裁决后 `--write-baseline` 收紧）
 6. `bash build.sh` → 真机 `ops.sh install-module`（用我们自己的入口）→ `tools/check.sh --all`
 7. 结论写进 `docs/FIXPLAN.md` 新 Phase（含撤/留补丁、实证缺口、待决策）
+8. **合并后按 §2.1 复核**：上游可能带来与我们的模块边界重复的实现（同一条规则第二份、同一状态
+   另一套词、另一处轮询）。裁决原则：**归到唯一所有者**，调用方只调用 —— 不要在调用方另写一份
+   来"贴合上游写法"（那正是这几轮深化花力气消掉的东西）
 
 ## 8. 命名与语言
 
@@ -134,7 +173,7 @@
 |---|---|---|---|
 | 首装密码 | `docs/BUILD_DASHBOARD.md`：*Do not ship a known initial password* | 固定 `123456`，首启提示改密，登录后可自行修改 | Android 模块首装要在 KernelSU/WebUIX 内登录，随机密码需要额外告知渠道；这是显式的便利/安全取舍 |
 | 前端测试约定 | `AGENTS.md §5.0`：模块 JS 用 `node --test` | 模块 WebUI 用 `node --test`；引擎内嵌 Dashboard（`web/**`）用 `bun:test` | 两个不同运行时/不同测试对象；bun 已是前端构建工具链 |
-| 前端"没有测试" | `web/README.md`、`docs/BUILD_DASHBOARD.md` 称前端无测试 | `web/src` 已有 10 个文件 / 82 个用例（`bun:test`） | 上游文档滞后于代码 |
+| 前端"没有测试" | `web/README.md`、`docs/BUILD_DASHBOARD.md` 称前端无测试 | `web/src` 已有 11 个文件 / 91 个用例（`bun:test`） | 上游文档滞后于代码 |
 | 上游参照树位置 | `AGENTS.md`/`CLAUDE.md`/`scripts/` 写 macOS 绝对路径 | `tools/check-parity.py` 默认 `../9router`，可用 `UPSTREAM=` 覆盖 | 绝对路径不可移植 |
 | 端口绑定 | `MAGISK.md`（旧版）曾写"仅绑定 loopback" | 引擎监听 `0.0.0.0:<port>`（模块按局域网使用） | 模块 WebUI 要显示 `http://<设备IP>:<port>`；安全由密码 + 可选 `requireLogin` 承担 |
 | DNS 自动优选 | 旧路线图列为"可选功能" | 明确不做（`CONTEXT.md`「刻意不做」） | 与上游优选策略冲突风险 > 收益 |
