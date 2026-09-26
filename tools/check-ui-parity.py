@@ -38,6 +38,9 @@ import re
 import sys
 from pathlib import Path
 
+# 载入 check-parity.py 时会写 __pycache__（污染仓库，而 .gitignore 是上游文件不该改）
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE_FILE = Path("tools") / "ui-parity-baseline.txt"
 IGNORE_FILE = Path("tools") / "ui-parity-ignore.txt"
