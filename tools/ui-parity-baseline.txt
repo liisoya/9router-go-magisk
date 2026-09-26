@@ -1,0 +1,7 @@
+# UI 调用 parity 基线（棘轮）—— 由 tools/check-ui-parity.py --write-baseline 生成，勿手改
+# 语义：这些是当前**已知**的"UI 调了但后端没注册"的路径，巡检不报警；
+#       不在这里的同类路径 = 新增缺口 → 必红。烧掉一条就删一行。
+
+/api/auth/oidc/start
+/api/auth/saml/start
+/v1/web/fetch

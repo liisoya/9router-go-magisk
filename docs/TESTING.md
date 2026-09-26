@@ -73,7 +73,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | ID | 断言 | 命令 | 前置 | 失败意味着 |
 |---|---|---|---|---|
 | PARITY | 上游端点 parity 棘轮：**新增**缺口即红（存量缺口在基线内不报警） | `python3 tools/check-parity.py` | python3 + `../9router`（`UPSTREAM=`） | 又漏移植了一个上游端点/方法（`--write-baseline` 收紧，`tools/parity-ignore.txt` 豁免须写理由） |
-| UIPARITY | UI 调用 ⊆ 已注册端点：Dashboard/WebUI 里 `fetch`/`request`/`KB.ops`/`KB.fetch` 的字面量路径必须已注册 | `python3 tools/check-ui-parity.py` | python3 | UI 加了一个后端不存在的端点（"将来才会暴露"的那类） |
+| UIPARITY | UI 调用 ⊆ 已注册端点：Dashboard/WebUI 里 `fetch`/`request`/`KB.*` 与**导航式调用**（`location.href=`/`window.open(`）的字面量路径必须已注册（引擎对已注册端点统一提供 `/v1` 别名，脚本会同时尝试去前缀形态） | `python3 tools/check-ui-parity.py` | python3 | UI 加了一个后端不存在的端点（"将来才会暴露"的那类） |
 | SCHEMA | `module/etc/schema.sql` 的表与列与上游 `DATABASE.md` 对齐 | `python3 tools/gen-schema.py --check` | python3（`DATABASE.md` 在仓库内） | schema 漂移；有意超集列必须在 `SUPERSET_COLUMNS` 登记并写代码依据 |
 
 ## 3. 单元测试目录（文件 → 覆盖什么，不逐条抄用例名）
@@ -108,5 +108,14 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 修改 | SCHEMA | 上游 v1.9.2 起不再文档化索引/部分列 → 校验收敛为"表与列"，登记有依据的超集列（Phase 23.3） | c31d681 |
 | 2026-09-26 | 新增 | JS-UNIT（+9） | 装前门禁用例：404 正文/HTML 错误页/探针失败判死、校验和缺失必须拒绝 | b231232 |
 | 2026-09-26 | 新增 | BUILD-3① | 构建产物必须含 `x-9r-password`（Phase 20） | 6a98e6d |
-| 2026-09-26 | 计划 | UIPARITY | UI 调用 ⊆ 已注册端点（批 3 落地，随后补此处行） | 待提交 |
-| 2026-09-26 | 计划 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（批 2 落地） | 待提交 |
+| 2026-09-26 | 新增 | UIPARITY | UI 调用 ⊆ 已注册端点（棘轮；首跑冻结 3 条：见下「UI parity 已知缺口」） | 见本次提交 |
+| 2026-09-26 | 新增 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（离线档） | f509e85 |
+| 2026-09-26 | 新增 | 变更映射自检 | `tools/check.sh` 末尾提醒"改了 A 没改 B"（只提醒不拦，规则见契约 §4） | f509e85 |
+
+## 6. UI parity 已知缺口（基线与理由）
+
+| 缺口 | 证据 | 结论 |
+|---|---|---|
+| `/api/auth/oidc/start`、`/api/auth/saml/start`（`LoginView.svelte`） | 上游 Go 版只实现 SSO 配置测试，登录流程整体未实现（回调端点由我们补为 501，起点仍 404） | 已知、有意：**不做 SSO 登录**（`AGENT-CONVENTIONS.md §10`）。若将来要做，起点与回调一起补 |
+| `/v1/web/fetch`（`MediaProviderDetail.svelte`） | `media.HandleWebFetch` **已实现但从未挂载**（`grep HandleWebFetch` 只有定义）；真机探测 `/web/fetch` 与 `/v1/web/fetch` 均 404 | 待决策：① 挂载路由（一行，属共享文件改动 → 契约 §10.2 登记）② 或删掉 Dashboard 的"网页抓取"测试入口 |
+
