@@ -1,0 +1,16 @@
+# 未挂载 handler 豁免清单
+#
+# 格式：<HandleName|RegisterName>  # 理由（必填，工具会校验）
+# 这里只放**已核实**的：要么等价实现已在别处挂载，要么明确是上游历史包袱（不改共享文件）。
+# 未核实的存量不要放这里 —— 那些留在 tools/dead-handlers-baseline.txt（棘轮基线）。
+
+# 2026-09-26 核实：chat.HandleHealth 是一个从未挂载的健康检查 handler，
+# 引擎的 /health 由 router.go 的内联 healthHandler 提供（并带 CORS 头）。
+# 删它要动上游共享文件（chat.go），收益低；登记在此，防止有人误以为 /health 由它提供。
+HandleHealth  # 等价实现已在 router.go 的 healthHandler 挂载（/health 与 /api/health）
+
+# 2026-09-26 核实：dashboard.RegisterRoutes 定义了 /api 下的全套路由，但**从未被调用**；
+# 实际生效的是 router.go 里 SetupDashboardRoutes 的显式注册。函数本身只有测试引用
+# （这正是"有测试、无路由"这类问题的活样本，本巡检就是为抓它而建）。
+# 删它要动上游共享文件（dashboard/routes.go），登记在此供后续决定。
+RegisterRoutes  # dashboard 路由实际由 router.go 的 SetupDashboardRoutes 显式注册；本函数为历史遗留

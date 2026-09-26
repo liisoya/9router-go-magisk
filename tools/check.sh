@@ -126,6 +126,10 @@ if [ "$OFFLINE" = 1 ]; then
   # SCHEMA：schema 漂移
   if need_bin python3 "SCHEMA" 0; then
     run "SCHEMA schema 与上游 DATABASE.md 对齐" python3 tools/gen-schema.py --check
+    # DEADH：handler / 注册函数是否真的被挂载（棘轮；已核实的历史包袱在 ignore 里带理由）
+    if [ -f tools/check-dead-handlers.py ]; then
+      run "DEADH handler 挂载巡检（新增未挂载即红）" python3 tools/check-dead-handlers.py
+    fi
   fi
 fi
 

@@ -4,4 +4,3 @@
 
 /api/auth/oidc/start
 /api/auth/saml/start
-/v1/web/fetch

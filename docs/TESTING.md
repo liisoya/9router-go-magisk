@@ -39,6 +39,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | GO-BUILD | 引擎可编译 | `go build ./...` | go | 引擎源码编译失败 |
 | GO-TEST | Go 单元测试（排除外网/真机依赖用例） | `go test ./... -skip '<见 §4>'` | go | 引擎侧回归 |
 | TSC | Dashboard 类型检查 | `npx tsc -b` | node_modules | 类型错误（构建前提前拦） |
+| DEADH | handler / 注册函数是否真的被挂载（定义了却没人调 = 点了必 404） | `python3 tools/check-dead-handlers.py` | python3 | 新增了一条"有实现、有测试、没路由"的代码（`HandleWebFetch`/`RegisterRoutes` 同类） |
 
 ### 2.3 真机断言（`tools/check.sh --device`）
 
@@ -108,7 +109,11 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 修改 | SCHEMA | 上游 v1.9.2 起不再文档化索引/部分列 → 校验收敛为"表与列"，登记有依据的超集列（Phase 23.3） | c31d681 |
 | 2026-09-26 | 新增 | JS-UNIT（+9） | 装前门禁用例：404 正文/HTML 错误页/探针失败判死、校验和缺失必须拒绝 | b231232 |
 | 2026-09-26 | 新增 | BUILD-3① | 构建产物必须含 `x-9r-password`（Phase 20） | 6a98e6d |
-| 2026-09-26 | 新增 | UIPARITY | UI 调用 ⊆ 已注册端点（棘轮；首跑冻结 3 条：见下「UI parity 已知缺口」） | 见本次提交 |
+| 2026-09-26 | 新增 | UIPARITY | UI 调用 ⊆ 已注册端点（棘轮；首跑冻结 3 条：见下「UI parity 已知缺口」） | 07cd4d6 |
+| 2026-09-26 | 修改 | UIPARITY（基线 3 → 2） | 挂载 `/web/fetch` + `/v1/web/fetch`（HandleWebFetch 从未挂载）→ 该缺口消失，收紧基线 | 见本次提交 |
+| 2026-09-26 | 修改 | T10a | 匹配面从 `syntax error` 扩大到 `no closing quote` / `bad substitution` / `unexpected`（当日一次安装出现 `ops.sh[291]: no closing quote`，且行号 291 > 文件 284 行 → 当时读的是另一份内容；不可复现，先让门禁能抓到同类签名） | 见本次提交 |
+| 2026-09-26 | 新增 | DEADH | handler/注册函数挂载巡检（棘轮）。首跑即抓到 2 条真实案例并已带理由豁免：`chat.HandleHealth`（无引用）、`dashboard.RegisterRoutes`（只有测试引用、无路由） | 见本次提交 |
+| 2026-09-26 | 修改 | PARITY 侧代码 | 挂载 `/web/fetch` + `/v1/web/fetch`（ADR-0003 补丁），UIPARITY 基线 3 → 2 | 见本次提交 |
 | 2026-09-26 | 新增 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（离线档） | f509e85 |
 | 2026-09-26 | 新增 | 变更映射自检 | `tools/check.sh` 末尾提醒"改了 A 没改 B"（只提醒不拦，规则见契约 §4） | f509e85 |
 
@@ -117,5 +122,5 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 缺口 | 证据 | 结论 |
 |---|---|---|
 | `/api/auth/oidc/start`、`/api/auth/saml/start`（`LoginView.svelte`） | 上游 Go 版只实现 SSO 配置测试，登录流程整体未实现（回调端点由我们补为 501，起点仍 404） | 已知、有意：**不做 SSO 登录**（`AGENT-CONVENTIONS.md §10`）。若将来要做，起点与回调一起补 |
-| `/v1/web/fetch`（`MediaProviderDetail.svelte`） | `media.HandleWebFetch` **已实现但从未挂载**（`grep HandleWebFetch` 只有定义）；真机探测 `/web/fetch` 与 `/v1/web/fetch` 均 404 | 待决策：① 挂载路由（一行，属共享文件改动 → 契约 §10.2 登记）② 或删掉 Dashboard 的"网页抓取"测试入口 |
+| `/v1/web/fetch`（`MediaProviderDetail.svelte`） | `media.HandleWebFetch` **已实现但从未挂载**（`grep HandleWebFetch` 只有定义）；真机探测 `/web/fetch` 与 `/v1/web/fetch` 原为 404 | **已修（2026-09-26）**：显式双注册（ADR-0003 补丁 `tools/patches/media-web-fetch-route.patch`）；真机 `GET` 由 404 → **405**（路由存在）→ 基线收紧为 2 条 |
 

@@ -1,0 +1,16 @@
+diff --git a/internal/handlers/router.go b/internal/handlers/router.go
+index bcf8b88..4ad997b 100644
+--- a/internal/handlers/router.go
++++ b/internal/handlers/router.go
+@@ -84,6 +84,11 @@ func SetupRoutes(r interface {
+ 	r.Post("/search", mediaH.HandleSearch)
+ 	r.Post("/scrape", mediaH.HandleScrape)
+ 	r.Post("/systemone", mediaH.HandleSystemone)
++	// Web fetch：内嵌 Dashboard 的媒体面板按 /v1/web/fetch 调用
++	// （web/src/components/media/MediaProviderDetail.svelte），而 HandleWebFetch 此前**从未被挂载**
++	// → 该功能点了必 404（UI 调用 parity 巡检 2026-09-26 抓到）。显式双注册，与 /v1/models 同形。
++	r.Post("/web/fetch", mediaH.HandleWebFetch)
++	r.Post("/v1/web/fetch", mediaH.HandleWebFetch)
+ 
+ 	// Proxy Pool Deploy Domain
+ 	r.Post("/proxy-pools/vercel-deploy", mediaH.HandleVercelDeploy)

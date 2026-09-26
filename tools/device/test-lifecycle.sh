@@ -224,8 +224,9 @@ if [ -f "$ZIP" ]; then
   cp "$ZIP" /data/local/tmp/9r-gate.zip
   OUT10="$("$OPS" install-module /data/local/tmp/9r-gate.zip 2>&1 | tr -d '\r')"
   case "$OUT10" in
-    *syntax\ error*) no "T10a install-module 报了语法错误（执行中被覆写）：$OUT10" ;;
-    *) ok "T10a install-module 跑完无语法错误（$(echo "$OUT10" | tail -n 1)）" ;;
+    *syntax\ error*|*no\ closing\ quote*|*bad\ substitution*|*unexpected\ *)
+      no "T10a install-module 报了 shell 解析错误（执行中被覆写？）：$OUT10" ;;
+    *) ok "T10a install-module 跑完无解析错误（$(echo "$OUT10" | tail -n 1)）" ;;
   esac
   [ "$("$OPS" panel | tr ' ' '\n' | grep '^engine=')" = "engine=up" ] && ok "T10b 安装后引擎 up" || no "T10b 安装后引擎不在跑"
   rm -f /data/local/tmp/9r-gate.zip
