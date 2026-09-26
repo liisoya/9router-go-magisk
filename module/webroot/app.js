@@ -128,26 +128,23 @@ function renderPanel(st, live) {
   } else {
     document.getElementById('diag').style.display = 'none';
   }
+  // 状态词 → 文案/严重度：唯一映射在 KP.stateLabel（app.js 不再手写 if/else 链；
+  // 加一个意图态只改 parsers.js 一处，且门禁会把 shell emit 与这张表缝死）
   const dnsDot = document.getElementById('dot-dns');
-  let dnsTxt;
-  if (st.dns === 'disabled') { dnsDot.className = 'dot err'; dnsTxt = '已关闭（用户设置）'; }
-  else if (st.dns === 'up') { dnsDot.className = 'dot ok'; dnsTxt = '运行中 (PID ' + st.dns_pid + ')'; }
-  else if (st.dns === 'yielded') { dnsDot.className = 'dot warn'; dnsTxt = '已让路（:53 被其他转发器占用）'; }
-  else { dnsDot.className = 'dot err'; dnsTxt = '未运行'; }
+  const dnsS = KP.stateLabel('dns', st.dns, st.dns_pid);
+  dnsDot.className = 'dot ' + dnsS.tone;
+  const dnsTxt = dnsS.text;
   document.getElementById('st-dns').textContent = dnsTxt;
   document.getElementById('dnsw-state').textContent = dnsTxt;
   // 守护：引擎"死了能不能自己回来"必须可见（此前完全不可见，用户只知道"要手动重启"）
   const wdEl = document.getElementById('st-wd');
   if (wdEl) {
-    if (st.watchdog === 'up') { wdEl.textContent = '运行中 (PID ' + st.watchdog_pid + ')'; wdEl.style.color = 'var(--ok)'; }
-    else if (st.watchdog === 'stale') { wdEl.textContent = '未运行（已武装，下次重启生效）'; wdEl.style.color = 'var(--warn)'; }
-    else { wdEl.textContent = '未启用'; wdEl.style.color = 'var(--warn)'; }
+    const wdS = KP.stateLabel('watchdog', st.watchdog, st.watchdog_pid);
+    wdEl.textContent = wdS.text; wdEl.style.color = wdS.color;
   }
-  const engUp = st.engine === 'up';
-  const engStopped = st.engine === 'stopped';   // 用户显式停服（守护尊重该意图，不会自动拉起）
-  document.getElementById('st-eng').textContent = engUp ? '运行中 (PID ' + st.engine_pid + ')'
-    : engStopped ? '已停止（用户设置）' : '未运行';
-  document.getElementById('st-eng').style.color = engUp ? 'var(--ok)' : engStopped ? 'var(--warn)' : 'var(--err)';
+  const engS = KP.stateLabel('engine', st.engine, st.engine_pid);
+  document.getElementById('st-eng').textContent = engS.text;
+  document.getElementById('st-eng').style.color = engS.color;
   document.getElementById('st-port').textContent = st.port;
   document.getElementById('in-port').value = st.port;
   document.getElementById('st-ver').textContent = st.engine_version || '未知';
@@ -413,7 +410,9 @@ SELECT key FROM kv WHERE scope='disabledModels';`);
     }
     // 安全护栏：有模型别名却读不到任何节点/连接 = 扫描结果不可信（撞上引擎写事务等），
     // 绝不在这种状态下判定孤儿 —— 宁可扫不出，不可误删。
-    if (aliases.size > 0 && live.size === 0) {
+    // 顺序不变量："scan 门禁不过 → 不得进入判定/清理"见 KP.ORPHAN_CLEAN_PLAN（离线有断言）
+    const scanOk = !(aliases.size > 0 && live.size === 0);
+    if (KP.planSteps(KP.ORPHAN_CLEAN_PLAN, { scan: { ok: scanOk } }).blockedBy) {
       box.innerHTML = '<div class="hint">⚠️ 扫描结果异常（未读到任何节点/连接，可能正被引擎写入占用），已中止判定。请稍后重试。</div>';
       return;
     }
@@ -450,7 +449,11 @@ async function cleanOrphans() {
     const snapOk = await KB.sqlSnapshot(
       `SELECT * FROM kv WHERE scope IN ('customModels','disabledModels') AND (${like.replace(/'/g, "''")} OR ${eq.replace(/'/g, "''")});`,
       `${CFG.DATA_DIR}/backups/kv-before-orphan-clean-${ts}.sql`);
-    if (!snapOk) { toast('⚠️ 快照失败，已中止删除（安全优先）', 3200); return; }
+    // 快照门禁在 delete 之前（顺序不变量见 KP.ORPHAN_CLEAN_PLAN，离线有断言）
+    if (KP.planSteps(KP.ORPHAN_CLEAN_PLAN,
+        { scan: { ok: true }, recheck: { ok: true }, snapshot: { ok: snapOk } }).blockedBy) {
+      toast('⚠️ 快照失败，已中止删除（安全优先）', 3200); return;
+    }
     // 单语句 OR 链式删除：一次点击全清（不逐条）
     await KB.sqlFile(`DELETE FROM kv WHERE scope='customModels' AND (${like}); DELETE FROM kv WHERE scope='disabledModels' AND (${eq});`);
     toast(`✅ 已一次性清理 ${n} 项（删除前快照已存 $DATA_DIR/backups/）`, 3600);
@@ -560,7 +563,9 @@ async function engUpdate() {
   const size = await KB.fileSize('/data/local/tmp/9r-eng.new');
   const magic = await KB.elfMagic('/data/local/tmp/9r-eng.new');
   const gFile = KP.engineFileGate(size, magic);
-  if (!gFile.ok) { out.textContent = `❌ ${gFile.reason}\n已中止，设备上的引擎未改动`; return; }
+  if (KP.planSteps(KP.ENGINE_UPDATE_PLAN, { 'file-gate': gFile }).blockedBy) {
+    out.textContent = `❌ ${gFile.reason}\n已中止，设备上的引擎未改动`; return;
+  }
   // 装前门禁②：校验和 —— **取不到就拒绝**（旧实现"取不到跳过校验"正好放行了 404 正文）
   out.textContent += '\n校验 SHA256…';
   const sum = await KB.fetch(withAccel(base + '/SHA256SUMS.txt', p), 60);
@@ -568,7 +573,11 @@ async function engUpdate() {
   const expected = (sumLine.match(/^([0-9a-f]{64})/i) || [])[1];
   const actual = await KB.sha256('/data/local/tmp/9r-eng.new');
   const gSum = KP.checksumGate(expected, actual);
-  if (!gSum.ok) { out.textContent += `\n❌ ${gSum.reason}`; return; }
+  // 两个门禁都过才允许 install —— 由计划求值决定（顺序不变量在 KP.ENGINE_UPDATE_PLAN，
+  // 离线断言"任一不过则 install 不可达"；这里不再手写顺序判断）
+  if (KP.planSteps(KP.ENGINE_UPDATE_PLAN, { 'file-gate': gFile, 'sum-gate': gSum }).blockedBy) {
+    out.textContent += `\n❌ ${gSum.reason}`; return;
+  }
   out.textContent += ' ✅\n替换二进制并重启…';
   // 安装唯一入口：门禁 → 回滚点 → 替换 → 权限 → 起来后才写版本，全在 ops.sh seam 内
   const r = await KB.ops(`install-engine /data/local/tmp/9r-eng.new ${ver}`);
@@ -603,7 +612,11 @@ async function modUpdate() {
   out.textContent = '下载模块 zip…';
   if (!await KB.download(dlUrl, '/data/local/tmp/mod-update.zip', 600)) { out.textContent = '❌ 下载失败'; return; }
   const chk = await KB.zipList('/data/local/tmp/mod-update.zip');
-  if (!chk.out.includes('module.prop')) { out.textContent = '❌ zip 内容异常（缺 module.prop），已放弃'; return; }
+  // zip 门禁必须在 install-module 之前（顺序不变量见 KP.MODULE_UPDATE_PLAN，离线有断言）
+  const gZip = { ok: chk.out.includes('module.prop'), reason: 'zip 内容异常（缺 module.prop）' };
+  if (KP.planSteps(KP.MODULE_UPDATE_PLAN, { 'zip-gate': gZip }).blockedBy) {
+    out.textContent = `❌ ${gZip.reason}，已放弃`; return;
+  }
   out.textContent += '\n停进程 → 解压覆盖 → 重启…';
   // 安装唯一入口：备份 → 解压 → chmod 兜底（含 lib/）→ 清理 → 重启，全在 ops.sh seam 内
   const r = await KB.ops('install-module /data/local/tmp/mod-update.zip');

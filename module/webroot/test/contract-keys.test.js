@@ -21,6 +21,7 @@ const LIB = path.join(__dirname, '..', '..', 'lib');
 const shell = ['ops.sh', 'lifecycle.sh']
   .map(f => fs.readFileSync(path.join(LIB, f), 'utf8')).join('\n');
 const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+const KP = require('../parsers.js');
 
 // ── shell 侧：只取"对外 payload 的 emit 函数"体里的 key= 记号 ──
 // （不是全文件扫：`echo "engine=up"` 这类状态词不是 payload 键）
@@ -79,4 +80,50 @@ test('shell emit 的每个键要么被 WebUI 消费、要么在 EMIT_ONLY 里有
   const unused = [...emitted].filter(k => !consumed.has(k) && !EMIT_ONLY.has(k)).sort();
   assert.deepStrictEqual(unused, [],
     `emit 了但没人读的键：${unused.join(', ')}（删掉，或加进 EMIT_ONLY 并写理由）`);
+});
+
+// ── 值枚举契约：状态词（life_state 是唯一 emit 方 ↔ KP.LIFECYCLE_STATES 是唯一文案映射）──
+// 键契约只绑"键"；状态词（up/down/stopped/disabled/yielded/stale）此前在 shell 与 app.js 各写一遍，
+// 加一个意图态时 app.js 会静默落到 else 显示"未运行"。这里把两侧双向缝死。
+const VAR_TO_KIND = { dns: 'dns', eng: 'engine', wd: 'watchdog' };
+
+// 从 life_state() 函数体里抽 `_dns=up` 这类赋值 —— 只认这个 emit 方，
+// 不扫全文件（`cmd_install_engine` 里的 `echo "engine=up"` 是安装结果信号，不是状态词表）
+function shellStateWords(src) {
+  const m = src.match(/(^|\n)life_state\(\)\s*\{([\s\S]*?)\n\}/m);
+  assert.ok(m, '找不到 life_state()（改名了吗？本门禁需要同步）');
+  const out = {};
+  for (const am of m[2].matchAll(/_(dns|eng|wd)=([a-z_]+)/g)) {
+    const kind = VAR_TO_KIND[am[1]];
+    if (!out[kind]) out[kind] = new Set();
+    out[kind].add(am[2]);
+  }
+  return out;
+}
+
+const emittedStates = shellStateWords(shell);
+
+test('life_state 实际 emit 的每个状态词都在 JS 映射表里（新增意图态 → 必须同步文案）', () => {
+  for (const [kind, words] of Object.entries(emittedStates)) {
+    for (const w of words) {
+      assert.ok(KP.LIFECYCLE_STATES[kind] && KP.LIFECYCLE_STATES[kind][w],
+        `shell 会 emit ${kind}=${w}，但 KP.LIFECYCLE_STATES.${kind} 没有它（界面会显示"未知状态"）`);
+    }
+  }
+});
+
+test('JS 映射表里没有 shell 不会 emit 的幽灵词（否则那段文案永远不会出现）', () => {
+  for (const [kind, table] of Object.entries(KP.LIFECYCLE_STATES)) {
+    const emitted = emittedStates[kind] || new Set();
+    const ghosts = Object.keys(table).filter(w => !emitted.has(w)).sort();
+    assert.deepStrictEqual(ghosts, [],
+      `KP.LIFECYCLE_STATES.${kind} 有幽灵词：${ghosts.join(', ')}（删掉，或让 life_state 真的会 emit）`);
+  }
+});
+
+test('三个状态的词表都在（防止误删整块后门禁变成空转）', () => {
+  for (const kind of ['dns', 'engine', 'watchdog']) {
+    assert.ok(KP.LIFECYCLE_STATES[kind], `缺 ${kind} 词表`);
+    assert.ok(Object.keys(KP.LIFECYCLE_STATES[kind]).length > 0, `${kind} 词表是空的`);
+  }
 });

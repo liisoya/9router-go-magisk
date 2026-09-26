@@ -35,6 +35,13 @@
    任一层不过就中止，且**不碰**现有二进制
 8. **门禁的棘轮语义唯一所有者** = `tools/ratchet.py`（基线／豁免／只拦新增／收紧）；scanner 只提供
    `gaps: dict[key, 说明]`，禁止在某个门禁脚本里另写一套基线比较与输出（2026-09-26 收口）
+9. **生命周期状态词表唯一所有者** = `module/webroot/parsers.js` 的 `LIFECYCLE_STATES`（词 → 文案/严重度）；
+   `life_state`（`module/lib/lifecycle.sh`）是唯一 emit 方。两侧由 `contract-keys.test.js` **双向**缝死：
+   shell 会 emit 而表里没有 → 红；表里有幽灵词（shell 永不会 emit）→ 红。加意图态只改这两处
+10. **"先门禁后动作"的顺序是数据**，不是装配流程里的隐式约定：更新/清理的步骤顺序与前置判据写成
+   `ENGINE_UPDATE_PLAN` / `MODULE_UPDATE_PLAN` / `ORPHAN_CLEAN_PLAN`，由 `parsers.js planSteps` 求值
+   （未给 fact 的门禁 = 未通过，默认拒绝）。app.js 只按求值结果执行，顺序不变量在离线有断言
+   （ADR-0007 的核心不变量由此从"只能真机验"变成"离线可验"）
 8. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
 
 ## 3. 所有权地图（改哪里会与上游冲突）

@@ -185,3 +185,66 @@ test('checksumGate：不匹配拒绝、匹配通过（忽略大小写与空白�
   assert.strictEqual(KP.checksumGate(h, h.toUpperCase() + '\n').ok, true);
   assert.strictEqual(KP.checksumGate(h, h.replace(/^b/, 'a')).ok, false);
 });
+
+// ── 生命周期状态词表：词 → 文案/严重度（候选 2）──
+test('stateLabel：已登记词给出文案与严重度（与改动前逐字一致）', () => {
+  assert.strictEqual(KP.stateLabel('engine', 'up', '1234').text, '运行中 (PID 1234)');
+  assert.strictEqual(KP.stateLabel('engine', 'up', '1234').tone, 'ok');
+  assert.strictEqual(KP.stateLabel('engine', 'stopped').text, '已停止（用户设置）');
+  assert.strictEqual(KP.stateLabel('engine', 'stopped').tone, 'warn');   // 用户意图，不是故障
+  assert.strictEqual(KP.stateLabel('dns', 'disabled').text, '已关闭（用户设置）');
+  assert.strictEqual(KP.stateLabel('dns', 'yielded').tone, 'warn');
+  assert.strictEqual(KP.stateLabel('dns', 'down').text, '未运行');
+  assert.strictEqual(KP.stateLabel('watchdog', 'stale').text, '未运行（已武装，下次重启生效）');
+  assert.strictEqual(KP.stateLabel('watchdog', 'down').text, '未启用');
+});
+test('stateLabel：未登记的词不冒充正常（报未知 + 透出原词）', () => {
+  const s = KP.stateLabel('engine', 'yawned', '9');
+  assert.strictEqual(s.unknown, true);
+  assert.strictEqual(s.tone, 'err');
+  assert.ok(s.text.includes('engine=yawned'), s.text);
+});
+test('stateLabel：未知 kind 也不抛（表格被删/拼错时不炸界面）', () => {
+  const s0 = KP.stateLabel('nope', 'up', '1');
+  assert.strictEqual(s0.unknown, true);
+  assert.strictEqual(typeof s0.text, 'string');
+});
+// ── "先门禁后动作"的计划（候选 3）：顺序不变量离线可断言 ──
+// 这些断言以前做不到 —— 顺序只写在 app.js 的装配流程里，只能靠真机 T8 兜。
+test('planSteps：任一引擎门禁未过 → install 不可达（事故路径）', () => {
+  const bad = KP.planSteps(KP.ENGINE_UPDATE_PLAN,
+    { 'file-gate': { ok: true }, 'sum-gate': { ok: false, reason: 'SHA256 不匹配' } });
+  assert.strictEqual(bad.blockedBy.id, 'sum-gate');
+  assert.ok(!bad.ran.includes('install'), 'sum 门禁没过却允许 install —— 正是 404 正文被装上的那条路');
+  const badFile = KP.planSteps(KP.ENGINE_UPDATE_PLAN,
+    { 'file-gate': { ok: false, reason: '不是引擎二进制' } });
+  assert.strictEqual(badFile.blockedBy.id, 'file-gate');
+  assert.ok(!badFile.ran.includes('install'));
+});
+test('planSteps：两个门禁都过才 ran 到 install', () => {
+  const v = KP.planSteps(KP.ENGINE_UPDATE_PLAN,
+    { 'file-gate': { ok: true }, 'sum-gate': { ok: true } });
+  assert.strictEqual(v.blockedBy, null);
+  assert.ok(v.ran.includes('install'));
+});
+test('planSteps：没给 fact 的门禁算未通过（默认拒绝，不是默认放行）', () => {
+  const v = KP.planSteps(KP.ENGINE_UPDATE_PLAN, { 'file-gate': { ok: true } });
+  assert.strictEqual(v.blockedBy.id, 'sum-gate');
+});
+test('计划结构：install 之前必须有两个门禁（改顺序会红）', () => {
+  const idx = KP.ENGINE_UPDATE_PLAN.findIndex(s => s.id === 'install');
+  assert.ok(idx > 0, 'ENGINE_UPDATE_PLAN 里没有 install 步骤');
+  assert.deepStrictEqual(KP.ENGINE_UPDATE_PLAN.slice(0, idx).filter(s => s.gate).map(s => s.id),
+    ['file-gate', 'sum-gate']);
+});
+test('计划结构：孤儿清理的 snapshot 门禁在 delete 之前（快照失败不得删除）', () => {
+  const v = KP.planSteps(KP.ORPHAN_CLEAN_PLAN,
+    { scan: { ok: true }, recheck: { ok: true }, snapshot: { ok: false, reason: '快照失败' } });
+  assert.strictEqual(v.blockedBy.id, 'snapshot');
+  assert.ok(!v.ran.includes('delete'));
+});
+test('计划结构：模块更新的 zip 门禁在 install 之前', () => {
+  const v = KP.planSteps(KP.MODULE_UPDATE_PLAN, { 'zip-gate': { ok: false, reason: '缺 module.prop' } });
+  assert.strictEqual(v.blockedBy.id, 'zip-gate');
+  assert.ok(!v.ran.includes('install'));
+});
