@@ -206,10 +206,29 @@ else
   info "T9 跳过：/version 未公开（v1.9.2 之前的引擎）或不可达"
 fi
 
+# ── T11 「等就绪 / 等消失」原语本身（唯一实现 lib/wait.sh）──
+# 门禁自己用同一实现跑一遍：语义坏了（比如假谓词也报成功）会在这里先红，
+# 而不是等到 T2/T4/T5 超时才发现"门禁自己不可信"
+if wait_for 3 0.2 true; then ok "T11a wait_for：谓词为真 → 成功"; else no "T11a wait_for 对真谓词报了失败"; fi
+if wait_for 2 0.1 false; then no "T11a2 wait_for 对假谓词报了成功（会谎报拉起）"; else ok "T11a2 wait_for：谓词为假 → 如实失败"; fi
+if wait_for 0 0.1 true; then no "T11a3 wait_for 次数 0 却成功"; else ok "T11a3 wait_for：次数非法 → 拒绝"; fi
+sleep 0.1 &
+_tp=$!
+wait "$_tp" 2>/dev/null
+if wait_gone 3 0.2 "$_tp"; then ok "T11b wait_gone：已退出 → 判消失"; else no "T11b wait_gone 对已退出的 pid 报了失败"; fi
+sleep 30 &
+_ap=$!
+if wait_gone 2 0.2 "$_ap"; then no "T11c wait_gone 对活着的 pid 报了消失"; else ok "T11c wait_gone：仍活着 → 不谎报消失"; fi
+kill -9 "$_ap" 2>/dev/null
+
 # ── T10 整包安装不得自毁：install-module 必须能跑完（执行中被覆写的回归）──
 # 2026-09-26 实测：直接 `unzip -oq` 到 $MODDIR 会覆写正在执行的 lib/ops.sh（同 inode）→
 # mksh 报 "ops.sh[193]: syntax error"、安装中途夭折。现改为"暂存 + mv 换 inode"。
 # 用 $DATA_DIR/last-module.zip 的副本跑（install-module 成功后会 rm 掉入参，不能直接用它）。
+#
+# **必须放在最后**：这一步会把设备上的 lib/ 换成 zip 里的版本（那正是它的目的）。2026-09-26 验收时
+# 它夹在中间，把 dev 直推的 lib/wait.sh 换掉了，导致后面的 T11 只能靠"脚本开头已 source 进内存"
+# 侥幸通过、复跑必红 —— 破坏性断言放在末尾，其余断言才在同一个代码状态下运行。
 ZIP="$DATA_DIR/last-module.zip"
 if [ -f "$ZIP" ]; then
   cp "$ZIP" /data/local/tmp/9r-gate.zip
@@ -224,21 +243,6 @@ if [ -f "$ZIP" ]; then
 else
   info "T10 跳过：$ZIP 不存在（先跑一次 install-module 生成）"
 fi
-
-# ── T9 「等就绪 / 等消失」原语本身（唯一实现 lib/wait.sh）──
-# 门禁自己用同一实现跑一遍：语义坏了（比如假谓词也报成功）会在这里先红，
-# 而不是等到 T2/T4/T5 超时才发现"门禁自己不可信"
-if wait_for 3 0.2 true; then ok "T9a wait_for：谓词为真 → 成功"; else no "T9a wait_for 对真谓词报了失败"; fi
-if wait_for 2 0.1 false; then no "T9a2 wait_for 对假谓词报了成功（会谎报拉起）"; else ok "T9a2 wait_for：谓词为假 → 如实失败"; fi
-if wait_for 0 0.1 true; then no "T9a3 wait_for 次数 0 却成功"; else ok "T9a3 wait_for：次数非法 → 拒绝"; fi
-sleep 0.1 &
-_tp=$!
-wait "$_tp" 2>/dev/null
-if wait_gone 3 0.2 "$_tp"; then ok "T9b wait_gone：已退出 → 判消失"; else no "T9b wait_gone 对已退出的 pid 报了失败"; fi
-sleep 30 &
-_ap=$!
-if wait_gone 2 0.2 "$_ap"; then no "T9c wait_gone 对活着的 pid 报了消失"; else ok "T9c wait_gone：仍活着 → 不谎报消失"; fi
-kill -9 "$_ap" 2>/dev/null
 
 echo "== 结果：通过 $PASS / 失败 $FAIL =="
 # 证据留存：2026-09-26 观测到一次偶发失败（1/4 次）但在 stdout 之外没有痕迹 ——
