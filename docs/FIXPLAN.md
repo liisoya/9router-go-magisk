@@ -263,6 +263,41 @@
 - [ ] **待用户验收**：Dashboard 硬刷新（新资源带 hash，普通刷新即可）→ Settings → Download Backup →
   弹层输当前密码 → 应下载 `9router-backup-<时间戳>.json`（修复前是 401）
 
+## Phase 21 · 端点 parity 巡检（棘轮）—— 让"移植缺失"不可能悄悄复发 ✅ 2026-09-26
+
+> 起因：用户追问"是不是拉取原仓库出的问题？要不要重新 fork？" —— 结论：不是。
+> 本仓与上游（Next.js/React）是**重写移植**关系，没有可 merge 的血缘，重新 clone 修不了任何东西；
+> 端点是手写重写的，漏一个既不会编译报错也不会运行报错（Phase 20 的 401 就是这一类）。
+> 治法只有一条：把"上游有哪些端点"变成可执行断言。
+
+- [x] **21.1 新增 `tools/check-parity.py`（棘轮 / ratchet）**
+  - 上游侧清单：`<上游树>/src/app/api/**/route.js` → 路径 `/api/<目录段>`，方法取
+    `export async function GET` 与 `export const GET` 两种写法；
+  - 本仓侧清单：`internal/handlers/**/*.go` 的字面量注册，按 `.Route("/前缀", …)` 嵌套推导前缀
+    （实测 `internal/handlers/dashboard/routes.go` 用的就是 `r.Route("/api", …)`）；
+  - 动态段两侧统一归一（`[id]` / `{id}` / `{id:正则}` → `{}`；`[...slug]` / chi `*` → `{**}`），
+    避免参数名不同造成假差异；统计括号深度前先抹掉字符串字面量，避免 `{id}` 干扰前缀栈配对；
+  - 棘轮语义：`tools/parity-baseline.txt` 冻结存量缺口（**只拦新增**），
+    `tools/parity-ignore.txt` 放**有理由**的豁免（等价实现/产品决策，理由必填、工具校验格式）；
+  - 红灯自证：构造假上游 `/api/zz-probe` → `❌ 新增缺口 1 条` + 退出码 1 ✓。
+- [x] **21.2 冻结基线**：上游参照 `decolua/9router v0.5.81 (a8c9d380)`；上游 224 条端点 /
+  本仓 242 条注册（44 个 Go 文件）/ **已知缺口 141 条**（130 端点 + 11 方法）已入基线。
+  聚类：`/api/cli-tools/*` 49、`/api/v1/*` 19、`/api/oauth/*` 10、`/api/pxpipe/*` 9、
+  `/api/translator/*` 7，其余零散 —— 详见 `COMPARISON.md §0`。
+- [x] **21.3 首轮就抓到两个实证缺口（不是误判）**
+  - `GET /api/health` **缺失**：本仓 Dashboard 自己在调它
+    （`web/src/components/EndpointView.svelte:212-217` 探测 `tunnelUrl` / `publicUrl` / `tailscaleUrl`），
+    而本仓只注册了 `/health` 且**不带** `Access-Control-Allow-Origin: *`
+    （`internal/handlers/router.go:300`）→ tunnel / 公共地址可达性探测**永远失败**；
+  - `GET /api/auth/oidc/callback` + `POST /api/auth/saml/acs` **未注册**：
+    `internal/handlers/sso/sso.go:28-29` 定义并用于拼 `redirectURI` / `acsUrl`，但 router.go 只注册了
+    `oidc/test`、`saml/test`、`saml/metadata` → IdP 回调打到 404，SSO 登录走不完。
+- [ ] **待决策（用户）**：① `/api/health` 补端点（含 CORS 头）还是把前端改成探 `/health`；
+  ② SSO 回调补注册，还是明确"模块不提供 SSO 登录"（配置界面在、回调不通，属半接线）；
+  ③ 大块缺口（cli-tools 49 / pxpipe 9 / translator 7）是否排期。
+- [ ] **巡检入口**：`python3 tools/check-parity.py`（需 `../9router` 参照树；**不进 build.sh** ——
+  参照树不总是存在，不能让它变成构建的硬依赖）
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |

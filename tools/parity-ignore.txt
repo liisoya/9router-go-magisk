@@ -1,0 +1,12 @@
+# 上游端点 parity 豁免清单
+#
+# 格式：<METHOD> <path>  # 理由（必填，工具会校验）
+# 路径写法与 tools/check-parity.py 的归一化一致：动态段用 {}，尾部通配用 {**}
+#
+# 这里只放**已经核实**的两类：
+#   1) 等价实现：能力已在本仓以别的路径提供（必须写出实际路径）
+#   2) 产品决策：明确不移植（必须写出决策依据）
+# 存量但尚未裁决的缺口**不要**放这里 —— 那些属于 tools/parity-baseline.txt（棘轮基线）。
+#
+# 示例（未生效，仅示意格式）：
+# GET    /api/health          # 等价：本仓 /health（若要支持 tunnel 探测需补 Access-Control-Allow-Origin: *）
