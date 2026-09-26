@@ -6,7 +6,7 @@
 
 ```
 9router-go-magisk/
-├── cmd/ internal/ web/ ...   # 上游 v1.9.1 引擎源码（原样，零魔改）
+├── cmd/ internal/ web/ ...   # 上游 v1.9.2 引擎源码（默认不改；ADR-0003 定点修复除外，补丁存档 tools/patches/）
 ├── module/                   # Magisk/KernelSU 模块层
 │   ├── module.prop           # id=ninerouter-go + updateJson
 │   ├── customize.sh          # 安装期：ABI 检查 + chmod 兜底
@@ -23,34 +23,30 @@
 │       ├── bridge.js         # root-shell 桥（串行队列 / CRLF / sqlFile 环境补偿）
 │       ├── app.js            # UI 装配与事件
 │       └── test/             # 解析层 fixture 回归测试
-├── tools/                    # dnsfwd.c、patch-clipboard.py、gen-schema.py、patches/
-├── build.sh                  # 一键构建（7 步全校验管线）
+├── tools/                    # 工具与门禁：check.sh（唯一入口）、check-parity.py、check-ui-parity.py、
+│                             # gen-schema.py、patch-clipboard.py、deploy-device.sh、build-dnsfwd.sh、
+│                             # dnsfwd.c、parity-*.txt、ui-parity-*.txt、device/（真机门禁）、patches/
+├── build.sh                  # 一键构建（7 步全校验管线，第 3 步复用 check.sh --offline）
+├── AGENT-CONVENTIONS.md      # 工程契约（事实优先级/架构不变量/所有权/变更映射/门禁档位/ADR 触发条件）
 ├── CONTEXT.md                # 术语表
+├── docs/TESTING.md           # 门禁台账（测什么/怎么跑/失败意味着什么/变更记录）
 └── docs/adr/                 # 架构决策记录
 ```
 
-## 离线测试
+## 门禁（唯一入口 `tools/check.sh`，清单与断言含义见 `docs/TESTING.md`）
 
 ```bash
-node --test module/webroot/test/*.test.js   # 解析层 / 命令构造器 / 键契约，三套离线回归
+tools/check.sh --offline   # 离线：shell 语法 / 模块 WebUI 46 例 / Dashboard 82 例 / go build+test / tsc / schema
+tools/check.sh --device    # 真机：T1–T10（生命周期与安装）+ A1–A5（仪表盘 API）
+tools/check.sh --parity    # 对照：端点 parity 棘轮 + UI 调用 parity（需 ../9router，UPSTREAM= 可覆盖）
+tools/check.sh --all       # 三档全跑（缺前置 → SKIP 摘要，退出 0；--require-device/--require-parity 为严格模式）
 ```
 
-- `parsers.test.js`：解析层 fixture 回归（真机实测输出）。环境差异 bug（CRLF / 输出格式 /
-  解析规则）可离线红绿回归，不再依赖刷真机验证。
-- `bridge-commands.test.js`：bridge 的命令构造器（纯函数）+ `sqlSnapshot` 的成败判据
-  （真机实证：sqlite3 出错时 `>` 仍建 0 字节文件）。
-- `contract-keys.test.js`：**键契约门禁** —— shell 的 `emit` 键集合 vs `app.js` 消费的键集合
-  必须一致（消费了不存在的键 = 界面静默空白）。源码即契约，没有手抄键表。
-
-**真机门禁**（生命周期，每次改动启动/守护相关必跑）：
-
-```bash
-adb push tools/device/test-lifecycle.sh /data/local/tmp/
-adb shell 'su -c "sh /data/local/tmp/test-lifecycle.sh"'
-```
-
-三条断言：T1 守护在场 / T2 `kill -9` 引擎后 40s 内自愈（新 PID + `/health` 200）/
-T3 在管理器应用 cgroup 里启动仍能脱组。**修复前 T2、T3 是红的。**
+- 模块 WebUI 三套离线回归（`module/webroot/test/`）：`parsers.test.js` 解析层 fixture、
+  `bridge-commands.test.js` 命令构造器与成败判据、`contract-keys.test.js` 键契约门禁
+  （shell 的 `emit` 键集合 vs `app.js` 消费键，源码即契约）
+- 真机断言逐条含义、已知不绿灯（外网依赖用例）与**变更记录**都在 `docs/TESTING.md`
+- 新增/修改/删除任何门禁断言 → 必须同步登记台账（`AGENT-CONVENTIONS.md §4`）
 
 ## 构建
 
@@ -66,7 +62,9 @@ T3 在管理器应用 cgroup 里启动仍能脱组。**修复前 T2、T3 是红�
 
 1. KernelSU / Magisk 刷入 zip
 2. 重启后引擎监听 **:20130**（默认，与上游一致），Dashboard 即引擎地址
-3. 首次登录使用固定初始密码 **123456**（写入 `initial-password`，端口仅绑定 loopback）。
+3. 首次登录使用固定初始密码 **123456**（写入 `initial-password`）。引擎监听 `0.0.0.0:<port>`
+   （默认 20130），模块 WebUI 会显示局域网地址 —— 安全性由密码与可选 `requireLogin` 承担
+   （这是显式取舍，见 `AGENT-CONVENTIONS.md §10`）。
    用户登录 Dashboard 后请立即自行修改密码（不替用户生成随机密码）：
    `adb shell su -c "cat /data/adb/9router-go/initial-password"`
 4. DNS 管理：管理器 → 模块 → WebUI
