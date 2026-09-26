@@ -33,6 +33,30 @@ engine_version() {
   if [ -s "$DATA_DIR/engine-version" ]; then cat "$DATA_DIR/engine-version"; return; fi
   [ -s "$MODDIR/etc/engine-version" ] && cat "$MODDIR/etc/engine-version"
 }
+
+engine_version_sync() {
+  # 运行期版本文件的**自愈**（2026-09-26 用户实测「假更新」）：
+  #   整包更新只换 $MODDIR 里的文件，**不跑我们的代码** —— WebUI 那个按钮是由"当时装在设备上
+  #   的那份旧 ops.sh"执行的（所以修好的代码要等下一次 install 才生效），管理器在线更新
+  #   （updateJson）更是一个字节的模块代码都不跑。于是 $DATA_DIR/engine-version 停在上一个版本：
+  #   包已是 r2、引擎实际在跑 1.9.2，面板却写 1.9.1 —— 用户看到的就是"更新没成功"。
+  #
+  # 收敛规则（**不依赖 mtime 精度**：mksh 的 -nt 只到秒，同一秒内的先写后 touch 判不出来）：
+  #   主判据 = `engine-version-code` 记录着"这份引擎版本是在哪个 module versionCode 下写的"。
+  #     ① 记录缺失、或与当前 versionCode 不同 → 包被换过（而换包必然换 bin/）→ 以包内为准；
+  #     ② 记录与当前一致 → 这份引擎是本模块版本下由 install-engine 装的 → 别动它；
+  #     ③ 运行期文件缺失 → 从包内补齐。
+  #   补充判据 = 包比运行期文件新（同 versionCode 的重装场景，见 T12a2）。
+  [ -s "$MODDIR/etc/engine-version" ] || return 0
+  _code="$(module_versioncode)"
+  _seen="$(cat "$DATA_DIR/engine-version-code" 2>/dev/null)"
+  if [ ! -s "$DATA_DIR/engine-version" ] \
+     || [ "$_seen" != "$_code" ] \
+     || [ "$MODDIR/module.prop" -nt "$DATA_DIR/engine-version" ]; then
+    cp "$MODDIR/etc/engine-version" "$DATA_DIR/engine-version" 2>/dev/null
+    printf '%s\n' "$_code" > "$DATA_DIR/engine-version-code" 2>/dev/null
+  fi
+}
 lan_ips() {
   # 全局作用域 IPv4（排除 127.*），'|' 连接（panel 值不含空格），最多 3 个
   ip -4 addr show scope global 2>/dev/null \
@@ -41,6 +65,9 @@ lan_ips() {
 
 # ── 子命令 ────────────────────────────────────
 cmd_status() {
+  # 先让运行期版本文件自愈（整包更新/管理器安装不跑我们的代码，见 engine_version_sync）：
+  # 放在这里是因为 status 是面板与 action.sh 的唯一数据源，读一次就收敛一次
+  engine_version_sync
   # 单行输出（空格分隔 key=value）：兼容 WebUI 的 promise 降级形态
   # （该形态多行输出只剩末行）。值均不含空格。
   # 进程三态（dns/engine/watchdog）由 life_state 提供 —— 判定规则只有那一处。
@@ -110,7 +137,12 @@ cmd_install_engine() {
   if mv "$1" "$MODDIR/bin/9router-go" && chmod 0755 "$MODDIR/bin/9router-go"; then
     if [ "$(life_restart_engine)" = "engine=up" ]; then
       # 版本号只在新引擎**真的起来**之后才写（旧实现在替换后立即写 → 谎报）
-      [ -n "${2:-}" ] && printf '%s\n' "$2" > "$DATA_DIR/engine-version"
+      if [ -n "${2:-}" ]; then
+        printf '%s\n' "$2" > "$DATA_DIR/engine-version"
+        # 记录"这份引擎是在哪个模块版本下装的"：engine_version_sync 据此区分
+        # 「整包更新换掉了引擎」与「运行期更新了引擎」，从而自愈而不误覆盖
+        printf '%s\n' "$(module_versioncode)" > "$DATA_DIR/engine-version-code"
+      fi
       # .bak 的语义从"替换前备份"改为"最后一次已验证可用"（只在这里更新）
       cp "$MODDIR/bin/9router-go" "$MODDIR/bin/9router-go.bak" 2>/dev/null
       echo "engine=up"
@@ -175,8 +207,9 @@ cmd_install_module() {
   # 并永远提示"有更新可用"。包内 etc/engine-version 是构建期写的，描述的就是刚装进来的二进制。
   if [ -s "$MODDIR/etc/engine-version" ]; then
     cp "$MODDIR/etc/engine-version" "$DATA_DIR/engine-version" 2>/dev/null
+    printf '%s\n' "$(module_versioncode)" > "$DATA_DIR/engine-version-code" 2>/dev/null
   else
-    rm -f "$DATA_DIR/engine-version"   # 包里没有 → 宁可显示"未知"，也不要留旧版本的谎报
+    rm -f "$DATA_DIR/engine-version" "$DATA_DIR/engine-version-code"   # 包里没有 → 宁可显示"未知"，也不要留旧版本的谎报
   fi
   rm -f "$1"
   # 与 install-engine 同一语义：只有新引擎**真的起来**才把恢复点刷成这一份（已验证可用）

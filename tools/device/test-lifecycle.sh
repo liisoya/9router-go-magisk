@@ -39,6 +39,7 @@ engpid() { cat "$PIDFILE" 2>/dev/null; }
 . "$MODDIR/lib/wait.sh" || { echo "FAIL: 缺 $MODDIR/lib/wait.sh（等就绪/等消失的唯一实现）"; exit 2; }
 livepid() { N="$(engpid)"; [ -n "$N" ] && kill -0 "$N" 2>/dev/null; }
 newpid() { N="$(engpid)"; [ -n "$N" ] && [ "$N" != "$1" ] && kill -0 "$N" 2>/dev/null; }
+panel_field() { "$OPS" panel | tr ' ' '\n' | grep "^$1=" | cut -d= -f2; }
 
 echo "== 目标：$MODDIR （数据目录 $DATA_DIR）=="
 
@@ -220,6 +221,40 @@ sleep 30 &
 _ap=$!
 if wait_gone 2 0.2 "$_ap"; then no "T11c wait_gone 对活着的 pid 报了消失"; else ok "T11c wait_gone：仍活着 → 不谎报消失"; fi
 kill -9 "$_ap" 2>/dev/null
+
+# ── T12 运行期引擎版本自愈（整包更新不跑我们的代码 → 面板曾谎报旧版本，看着像"假更新"）──
+# 2026-09-26 用户实测：包已是 r2、引擎实际在跑 1.9.2，面板却写 1.9.1（运行期文件停在上一个版本）。
+PKG_VER="$(cat "$MODDIR/etc/engine-version" 2>/dev/null)"
+if [ -n "$PKG_VER" ]; then
+  # T12a：整包更新（由旧代码/管理器执行，不会写运行期文件）→ 记录落后 → 自愈
+  printf '0.0.1\n' > "$DATA_DIR/engine-version"
+  printf '1\n' > "$DATA_DIR/engine-version-code"     # 模拟"包已换成新 versionCode，但运行期还是旧的"
+  GOT="$(panel_field engine_version)"
+  [ "$GOT" = "$PKG_VER" ] && ok "T12a 整包更新后运行期版本自愈（0.0.1 → $PKG_VER）" \
+                          || no "T12a 未自愈：panel=$GOT，包内=$PKG_VER"
+  # T12a2：同 versionCode 的重装（只能靠 mtime 判；-nt 精度是秒，所以这里 sleep 1）
+  printf '0.0.2\n' > "$DATA_DIR/engine-version"
+  printf '%s\n' "$(grep '^versionCode=' "$MODDIR/module.prop" | cut -d= -f2)" > "$DATA_DIR/engine-version-code"
+  sleep 1
+  touch "$MODDIR/module.prop"                        # 包比运行期文件新 = 刚重装过
+  GOT="$(panel_field engine_version)"
+  [ "$GOT" = "$PKG_VER" ] && ok "T12a2 同版本重装也自愈（0.0.2 → $PKG_VER）" \
+                          || no "T12a2 未自愈：panel=$GOT，包内=$PKG_VER"
+  # T12b：运行期更新过引擎（install-engine 会同时写记录）→ 绝不能被包内旧值覆盖
+  printf '9.9.9\n' > "$DATA_DIR/engine-version"
+  printf '%s\n' "$(grep '^versionCode=' "$MODDIR/module.prop" | cut -d= -f2)" > "$DATA_DIR/engine-version-code"
+  touch "$DATA_DIR/engine-version"
+  GOT="$(panel_field engine_version)"
+  [ "$GOT" = "9.9.9" ] && ok "T12b 运行期更新不被包内旧值覆盖" \
+                       || no "T12b 运行期版本被覆盖：panel=$GOT（应为 9.9.9）"
+  # T12c：运行期文件缺失 → 从包内补齐（并留下记录，供下次判断）
+  rm -f "$DATA_DIR/engine-version"
+  GOT="$(panel_field engine_version)"
+  [ "$GOT" = "$PKG_VER" ] && ok "T12c 运行期文件缺失时从包内补齐（$PKG_VER）" \
+                          || no "T12c 未补齐：panel=$GOT"
+else
+  info "T12 跳过：包内 etc/engine-version 不存在"
+fi
 
 # ── T10 整包安装不得自毁：install-module 必须能跑完（执行中被覆写的回归）──
 # 2026-09-26 实测：直接 `unzip -oq` 到 $MODDIR 会覆写正在执行的 lib/ops.sh（同 inode）→

@@ -36,6 +36,9 @@
    `web/src/lib/*.ts`（纯函数，可离线断言；禁止把请求形状散在组件里）
 6. **状态必须与事实一致**：写状态/版本前先验证（`engine=up` 才写 `engine-version`；面板显示必须等于
    `/version` 自报；`.bak` 只记录已验证可用的那一份）
+   派生状态还要**读取时自愈**：整包更新不跑我们的代码（管理器在线更新一个字节模块代码都不跑），
+   所以不能指望"执行更新的那份代码"顺手把派生文件修好 —— 那是 Phase 26「假更新」的根因，
+   收敛点在 `ops.sh engine_version_sync`（`cmd_status` 入口），回归在真机 `T12`
 7. **装前门禁 fail-closed**：下载（HTTP 层）→ 文件本体（体积 + ELF 魔数）→ 校验和（取不到即拒绝）；
    任一层不过就中止，且**不碰**现有二进制
 8. **门禁的棘轮语义唯一所有者** = `tools/ratchet.py`（基线／豁免／只拦新增／收紧）；scanner 只提供
@@ -122,6 +125,7 @@
 | 触碰 `localStorage` / 登录态键 | 只经 `web/src/lib/session.ts`（防回潮门禁扫全树） |
 | 需要"等一会/等就绪" | 用 `module/lib/wait.sh`；真机门禁也用它（否则 `WAIT`/`T9` 失效） |
 | 改打包或直推的注入 | 只改 `tools/inject-mod-id.sh`（`INJECT` 档会红） |
+| 改 module 包内容（尤其 `bin/`） | 运行期派生状态的收敛路径：`engine_version_sync` + 真机 `T12`（更新不跑我们的代码） |
 | 版本/发布物料 | `build.sh` 七步 + `update.json` 同步 |
 | 架构级取舍（难回退 + 反直觉 + 真实取舍） | 写 ADR（见 §6） |
 

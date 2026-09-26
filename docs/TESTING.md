@@ -60,6 +60,8 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | T8a–d | 装前门禁：9 字节 404 正文被拒 / 现有引擎字节数不变 / `engine-version` 不谎报 / 引擎仍 up | 会把垃圾装成引擎、设备再无可用引擎（ADR-0007） |
 | T9 | 面板 `engine_version` == 引擎自报 `/version.currentVersion` | 状态谎报（面板显示旧版本、永远提示有更新） |
 | T10a–b | 整包安装跑完无 `syntax error`，装完 `engine=up` | 安装会覆写正在执行的自己而夭折 |
+| T11a–c | 「等就绪/等消失」原语本身（`wait_for` 真/假两判、次数非法即拒绝、`wait_gone` 真消失且不谎报） | 轮询语义坏了 → 会谎报"拉起成功"或白等满超时 |
+| T12a/a2/b/c | 运行期引擎版本自愈：整包更新后（记录落后）自愈 / 同版本重装（靠 mtime）自愈 / 运行期更新不被包内旧值覆盖 / 文件缺失从包内补齐 | 面板谎报旧版本 → 用户看到「假更新」（引擎其实已是新的） |
 
 `tools/device/test-dashboard-api.sh` —— 仪表盘 API 功能（撤补丁后的"功能确实可用"证明）：
 
@@ -126,6 +128,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 新增 | INJECT（8 例） | 候选 7：`tools/inject-mod-id.sh` 收成注入唯一实现（**不维护文件清单**：注入对象 = 全树所有含占位符的文件；MOD_ID 唯一来源 = module.prop；自己断言零残留；不可读文件一律拒绝）。build.sh 的 2 文件 sed 循环与 deploy-device.sh 的 4 文件 sed 一并撤掉 | 见本次提交 |
 | 2026-09-26 | 新增 | JS-UNIT（58 → 63 例） | 候选 5：`engine-spec-contract.test.js` 把「什么算一个引擎」两侧缝死（常量两种写法不许漂、魔数字面量逐字相同、两项检查的存在性、边界语义 `-ge` ↔ `<`）。红灯自证：ops.sh 下限改 4MB → 精确报出「前端放行、后端拒绝」并红。ADR-0007 补第 7 条澄清「判据 vs 执行 ≠ 抄两遍」 | 见本次提交 |
 | 2026-09-26 | 新增 | WAIT（离线 10 例）+ 真机 T9（6 例） | 候选 6：`module/lib/wait.sh` 收成「等就绪/等消失」唯一实现（`wait_for` / `wait_gone` / `wait_pid_gone`；先判定再睡觉、次数非法即拒绝、僵尸态算已退出、谓词在当前 shell 执行）。**五处** ad-hoc 轮询全部收敛（watchdog 拉起等待、life_stop_all、life_restart_engine、life_wd_start、真机门禁 3 处）；`life_pid_gone` 保留名字但实现改为委派。附带收益：轮询语义第一次能离线验（此前只能上真机） | 见本次提交 |
+| 2026-09-26 | 新增 | 真机 T12（4 例） | 用户报障「模块更新后界面显示已是最新、概览仍是旧版本 → 假更新」：根因是整包更新**不跑我们的代码**（WebUI 按钮由设备上那份旧 `ops.sh` 执行；管理器在线更新一个字节模块代码都不跑）→ 运行期 `engine-version` 停在上一个版本，面板据此谎报。新增 `ops.sh engine_version_sync`（`cmd_status` 入口读取时自愈；主判据 = `engine-version-code` 记录，mtime 仅作补充）。**T12a 首跑即抓到我实现里的真缺陷**：mksh 的 `-nt` 只到秒精度，同一秒内"先写文件再 touch"判不出来 → 改为不依赖精度的记录判据（T12a2 专门盯 mtime 那条补充路径） | 见本次提交 |
 | 2026-09-26 | 新增 | JS-UNIT（63 → 67 例） | DNS 优选纳入计划化（`DNS_OPTIMIZE_PLAN`：无可用上游不得改写 / 回滚点不可用不得改写 / write 与 reload 在两道门禁之后）；**顺手修掉一个"永远 true"**：`KB.backupOnce` 原先 `...; true` 恒返回真，挂在它上面的门禁形同虚设 —— 现按 shell 回的 ok/exists/no-src/fail 诚实返回（三个调用点都忽略返回值，无行为回归） | 见本次提交 |
 | 2026-09-26 | 新增 | BUN-UNIT（83 → 91 例） | 候选 8：`web/src/lib/session.ts` 收成登录态唯一所有者（存储注入 → 纯函数；两种"登出"有意区分：`clearAuthed` 只清标记 / `clearAll` 连 key 一起清）。7 处调用点收敛（client.ts ×4、LoginView、App.svelte、EndpointView、AnalyticsView、client.test.ts）。含**防回潮门禁**：全树扫描 `'9router_auth'` / `'9router_key'` 字面量，只允许出现在 `lib/session*` | 见本次提交 |
 | 2026-09-26 | 新增 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（离线档） | f509e85 |
