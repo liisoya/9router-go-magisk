@@ -1,7 +1,76 @@
 # Changelog
 
-
 ## [Unreleased]
+
+### 🐛 `POST /api/models/test` 401 meski sudah login
+
+- Route dipindah dari grup `RequireApiKey` (hanya menerima Bearer/`X-API-Key`) ke `RequireDashboardAuth` — parity upstream `dashboardGuard` (`src/app/api/models/test/route.js`). Sebelumnya dashboard yang login via cookie session mendapat `401 invalid_api_key`; kini cookie session, CLI token, dan API key valid sama-sama diterima, sama seperti `/api/models/custom|disabled|alias`.
+- Regression test: `TestSetupServerRouter_ModelTestDashboardSession` (anonim → 401, session valid → lolos).
+
+### 🛠️ Frontend Dev Workflow — HMR tanpa rebuild binary
+
+- `web/vite.config.ts` — dev proxy kini mencakup `/admin`; sebelumnya `resetHealth()` (`/admin/health/reset`) jatuh ke SPA fallback di mode dev karena tidak di-proxy ke Go.
+- `Makefile` — target baru `web-dev` (Vite dev server :5173 + HMR). Workflow dua terminal: `make dev` (Go :20130) + `make web-dev` → perubahan FE hot-reload tanpa rebuild/restart binary.
+- `web/README.md` — didokumentasikan workflow dev dua-terminal dan caveat service worker dev (`sw.js` ikut terdaftar di dev; hard-refresh/unregister bila tampilan stale).
+### 🐛 Dashboard manifest/SW 404 + version check 401 spam
+
+- `GET /sw.js`, `/manifest.webmanifest`, and `/manifest.json` are now routed to the embedded SPA handler: chi has no catch-all, so the files referenced by `index.html` returned `404` even though they exist in `web/dist`, breaking manifest fetch and service-worker registration on every page load.
+- `GET /version`, `/api/version`, `/api/version/status`, and `/api/version/check` are now public (upstream `PUBLIC_API_PATHS` parity): the Sidebar polls `/api/version` on every dashboard page including `/login`, before any session or API key exists, so gating them behind `RequireApiKey` spammed `401 (Unauthorized)` in the console on every page load.
+- `POST /api/version/update`, `/api/version/shutdown`, and `/api/version/auto-update` stay admin-only (session or CLI token), matching upstream `ALWAYS_PROTECTED`.
+
+
+### 🐛 Dashboard logging, request details, and cached-token parity
+
+- Moved console-log APIs to the dashboard-authenticated `/api/translator/console-logs*` boundary; dashboard sessions and local CLI tokens work, while engine API keys cannot read operational logs or change global log level.
+- Removed the shipped hardcoded dashboard API-key fallback and made frontend error handling unwrap nested API error messages instead of displaying `[object Object]`.
+- Captured terminal usage from complete OpenAI/Claude SSE events, normalized Claude cache-inclusive prompt counts, and preserved cached read/create tokens through streaming and non-streaming translation.
+- Added compatibility reads for legacy and nested cached-token JSON shapes in usage stats, request details, and recent-request hydration.
+- Persisted sanitized failure/cancellation request details without duplicating successful usage records; Responses executor requests now persist actual token usage.
+
+### 🐛 Antigravity Google OAuth redirect
+
+- Matched the upstream Next.js Antigravity OAuth contract end-to-end: `redirect_uri=http://localhost:<dashboard-port>/callback`, the public `/callback` landing page, and `POST /api/oauth/antigravity/exchange` for the dashboard-authenticated token exchange.
+- Restored Antigravity's upstream Google scopes (`cclog` and `experimentsandconfigs`) and added loopback callback relay through `postMessage`, preserving automatic handoff for local/forwarded dashboard access.
+- Added authorize, redirect validation, token-exchange, frontend request, callback landing, and auth-boundary regression coverage; removed the obsolete `/api/oauth/antigravity/callback` contract.
+
+### 🐛 Media example request headers
+
+- Stopped masked API keys returned by `GET /api/keys` (for example, `sk-8b7…e34f`) from being copied into browser `Authorization` headers, which caused Chromium to reject requests with `String contains non ISO-8859-1 code point`.
+- Media example runners now require a usable full key, store newly created keys locally for the current dashboard session, and avoid sending masked/non-ASCII credentials.
+
+### 🐛 Antigravity search account failover
+
+- `POST /v1/search` with an Antigravity model now rotates through all active Antigravity accounts: a `403 VALIDATION_REQUIRED` ("Verify your account") locks only that account's search model and the next account is tried, matching upstream `markAccountUnavailable`/`checkFallbackError` failover.
+- Fixed the direct-client 403 retry in media requests masking the real upstream status: direct retry now only fires on transport errors, so account verification failures surface correctly instead of being hidden.
+
+### 🐛 Media providers audit (search/fetch/image/STT/TTS)
+
+- Failover: Xquik search, Antigravity image, Antigravity STT, and Nvidia TTS now rotate through all active accounts with per-account `ClassifyError` locks and success unlocks, matching the upstream `search.js`/`tts.js`/`imageGeneration.js` credential loops. Pinned `x-connection-id` is honored exactly once.
+- Correctness: fixed the Xquik registry `BaseURL` (host + path were wrong), clamped `max_results` to upstream `5..100`, stopped forcing a default `queryType`, added `answer:null` and `response_time_ms`/`upstream_latency_ms` to the Xquik envelope, and preserved original upstream error statuses instead of collapsing to 502.
+- Safety: request-scoped 4xx (400/405/409/422/…) no longer lock accounts (`ClassifyError` parity with upstream `checkFallbackError`); video creation no longer rotates on 5xx (billable-job parity with `CREATE_ROTATION_STATUSES`); multipart model rewrites are byte-exact so binary file bytes can't be corrupted.
+- Isolation: a pinned connection ID must belong to the requested provider — cross-provider credential use is now rejected in `GetBestConnection`.
+- TTS: Nvidia honors provider/connection base URL overrides; Edge-TTS rejects sub-1KiB error payloads as empty audio (upstream parity).
+- Frontend: the image Run body now matches the curl example (`background`, `image_detail`).
+
+## [v1.9.2] - 2026-09-26
+
+### 🐛 Dashboard console errors: version 401 spam, manifest/SW 404, missing icons, auth redirect
+
+- `GET /version`, `/api/version`, `/api/version/status`, and `/api/version/check` are now public (upstream `PUBLIC_API_PATHS` parity): the Sidebar polls on every page including `/login` before any session exists. `POST update/shutdown/auto-update` stay admin-only (upstream `ALWAYS_PROTECTED`).
+- `GET /sw.js`, `/manifest.webmanifest`, and `/manifest.json` routed to the embedded SPA handler; PWA shell files existed in `web/dist` but chi had no route.
+- Added missing provider icons `opencode-zen.png` and `ollama-search.png`.
+- Frontend 401 handling: `onUnauthorized` clears stale local session and redirects to login; `App` stops polling when logged out.
+- `POST /api/models/test` moved to `RequireDashboardAuth` (cookie session, CLI token, and API key accepted) — dashboard got `401 invalid_api_key` despite being logged in.
+- Sidebar nav now scrolls with sticky header/footer: `aside` is viewport-bounded (`h-full max-h-screen overflow-hidden`), header/footer `shrink-0`, nav `min-h-0` (closes issue #22 side-nav points; live-verified at 500px viewport + mobile drawer).
+- Dev workflow: `make web-dev` (Vite :5173 + HMR, no binary rebuild); dev proxy keeps `/debug` (traces/pprof) alongside `/admin` (health reset).
+
+### 🐛 Media providers audit (search/fetch/image/STT/TTS) + Antigravity failover
+
+- Antigravity/Xquik search, Antigravity image/STT, and Nvidia TTS now rotate all active accounts with per-account `ClassifyError` locks and success unlocks; pinned `x-connection-id` honored once.
+- Fixed Xquik registry `BaseURL`, clamped `max_results 5..100`, optional `queryType`, `answer`/timing envelope fields, upstream error statuses preserved.
+- Request-scoped 4xx no longer lock accounts; combo video skips 5xx rotation; multipart model rewrite byte-exact; pinned connections provider-scoped.
+- `GET /api/keys` returns full secrets to dashboard sessions (upstream parity); masked values stay for API-key callers.
+- Live-verified: OpenRouter embeddings `:20128` vs `:20129` return byte-identical 3072-dim vectors.
 
 ## [v1.9.1] - 2026-09-25
 

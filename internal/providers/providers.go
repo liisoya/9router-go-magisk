@@ -580,7 +580,7 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 	},
 	"xquik": {
-		BaseURL:    "https://api.xquik.com/v1/x/search-tweets",
+		BaseURL:    "https://xquik.com/api/v1/x/tweets/search",
 		AuthHeader: "x-api-key",
 		AuthScheme: "raw",
 	},

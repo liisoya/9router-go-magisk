@@ -156,3 +156,10 @@ export function parseCallbackURL(href: string): { state: string; raw: string; er
 export function dashboardCallbackURL(origin: string): string {
   return `${origin.replace(/\/+$/, '')}/callback`
 }
+
+/** Antigravity mirrors upstream Next.js: OAuth always returns to the browser
+ * host's loopback interface while preserving the dashboard's listening port. */
+export function oauthLoopbackCallbackURL(port: string, secure: boolean): string {
+  const callbackPort = port || (secure ? '443' : '80')
+  return `http://localhost:${callbackPort}/callback`
+}

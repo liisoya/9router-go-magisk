@@ -198,3 +198,20 @@ func TestTranslateClaudeResponseToOpenAI(t *testing.T) {
 		t.Errorf("expected prompt_tokens 12 (10+2), got: %s", outStr)
 	}
 }
+
+func TestTranslateClaudeCacheUsageIdempotent(t *testing.T) {
+	body := []byte(`{"id":"m","model":"claude","content":[],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":4,"cache_creation_input_tokens":3}}`)
+	out, err := TranslateClaudeResponseToOpenAI(body)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if !strings.Contains(string(out), `"prompt_tokens":17`) || !strings.Contains(string(out), `"cached_tokens":4`) {
+		t.Fatalf("cache usage lost: %s", out)
+	}
+	parsed := ParseResponseUsage(out)
+	NormalizeClaudeUsage(parsed)
+	NormalizeClaudeUsage(parsed)
+	if parsed.PromptTokens != 17 {
+		t.Fatalf("round-trip must not double-fold cache: %+v", parsed)
+	}
+}

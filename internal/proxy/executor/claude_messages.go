@@ -17,15 +17,31 @@ import (
 // translating chunks to OpenAI SSE format when the downstream client is an OpenAI client.
 func handleClaudeMessagesStream(w http.ResponseWriter, req *Request, upstream io.Reader) error {
 	if req.TranslateResp {
-		// Client requested Claude format (/v1/messages) and upstream is already Claude format.
-		// Stream directly via SSECopy without format translation.
 		startTime := req.StartTime
 		if startTime.IsZero() {
 			startTime = time.Now()
 		}
-		return sseStream(sseStreamOpts{
-			W: w, Upstream: upstream, Translate: false, StartTime: startTime,
-			TTFT: req.TTFT, Buf: req.ResponseBuf, Ctx: req.Ctx, ToolNameMap: req.ToolNameMap,
+		hw := proxy.NewHeartbeatWriter(req.Ctx, w, 0)
+		defer hw.Close()
+		flusher := proxy.WriteSSEHeaders(hw)
+		return proxy.ScanStream(upstream, func(payload []byte) {
+			if req.TTFT != nil && *req.TTFT == 0 {
+				*req.TTFT = time.Since(startTime).Milliseconds()
+			}
+			frame := append([]byte("data: "), payload...)
+			frame = append(frame, '\n', '\n')
+			if req.ResponseBuf != nil {
+				req.ResponseBuf.Write(frame)
+			}
+			_, _ = hw.Write(frame)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			raw := append([]byte(`{"message":`), payload...)
+			raw = append(raw, '}')
+			if usage := translator.ParseClaudeUsage(raw); usage != nil {
+				translator.SetUsage(req.Ctx, usage)
+			}
 		})
 	}
 
@@ -101,6 +117,9 @@ func handleClaudeMessagesStream(w http.ResponseWriter, req *Request, upstream io
 		}
 		emit(payload)
 	})
+	if state.Usage != nil {
+		translator.SetUsage(req.Ctx, state.Usage)
+	}
 	if writeErr != nil {
 		return fmt.Errorf("write to client: %w", writeErr)
 	}

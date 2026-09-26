@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/translator"
 )
 
 const (
@@ -29,7 +30,7 @@ type RecentRequest struct {
 	Provider         string `json:"provider"`
 	PromptTokens     int    `json:"promptTokens"`
 	CompletionTokens int    `json:"completionTokens"`
-	CachedTokens     int    `json:"cachedTokens,omitempty"`
+	CachedTokens     int    `json:"cachedTokens"`
 	Status           string `json:"status"`
 }
 
@@ -282,18 +283,7 @@ func (t *Tracker) buildPayloadLocked(repo *db.Repo) StreamPayload {
 // recentFromHistoryRow maps a persisted usageHistory row onto the stream shape
 // so ring seeding and live pushes render identically.
 func recentFromHistoryRow(rh db.UsageHistoryRow) RecentRequest {
-	var cached int
-	if rh.Tokens != "" {
-		var tokensMap map[string]any
-		if err := json.Unmarshal([]byte(rh.Tokens), &tokensMap); err == nil {
-			switch v := tokensMap["cached_tokens"].(type) {
-			case float64:
-				cached = int(v)
-			case int64:
-				cached = int(v)
-			}
-		}
-	}
+	cached := translator.CachedTokensFromJSON([]byte(rh.Tokens))
 
 	status := "ok"
 	if rh.Status != "" && rh.Status != "success" && rh.Status != "ok" {

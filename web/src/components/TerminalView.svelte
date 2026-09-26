@@ -1,7 +1,7 @@
 <script lang="ts">
   // Port of decolua/9router src/app/(dashboard)/dashboard/console-log/ConsoleLogClient.js
   import { Trash2 } from 'lucide-svelte'
-  import { getAuthHeaders } from '../api/client'
+  import { getAuthHeaders, responseErrorMessage } from '../api/client'
   import Button from '../lib/ui/Button.svelte'
   import Card from '../lib/ui/Card.svelte'
   import { notifications } from '../lib/notifications'
@@ -50,7 +50,7 @@
 
   async function fetchLogLevel() {
     try {
-      const res = await fetch('/translator/console-logs/level', {
+      const res = await fetch('/api/translator/console-logs/level', {
         headers: getAuthHeaders(),
       })
       if (!res.ok) return
@@ -67,13 +67,14 @@
     logLevel = next
     levelBusy = true
     try {
-      const res = await fetch('/translator/console-logs/level', {
+      const res = await fetch('/api/translator/console-logs/level', {
         method: 'PUT',
-        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ level: next }),
       })
-      const data = await res.json().catch(() => null)
-      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`)
+      if (!res.ok) throw new Error(await responseErrorMessage(res, `HTTP ${res.status}`))
+      const data = await res.json()
+      if (!data?.success) throw new Error('Log level update was rejected')
       logLevel = data.level || next
       notifications.success(`Log level set to ${logLevel} (no restart needed)`)
     } catch (err) {
@@ -86,18 +87,19 @@
 
   async function handleClear() {
     try {
-      await fetch('/translator/console-logs', {
+      const res = await fetch('/api/translator/console-logs', {
         method: 'DELETE',
         headers: getAuthHeaders(),
       })
+      if (!res.ok) throw new Error(await responseErrorMessage(res, `HTTP ${res.status}`))
       // UI cleared via SSE "clear" event
     } catch (err) {
-      console.error('Failed to clear console logs:', err)
+      notifications.error(`Failed to clear console logs: ${err instanceof Error ? err.message : err}`)
     }
   }
 
-  // EventSource cannot send the Authorization header the dashboard API requires,
-  // so read the SSE body off fetch — same wire format as the Next EventSource.
+  // Read the SSE body through fetch so the same authenticated dashboard
+  // transport and error handling are used for the stream.
   fetchLogLevel()
   $effect(() => {
     let isCancelled = false
@@ -106,11 +108,11 @@
     const connect = async () => {
       try {
         controller = new AbortController()
-        const res = await fetch('/translator/console-logs/stream', {
+        const res = await fetch('/api/translator/console-logs/stream', {
           headers: getAuthHeaders(),
           signal: controller.signal,
         })
-        if (!res.ok) throw new Error(`console log stream failed: ${res.status}`)
+        if (!res.ok) throw new Error(await responseErrorMessage(res, `HTTP ${res.status}`))
 
         const reader = res.body?.getReader()
         const decoder = new TextDecoder()

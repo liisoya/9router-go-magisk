@@ -2,6 +2,7 @@
   import { api } from '../api/client'
   import ChangelogModal from './ChangelogModal.svelte'
   import { type ActiveTab } from '../lib/router'
+  import { promptInstall, subscribeInstallPrompt } from '../lib/pwa'
 
   let {
     activeTab = 'endpoint',
@@ -27,7 +28,13 @@
   let isAppDrawerOpen = $state(false)
   let isLangMenuOpen = $state(false)
   let isChangelogOpen = $state(false)
+  let canInstall = $state(false)
 
+  $effect(() => {
+    return subscribeInstallPrompt((available) => {
+      canInstall = available
+    })
+  })
   $effect(() => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem('9router-theme') || localStorage.getItem('theme')
@@ -259,6 +266,20 @@
       <span class="hidden sm:inline">Donate</span>
     </button>
 
+    <!-- PWA Install Button (visible when install prompt is available) -->
+    {#if canInstall}
+      <button
+        type="button"
+        onclick={promptInstall}
+        class="flex items-center gap-1.5 px-2.5 h-8 rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors text-xs font-medium cursor-pointer"
+        title="Install 9router-go Desktop App"
+        aria-label="Install App"
+      >
+        <span class="material-symbols-outlined text-[18px]">install_desktop</span>
+        <span class="hidden md:inline">Install</span>
+      </button>
+    {/if}
+
     <!-- 2. Light/Dark theme toggle -->
     <button
       type="button"
@@ -341,6 +362,19 @@
             <span class="material-symbols-outlined text-[20px] text-text-muted">history</span>
             <span class="flex-1 text-left">Change Log</span>
           </button>
+          {#if canInstall}
+            <button
+              type="button"
+              onclick={() => {
+                isAppDrawerOpen = false
+                promptInstall()
+              }}
+              class="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-primary hover:bg-primary/10 transition-colors cursor-pointer"
+            >
+              <span class="material-symbols-outlined text-[20px] text-primary">install_desktop</span>
+              <span class="flex-1 text-left font-medium">Install App</span>
+            </button>
+          {/if}
 
           <div class="h-px bg-border-subtle my-1"></div>
 

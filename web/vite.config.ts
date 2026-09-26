@@ -12,6 +12,7 @@ export default defineConfig({
       '/usage': 'http://localhost:20130',
       '/translator': 'http://localhost:20130',
       '/debug': 'http://localhost:20130',
+      '/admin': 'http://localhost:20130',
     },
   },
 })

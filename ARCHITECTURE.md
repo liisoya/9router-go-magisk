@@ -1,424 +1,281 @@
-# 9Router Go Proxy — Architecture Documentation
+# 9router-go Architecture
 
-> **Version sync:** `9router-go v1.8.8` ↔ `decolua/9router v0.5.65` (Next.js) — 100% engine parity, 31 commits `v0.5.59...v0.5.65`. Diagrams below are for maintainers/AI to understand the ported Go flows.
+This document describes the current Go implementation. Source code is authoritative when a compatibility statement and local behavior differ.
 
-**For AI/Maintainers:** Go repo is the *engine* (proxy, SSE, translation), Next.js is the *dashboard UI* — they share `~/.9router/db/data.sqlite` (WAL). All `providerConnections.data` JSON blobs, `kv` (`modelAliases`, `customModels`), and `combos` are 1:1 compatible. Do not duplicate translation logic; check `internal/translator` first. E2E tests are in `internal/handlers/chat/*_e2e_test.go` (deterministic mocks, no real network).
+## Version and compatibility status
 
-## Request Lifecycle
+- Current Go release: **v1.9.1**, declared consistently by `VERSION`, `version.json`, and `internal/updater.CurrentVersion`.
+- Declared upstream baseline: [`decolua/9router` v0.5.85](https://github.com/decolua/9router). The local checked-out upstream has `package.json` version `0.5.85` and a v0.5.85 changelog; published upstream npm/Docker `latest` is v0.5.86.
+- Go v1.9.0 records selected upstream v0.5.86 parity work and explicitly deferred items in `CHANGELOG.md`. Those entries do not change the v0.5.85 manifest baseline or imply complete v0.5.86 parity.
+- Upstream remains the compatibility reference. Its Next.js app and shared SSE core are historical sources for API, database, auth, and routing behavior. They are **not** the current Go runtime or dashboard.
 
-```mermaid
-flowchart TD
-    Client["Client Request"] --> Auth["/v1/chat/completions or /v1/messages"]
-    Auth --> Resolve["resolveModel()"]
-    Resolve --> IsCombo{"Is combo?"}
-    IsCombo -->|Yes| Combo["Combo Handler"]
-    IsCombo -->|No| Single["Single Model"]
-    
-    Combo --> Strategy{"Strategy?"}
-    Strategy -->|sticky| Sticky["applyComboStrategy(sticky)\nconsecutiveUseCount tracking"]
-    Strategy -->|round-robin| RR["applyComboStrategy(round-robin)\nrrIdx rotation"]
-    Strategy -->|fusion| Fusion["handleFusion()\nMulti-panel + Judge"]
-    Strategy -->|fallback/capacity| Default["applyComboStrategy(fallback)\nOriginal order"]
-    
-    Sticky --> CapSwitch
-    RR --> CapSwitch
-    Default --> CapSwitch
-    
-    CapSwitch["detectRequiredCapabilities()\nAuto-capability-switch"]
-    CapSwitch --> ModelLoop["Model iteration loop"]
-    
-    ModelLoop --> HealthCheck{"Health check\nIsProviderHealthy?\nIsConnectionModelLocked?"}
-    HealthCheck -->|Unhealthy| Skip["Skip model\nlog warning"]
-    HealthCheck -->|Healthy| Try["tryForwardWithConnection()"]
-    
-    Try --> ExecSelect{"Executor type?"}
-    ExecSelect -->|Registered executor| Exec["executor.Get(provider)"]
-    ExecSelect -->|Gemini-native| Gemini["forwardGeminiNativeRequest()"]
-    ExecSelect -->|Default OpenAI| Fwd["forwardRequest()"]
-    
-    Fwd --> FWResp["ForwardOpenAI()\nHTTP request to upstream"]
-    FWResp --> IsStream{"Is stream?"}
-    IsStream -->|Yes| SSE["handleStreamResponse()\nwith StallReader wrapper"]
-    IsStream -->|No| JSON["handleJSONResponse()"]
-    SSE --> Stall["StallReader: 6min timeout\nReset on each chunk\nCloses connection on stall"]
-    Stall --> Trans["TranslateOpenAIToClaudeStream()\nOptional format translation"]
-    Trans --> Flush["Flush to client"]
-    
-    JSON --> JTrans["TranslateOpenAIToClaude()\nOptional format translation"]
-    JTrans --> JResp["JSON response to client"]
-    
-    Try -->|Error| ErrHandler{"UpstreamError?"}
-    ErrHandler -->|Yes| Classify["ClassifyError()\nText + Status rules"]
-    Classify --> LockConn["LockConnectionModel()\nPer-connection lock"]
-    LockConn --> ModelLoop
-    
-    ErrHandler -->|No| ReturnErr["Return error"]
-    
-    Try -->|Success| Unlock["UnlockConnectionModel()\nClear per-connection lock"]
-    Unlock --> HealthRec["RecordProviderHealth()\nReset consecutive errors"]
-    HealthRec --> Log["logUsage()"]
-    Log --> ReturnOK["Return response"]
-```
+“Parity” below means a specifically implemented contract, not a blanket claim of endpoint, provider, UI, or operational equivalence.
 
-## Combo Strategy Details
+## System context
 
 ```mermaid
 flowchart LR
-    subgraph Strategies
-        direction LR
-        S1[sticky] --> S1D["Rotate after N consecutive uses\nDefault N=1\nTracks: Index, ConsecutiveUseCount"]
-        S2[round-robin] --> S2D["Rotate every request\nTracks: rrIdx global counter"]
-        S3[fallback] --> S3D["Original order, no rotation\nCapacity = no-op"]
-        S4[fusion] --> S4D["Multi-panel fan-out + Judge"]
-    end
-    
-    S1D --> AS["Auto-capability-switch"]
-    S2D --> AS
-    S3D --> AS
-    
-    AS --> Detect["scanMessageContent()\nscanContentBlock()"]
-    Detect --> Caps{"Capabilities needed?"}
-    Caps -->|vision| Reorder["reorderByCapabilities()\nTier 0: has caps\nTier 1: rest"]
-    Caps -->|pdf| Reorder
-    Caps -->|none| Keep["Keep original order"]
-```
+    CLI[CLI, SDK, and agent clients] --> GW[9router-go HTTP process]
+    Browser[Browser] --> SPA[Embedded Svelte 5 SPA]
+    SPA --> API[Native Go dashboard API]
 
-## Fusion Flow
-
-```mermaid
-flowchart TD
-    Fusion["handleFusion()"] --> Panel["collectPanel()\nFan-out to panel models"]
-    Panel --> P1["Panel Model 1\n(non-streaming)"]
-    Panel --> P2["Panel Model 2\n(non-streaming)"]
-    Panel --> PN["Panel Model N\n(non-streaming)"]
-    
-    P1 --> T1["StragglerGrace 8s\nHardTimeout 90s"]
-    P2 --> T2["StragglerGrace 8s\nHardTimeout 90s"]
-    PN --> TN["StragglerGrace 8s\nHardTimeout 90s"]
-    
-    T1 --> Collect{"collectPanel()\nQuorum: MinPanel=2"}
-    T2 --> Collect
-    TN --> Collect
-    
-    Collect -->|0 answers| Degrade0["503 Service Unavailable"]
-    Collect -->|1 answer| Degrade1["Fallback to single model"]
-    Collect -->|2+ answers| Judge
-    
-    Judge["buildJudgePrompt()\nAnonymized sources"] --> JudgeReq["Judge model\nsynthesizes final answer"]
-    JudgeReq --> JudgeStream{"Original was stream?"}
-    JudgeStream -->|Yes| JudgeSSE["Stream judge response"]
-    JudgeStream -->|No| JudgeJSON["JSON judge response"]
-```
-
-## Error Classification & Backoff
-
-```mermaid
-flowchart LR
-    Error["Upstream Error\nStatusCode + JSON body"] --> Extract["extractErrorText()\nParse error.message"]
-    Extract --> Classify{"ClassifyError()\
-    Top-to-bottom rules"}
-    
-    Classify --> TextRules["Text-based rules"]
-    TextRules --> TR1["'no credentials'\n→ cooldownLong (120s)"]
-    TextRules --> TR2["'rate limit'\n→ exponential backoff"]
-    TextRules --> TR3["'overloaded'\n→ exponential backoff"]
-    TextRules --> TR4["'request not allowed'\n→ cooldownShort (5s)"]
-    TextRules --> TR5["'quota exceeded'\n→ exponential backoff"]
-    TextRules --> TR6["'capacity'\n→ exponential backoff"]
-    
-    Classify --> StatusRules["Status-based rules"]
-    StatusRules --> SR1["401/402/403/404\n→ cooldownLong (120s)"]
-    StatusRules --> SR2["429\n→ exponential backoff"]
-    
-    Classify --> Default["Default\n→ transientCooldown (30s)"]
-    
-    TR2 --> Backoff["Exponential Backoff"]
-    TR3 --> Backoff
-    TR6 --> Backoff
-    SR2 --> Backoff
-    
-    Backoff --> BCalc{"GetQuotaCooldown()\nbase=2s, max=5min, maxLevel=15"}
-    BCalc --> B1["Level 1: 2s"]
-    BCalc --> B2["Level 2: 4s"]
-    BCalc --> B3["Level 3: 8s"]
-    BCalc --> BN["Level N: min(2s×2^N⁻¹, 5min)"]
-```
-
-## Per-Connection Locking
-
-```mermaid
-flowchart TD
-    subgraph Storage["providerConnections.data JSON blob"]
-        direction LR
-        F1["apiKey: 'sk-...'"] 
-        F2["baseUrl: 'https://...'"]
-        F3["modelLock_gpt-4o: '2026-07-21T12:00:00Z'"]
-        F4["backoffLevel: 2"]
+    subgraph GW[9router-go HTTP process]
+      SPA
+      API
+      ENGINE[Routing, translation, provider executors, SSE]
+      FX[Uber Fx lifecycle]
+      DB[(SQLite WAL)]
+      FX --> ENGINE
+      ENGINE --> DB
+      API --> DB
     end
 
-    Lock["LockConnectionModel(connId, model)"] --> SQL1["UPDATE providerConnections\nSET data = json_set(data,\n  '$.modelLock_gpt-4', ?\n  '$.backoffLevel', ?)\nWHERE id = ?"]
-    
-    Check["IsConnectionModelLocked(connId, model)"] --> SQL2["SELECT data FROM\nproviderConnections WHERE id = ?"]
-    SQL2 --> Parse["Parse JSON →\nRead modelLock_gpt-4\n→ Parse timestamp\n→ time.Until > 0?"]
-    Parse --> Result{"Locked?"}
-    Result -->|Yes, skip| Skipped["Connection excluded\nfrom selection"]
-    Result -->|No| Tryable["Connection available"]
-
-    Unlock["UnlockConnectionModel(connId, model)"] --> SQL3["UPDATE providerConnections\nSET data = json_set(data,\n  '$.modelLock_gpt-4', json('null'),\n  '$.backoffLevel', 0)\nWHERE id = ?"]
+    ENGINE --> Provider[Provider APIs and compatible nodes]
 ```
 
-## Connection Selection Flow
+The Go binary owns proxy routing, dashboard APIs, auth, persistence, OAuth, media/search tools, usage tracking, and static dashboard serving. The Svelte SPA calls the Go API; it does not read SQLite directly.
+
+## Repository boundaries
+
+| Path | Responsibility |
+| --- | --- |
+| `cmd/9router-go/` | CLI parser, commands, signal handling, Fx start/stop |
+| `internal/app/` | Fx modules, dependency graph, server and DB lifecycle |
+| `internal/config/` | Viper/env configuration, data and database path resolution, JWT secret |
+| `internal/handlers/` | Chi route composition, chat, media, OAuth, dashboard, SSO, usage |
+| `internal/handlers/chat/` | Model resolution, combos, account fallback, translation, forwarding |
+| `internal/providers/` | Provider catalog/configuration and model capabilities |
+| `internal/proxy/executor/` | Provider-specific upstream adapters and stream handling |
+| `internal/translator/` | OpenAI/Claude/Gemini request, response, and stream transformations |
+| `internal/middleware/` | Request IDs, body limits, logging/path normalization, API/dashboard/admin auth |
+| `internal/db/` | SQLite connection, repository queries, WAL and optional Go-only leases |
+| `web/` | Svelte 5 + Vite + Tailwind dashboard |
+| `web/embed.go` | Embeds `web/dist` and serves the SPA with index fallback |
+
+## Fx lifecycle
+
+`cmd/9router-go/main.go` builds an `urfave/cli` application. The default server action loads CLI parameters and starts `app.AppModule` with `fx.Replace(cliParams)`. Set `FX_LOGGING=true` to enable the console Fx logger; otherwise Fx logging is disabled.
 
 ```mermaid
 flowchart TD
-    Select["getBestConnection(provider, model)"] --> Pin{"connectionID\nspecified?"}
-    Pin -->|Yes| Direct["GetProviderConnectionByID()\nDirect fetch, no filter"]
-    Pin -->|No| List["GetProviderConnections(provider, active)\nSorted by priority ASC, updatedAt DESC"]
-    
-    List --> Iter["Iterate connections"]
-    Iter --> Excl{"In excludeIDs?"}
-    Excl -->|Yes| Skip1["Skip"]
-    Excl -->|No| LockCheck{"IsConnectionModelLocked\n(connId, model)?"}
-    LockCheck -->|Locked| Skip2["Skip\nConnection in cooldown"]
-    LockCheck -->|Unlocked| Pick["Pick this connection"]
-    
-    Pick --> Parse["Parse conn.Data JSON → ConnectionData"]
-    Parse --> Return["Return connection + data"]
-    
-    Skip1 --> Iter
-    Skip2 --> Iter
-    
-    Iter --> AllSkipped{"All skipped?"}
-    AllSkipped -->|Yes| Error["Error: no available connections"]
-    AllSkipped -->|No| Pick
+    Main[main] --> CLI[urfave/cli]
+    CLI -->|server action| Params[CLIParams from flags]
+    CLI -->|version/update/mitm| Command[Run command directly]
+    Params --> Fx[fx.New AppModule]
+    Fx --> Config[ConfigModule: Viper + Config + CLIParams]
+    Fx --> Database[DatabaseModule: SQL DB + Repo]
+    Fx --> Handlers[HandlersModule: TokenSaverConfig + Chi handler]
+    Fx --> Server[ServerModule: http.Server]
+    Server --> OnStart[Start updater and catalog sync; listen]
+    OnStart --> Signal[Wait for SIGINT or SIGTERM]
+    Signal --> OnStop[Cancel background work; stop SSE; shutdown HTTP]
+    OnStop --> DBClose[Close SQLite]
 ```
 
-## SSE Stream with Stall Detection
+Dependency order is config → database/repository → handler/server. `OnStart` has a 15-second budget and begins background updater/catalog-sync loops and `ListenAndServe`. Shutdown has a 20-second outer Fx budget. The HTTP hook disables keep-alives, cancels the shutdown context used by streams, allows 5 seconds for `http.Server.Shutdown`, then the database hook closes SQLite. A second signal exits immediately.
+
+`app.Run` contains equivalent reusable signal handling, but the CLI entrypoint currently implements the same sequence directly in `runServer`.
+
+## HTTP composition and `/v1` normalization
+
+The root Chi router installs request IDs, a 10 MiB body limit, panic recovery, and request logging before route groups are mounted.
+
+`RequestLogger` repeatedly removes leading `/v1/` segments from `r.URL.Path`:
+
+```text
+/v1/chat/completions ─┐
+/v1/v1/chat/completions ─┴─► /chat/completions
+```
+
+This mutation occurs before the API-key and route middleware. It provides broad compatibility with both prefixed and canonical unprefixed paths. Route registration then provides selected explicit aliases such as `/v1/models`, `/api/v1/models`, and `/api/models`. This is path normalization, not a promise that every historical upstream path is implemented.
+
+Route groups are deliberately distinct:
+
+| Group | Middleware | Scope |
+| --- | --- | --- |
+| Public | none | `/health`, login shell, auth bootstrap endpoints, public OAuth callback landing page |
+| Engine | `RequireApiKey` | Chat, model, media, OAuth execution, usage streams, compatibility APIs |
+| Dashboard management | `RequireDashboardAuth` | Providers, nodes, combos, pools, keys, settings, OAuth setup, SSO checks |
+| Admin | `RequireAdminAuth` | Health reset, update, shutdown |
+
+`/dashboard` and `/dashboard/*` receive `RequireDashboardPage`, which redirects unauthenticated navigations to `/login` when login is required. Compatibility SPA aliases such as `/connections`, `/combos`, `/settings`, and `/usage` serve the shell directly; the SPA performs the client-side login state check. Management APIs remain server-protected.
+
+## Authentication boundaries
+
+### Client API keys
+
+`RequireApiKey` accepts:
+
+- `Authorization: Bearer <active-api-key>`
+- `X-API-Key: <active-api-key>`
+- `key` or `apiKey` query parameters only when the route path ends in `/stream`
+
+Keys are looked up in `apiKeys`; missing, invalid, and inactive keys receive 401. This middleware protects the proxy/compatibility domain regardless of the dashboard `requireLogin` setting.
+
+### Dashboard sessions
+
+Dashboard login issues a 24-hour HS256 JWT in the httpOnly `auth_token` cookie. `JWT_SECRET` is used when set; otherwise a random secret is generated and stored in `$DATA_DIR/jwt-secret`.
+
+A stored bcrypt dashboard password wins. If none is stored, `INITIAL_PASSWORD` is accepted; for compatibility, the Go implementation still accepts the well-known `123456` when `INITIAL_PASSWORD` is unset. A remote request using that compatibility default is refused a session until the password is changed or `INITIAL_PASSWORD` is configured. Local requests may use it temporarily.
+
+`RequireDashboardAuth` allows access when login is disabled, a valid session is present, the local `x-9r-cli-token` is valid, or an active client API key is present. This is intentional upstream-compatible machine access.
+
+The CLI token is deterministically derived from the persisted machine ID, CLI secret, and a fixed compatibility salt; only the derived value is compared.
+
+### Admin boundary
+
+Shutdown, update, health reset, and database export/import are “always protected”: they require a valid dashboard session or local CLI token and reject ordinary client API keys. Profiling is not mounted unless `PPROF_ENABLED=true`.
+
+## Embedded dashboard
+
+`web/embed.go` embeds `web/dist` into the Go executable. `web.Handler()`:
+
+1. serves an existing embedded file;
+2. returns 404 for a missing file-like path; and
+3. falls back to `index.html` for extensionless SPA routes.
+
+The Svelte app owns navigation among `/dashboard/...` views. Its typed client uses relative `/api`, `/v1`, `/usage`, and `/translator` requests. During development, Vite proxies those prefixes to a separately running Go server at `localhost:20130`.
+
+There is no production Node.js process. Bun is still required at build time to install dependencies and produce `web/dist`. `make web-build` skips building when `web/dist/index.html` exists; use `FORCE=1 make web-build` after dashboard changes.
+
+The dashboard was ported from the upstream Next.js/React UI to Svelte 5. Preserve its public browser routes and API payloads during changes; it is not source-compatible with the React component tree.
+
+## Chat, provider, and SSE flow
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant G as Go Proxy
+    participant M as Global /v1 normalization
+    participant A as API-key middleware
+    participant H as ChatHandler
+    participant R as SQLite Repo
+    participant P as Provider executor
     participant U as Upstream
-    
-    C->>G: POST /chat/completions (stream=true)
-    G->>U: POST /v1/chat/completions (stream=true)
-    U-->>G: 200 OK, SSE stream
-    
-    Note over G: Wrap resp.Body with StallReader<br/>timer=6min
-    
-    loop Every chunk
-        U-->>G: data: {"choices":[...]}
-        Note over G: StallReader.Reset(6min timer)
-        G->>G: TranslateOpenAIToClaudeStream()<br/>(if translate=true)
-        G->>C: data: {"type":"content_block_delta",...}
+
+    C->>M: POST /v1/chat/completions or /v1/messages
+    M->>A: canonical request path
+    A->>A: validate active client API key
+    A->>H: authenticated request context
+    H->>H: detect format, capabilities, translate if needed
+    H->>R: resolve model/alias/node/combo
+    H->>R: select connection and inspect health/locks
+    loop Combo or account fallback
+        H->>P: transformed request + connection data
+        P->>U: provider-specific HTTP request
+        U-->>P: JSON or SSE
+        P-->>H: response/error
     end
-    
-    alt Normal completion
-        U-->>G: data: [DONE]
-        G->>G: StallReader.Close()<br/>Stops timer
-        G->>C: data: [DONE]
-    end
-    
-    alt Stall detected
-        Note over G: 6min timer fires →<br/>No data received
-        G->>G: rc.Close() (sync.Once)<br/>→ Read unblocks with error
-        G->>G: Log: "stall detected"
-        G->>C: Connection closed
-    end
+    H-->>C: translated JSON or flushed SSE
 ```
 
-## Account Fallback with Per-Connection Locking
+### Request stages
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant H as Combo/Handler
-    participant D as DB
-    participant A as Connection A
-    participant B as Connection B
-    
-    H->>D: GetProviderConnections("openai", active)
-    D-->>H: [conn-A, conn-B]
-    
-    H->>D: IsConnectionModelLocked(conn-A, "gpt-4")
-    D-->>H: false (unlocked)
-    H->>A: tryForwardWithConnection()
-    A-->>H: 429 Rate Limited
-    
-    H->>H: extractErrorText() → "rate limited"
-    H->>H: ClassifyError(429, "rate limited", 0)
-    H->>H: Result: backoff=true, cooldown=2s, level=1
-    
-    H->>D: LockConnectionModel(conn-A, "gpt-4", 2, 1)
-    Note over D: data.modelLock_gpt-4 = "2026-07-21T18:56:11Z"<br/>data.backoffLevel = 1
-    
-    H->>D: IsConnectionModelLocked(conn-B, "gpt-4")
-    D-->>H: false (unlocked)
-    H->>B: tryForwardWithConnection()
-    B-->>H: 200 Success
-    
-    H->>D: UnlockConnectionModel(conn-B, "gpt-4")
-    Note over D: data.modelLock_gpt-4 = null<br/>data.backoffLevel = 0
-    
-    H->>D: RecordProviderHealth("openai", "gpt-4", 200, ...)
-    
-    H-->>C: Response to client
+1. **Normalize and authenticate.** Leading `/v1/` prefixes are removed and the client API key is checked.
+2. **Parse client format.** OpenAI Chat Completions and Claude Messages have separate handlers. Claude requests are passed through for native Anthropic targets or converted toward OpenAI format otherwise.
+3. **Resolve model.** Aliases, custom provider-node prefixes, model ownership, direct provider models, and combos are resolved from SQLite and the provider catalog.
+4. **Apply routing.** Capability detection can reorder/float models. Combos select fallback, round-robin, sticky, or fusion behavior. Single models still enter account fallback.
+5. **Select a connection.** Connections are ordered by priority/updated time and checked for active state, exclusions, strict model assignment, health, and per-model cooldowns.
+6. **Prepare upstream request.** OAuth tokens are refreshed when expired, provider token formats are normalized, token savers apply, and provider-specific schemas/cloaking are added. Tool schemas are sanitized where required.
+7. **Dispatch provider.** `NewChatHandler` registers provider executors. Registered adapters are dispatched first; Gemini-native and OpenAI-compatible defaults follow when no provider-specific executor exists.
+8. **Stream or return JSON.** Streaming responses are copied incrementally or translated event-by-event. Each successful event is flushed; usage is captured in request-scoped state.
+9. **Fail over safely.** Upstream errors are classified, retryable connections can be locked with exponential/cooldown state, and fallback stops once response headers are committed. A reactive 401 can refresh OAuth and retry once.
+10. **Record telemetry.** Pending in-flight state is published live; completed requests update usage history/daily aggregates and the recent-request ring.
+
+### Streaming guarantees and limits
+
+- The default OpenAI-compatible forwarder checks the upstream content type. A requested stream that returns JSON is handled as JSON rather than blindly emitting an SSE header.
+- `StallReader` bounds periods without upstream data. Client and shutdown contexts can also abort the body.
+- Claude stream translation uses per-stream state and emits terminal framing when needed. Once headers/bytes are committed, upstream fallback cannot rewrite the response.
+- Provider adapters can impose their own aggregation limits. A pure error event discovered only after an SSE stream is already committed can still close without a recoverable client error; non-stream paths surface these as errors.
+
+## Routing details
+
+### Combos
+
+- **Fallback:** try candidates in order.
+- **Round-robin:** rotate the starting position per request.
+- **Sticky:** keep the current account/model until its configured consecutive-use limit.
+- **Fusion:** run panel requests, apply quorum/straggler/hard timeouts, and ask a configured judge model to synthesize the result; insufficient panel answers degrade according to the handler contract.
+- **Capability adapter:** scan the request for features such as tools, vision, or reasoning and prefer compatible candidates.
+
+Combo state, provider connection state, health, and some settings are persisted in JSON-backed rows and scopes. Treat those payloads as compatibility surfaces.
+
+### Error cooldown
+
+Retryable upstream errors are classified from status and text. Capacity/rate-limit/overload conditions use exponential backoff; selected authentication/not-found conditions use longer cooldowns. Connection/model locks and backoff levels are written into `providerConnections.data`, and a success clears the selected lock. Exact thresholds are implementation policy, not a general upstream guarantee.
+
+## SQLite compatibility and bootstrap limitation
+
+`internal/db.OpenDatabase`:
+
+- creates the parent directory;
+- opens a `modernc.org/sqlite` database in WAL mode;
+- enables foreign keys, a five-second busy timeout, normal synchronous mode, memory temp storage, and bounded connection settings;
+- chmods the directory and database to user-only permissions where supported; and
+- shares compatible rows/JSON payloads with upstream 9router.
+
+`ProvideDatabase` creates only the Go-specific `upstream_leases` table with `CREATE TABLE IF NOT EXISTS`. Go does **not** create the full upstream schema, seed API keys/settings, import legacy JSON, or execute `_meta`-driven migrations. It is not safe to interpret an automatically created empty SQLite file as an initialized dashboard database.
+
+Consequences:
+
+- An existing upstream-compatible database is the supported starting point.
+- A fresh Go volume or empty file is not a complete bootstrap path and can yield SQL errors on the first protected request.
+- `DB_PATH` may point to a file. If it points to a directory, resolution recognizes `db/data.sqlite`, `data.sqlite`, or `9router.db` when present, otherwise it selects `db/data.sqlite`.
+- There is no Go-side migration/backup transaction equivalent to upstream's schema migrator.
+- Provider credentials are stored in the database; protect the file and volume as secrets.
+
+`DATABASE.md` contains the schema inventory and known drift. Its Next.js labels are compatibility history, not a statement that Next.js is deployed with this binary.
+
+## Background work and observability
+
+On startup, the server starts:
+
+- a six-hour background update checker when auto-update is enabled;
+- model catalog synchronization to `model-catalog.json` beside the database; and
+- a live console-log ring used by `/translator/console-logs/stream`.
+
+The in-memory usage tracker publishes active requests over SSE and seeds recent history from `usageHistory` once per process. SQLite usage history remains the durable source. Daily usage aggregation is process-local merge plus full-row upsert; concurrent independent writers can still overwrite one another's daily aggregate.
+
+Global middleware limits request bodies to 10 MiB, recovers panics, assigns request IDs, and emits structured request logs. `LOG_FILE` can redirect the standard logger to an append-only file.
+
+## Build, test, and release contract
+
+The project has two build-time toolchains: Bun builds the Svelte SPA, and Go embeds it and builds the executable. The committed `bun.lock` is the reproducible frontend dependency source; `go.mod` requires Go 1.27.
+
+```bash
+# Production build
+FORCE=1 make web-build
+make build
+
+# Development runtime
+make run                 # or: make dev
+PORT=3000 DATA_DIR=/path make run
+
+# Verification
+make vet
+make test-short          # go test ./...
+make test                # go test ./... -v
 ```
 
-## Retry-After Response
+CI uses Bun 1.4.2 to run `bun install --frozen-lockfile` and `bun run build`, then Go 1.27 to run `go vet ./...`, `go test ./... -v`, and a Go binary build. Tagged release workflow builds the five platform binaries with `make cross`, uploads checksums, and publishes multi-architecture Linux images. Docker builds the SPA in a Bun stage, embeds it into a CGO-disabled Go build, and runs the resulting binary in Alpine.
 
-```mermaid
-flowchart LR
-    AllFail["All combo models failed"] --> RACheck{"earliestRetryAfter\nset?"}
-    RACheck -->|Yes| RAHeader["Response includes:\nRetry-After: 42\nError body appended:\n'(reset after 42s)'"]
-    RACheck -->|No| NormalError["Normal error response\nNo Retry-After"]
-    
-    RAHeader --> Source["earliestRetryAfter from\nupstream error body\nretryAfter / resetsAt fields"]
-```
+The web package has no frontend unit/component test script. Dashboard verification is therefore a running-server/browser exercise, while CI verifies TypeScript compilation during the Vite build plus the Go suites. The benchmark runner is a separate performance experiment, not an acceptance test.
 
-## Provider Registry & Executor Dispatch
+## Current operational caveats
 
-```mermaid
-flowchart TD
-    Registry["executor.RegisterAll()"] --> Prov["100+ registered providers"]
-    Prov --> OpenAI["ForwardOpenAI (default)\n~80 providers"]
-    Prov --> Gemini["ForwardGemini\nantigravity, gemini"]
-    Prov --> Qoder["ForwardQoder\nCOSY RSA-2048+AES-128+MD5 signing"]
-    Prov --> CodeBuddy["ForwardCodeBuddy\nforceStream + SSE/JSON re-aggregation"]
-    Prov --> Trae["ForwardTrae\nSOLO remote agent + thought stream"]
-    Prov --> Windsurf["ForwardWindsurf\nHand-rolled Protobuf + gRPC-web"]
-    Prov --> GrokCLI["ForwardGrokCLI"]
-    Prov --> Codex["ForwardCodex\nResponses API"]
-    Prov --> Iflow["ForwardIflow\nHMAC auth"]
-    Prov --> Azure["ForwardAzure"]
-    Prov --> Kiro["ForwardKiro\nKiro-specific"]
-```
+- **Fresh database:** Go does not bootstrap or migrate the full schema; initialize with a compatible database first.
+- **Compatibility:** selected upstream contracts are ported, but v0.5.86 items in the changelog are partial and the declared baseline remains v0.5.85.
+- **Network exposure:** the default listener is all interfaces. Set `HOST=127.0.0.1` behind a trusted reverse proxy or otherwise protect the port.
+- **Dashboard security:** login is required by default when settings are missing/unreadable, but compatibility still accepts the well-known password locally until rotated. Set `INITIAL_PASSWORD` explicitly.
+- **Profiling:** never enable `PPROF_ENABLED` on an untrusted network without separate access controls.
+- **Secrets:** SQLite contains provider credentials; the local CLI secret and JWT secret also live under `DATA_DIR`.
+- **Multi-process writes:** WAL improves concurrency, but daily aggregate full-row replacement and external process behavior still require care. Freebuff leases coordinate cooperating Go instances; they do not authorize policy-violating account sharing.
+- **Build assets:** stale or missing `web/dist` can produce an unavailable dashboard or a compile-time embed failure. Release/CI always build the SPA first.
+- **Provider reality:** cloaking and fallback improve compatibility but do not guarantee provider availability, quota, anti-ban safety, or permission to share accounts.
+- **Updates:** release binaries are unsigned. Verify `SHA256SUMS.txt`; Windows may require explicit user action.
 
-## Antigravity Decoy & Anti-Ban Architecture
+## Compatibility history and future work
 
-```mermaid
-flowchart TD
-    In["OpenAI / Claude Request"] --> Strip["StripCompetitorPrompts()\nRemove Zed & Claude SDK Identifiers"]
-    Strip --> Decoy["Antigravity Decoy Cloaking\nInject 21 IDE Tools with _ide suffix"]
-    Decoy --> Validate["Protobuf Safeguard\nEnsure non-empty properties schema"]
-    Validate --> Upstream["Antigravity Upstream Gateway\n(daily-cloudcode-pa.googleapis.com)"]
-    Upstream --> Stream["Stream Translation\nThought signatures & Tool Call IDs mapped"]
-    Stream --> Client["Client Response (SSE / JSON)"]
-```
+The upstream project was a Next.js/React application with a JavaScript SSE/routing core and SQLite migrator. 9router-go ports the proxy behavior, selected data shapes, route/auth contracts, and dashboard behavior into a Go/Svelte single process. References to upstream Next.js code in comments and changelog entries identify provenance for a contract; they do not identify the current runtime.
 
-## Realtime SSE Usage Stream & In-Flight Tracker
-
-```mermaid
-flowchart LR
-    ReqStart["tryForwardWithConnection()"] --> Track["usagetracker.TrackPending(model, connId)\nIncrement in-flight counter"]
-    Track --> SSE["SSE Broadcast (/api/usage/stream)\nEmits active model/account counters"]
-    SSE --> Dash["Next.js Topology Graph\nTriggers pulsing nodes & animated edge ants"]
-    ReqStart --> Finish["logUsage()"]
-    Finish --> Push["usagetracker.PushRecent(completion)\nRing Buffer (50 items)"]
-    Push --> TrackEnd["Decrement in-flight counter"]
-```
-
-## Custom Models with Capability Toggles (v0.5.65)
-
-```mermaid
-flowchart TD
-    UI["Dashboard AddCustomModelModal\nvision/reasoning toggle"] --> API["POST /api/models/custom\n{providerAlias, id, caps}"]
-    API --> KV["kv scope=customModels\nkey: cc/my-model/llm\nvalue: {caps:{vision:true}}"]
-    KV --> List["GET /models → HandleModels()\nMerge aliases+combos+customModels"]
-    List --> Caps["providers.SetCustomModelCaps()\nInvalidateCapabilitiesCache()"]
-    Caps --> Resolve["GetCapabilitiesForModel(provider, model)\nCheck customCaps → OR with heuristic"]
-    Resolve --> Combo["ReorderByCapabilities()\nVision models first"]
-```
-
-- **Upsert:** `aliasRepo.addCustomModel` in Next.js uses `SELECT value` + `UPDATE` if exists (no duplicate `INSERT`), Go reads via `Repo.GetCustomModels()` + `SetCustomModelCaps` on each `HandleModels` (live refresh, no restart needed).
-
-## SSRF Guard Hardening (v0.5.65 #3714)
-
-```mermaid
-flowchart LR
-    URL["AssertPublicURL(rawURL)"] --> Norm["normalizeHost()\ntrim trailing . + lower"]
-    Norm --> BlockHost{"isBlockedHost()?"}
-    BlockHost -->|hostname .internal/.local| Block["throw Blocked"]
-    BlockHost -->|ipv4 10/8, 100.64/10, 127/8, 169.254/16| Block
-    BlockHost -->|ipv6 ::1, fe80, fc, ::ffff:7f00:1 hex, 64:ff9b::| Block
-    BlockHost -->|pass literal| DNS["net.LookupIP(normalized)\nAll addrs"]
-    DNS --> CheckIP{"IsLoopback/IsPrivate/\nIsLinkLocal/Multicast?\nisBlockedIpv4Int / isBlockedIpv6Groups?"}
-    CheckIP -->|private| Block
-    CheckIP -->|public| Allow["return nil"]
-    Allow --> Fetch["fetchPublic(url) manual redirect\nRe-validate each 30x hop via assertPublicUrlResolved"]
-```
-
-- **IPv6:** `parseIPv6ToGroups` handles `::ffff:127.0.0.1` vs `::ffff:7f00:1` (same numeric groups), `64:ff9b::`, `::` compressed.
-- **Unresolvable host** → `return nil` (let `fetch` fail, not SSRF).
-
-## Ollama Cloud Web Fetch (v0.5.65)
-
-```mermaid
-flowchart TD
-    Client["POST /v1/web/fetch {model: ollama, url}"] --> Resolve["ResolveModel(ollama) → provider ollama"]
-    Resolve --> Conn["GetBestConnection(ollama) → apiKey dari ollama chat conn"]
-    Conn --> FetchURL{"provider.FetchURL?"}
-    FetchURL -->|ollama| Ollama["POST https://ollama.com/api/web_fetch\nBody: {url} + Bearer apiKey"]
-    FetchURL -->|jina/firecrawl| Other["POST/GET FetchURL (existing)"]
-    Ollama --> Parse["ReadJson {title, content, links}"]
-    Parse --> Build["buildData + links[] → {provider, url, title, content, links, usage}"]
-    Build --> Resp["JSON to client"]
-```
-
-- **Scoped lock:** `webfetch:ollama` key so `429` fetch doesn't lock `LLM` (Next.js `handleFetch` uses `fetchLockKey`, Go via `media.go` `FetchURL` check).
-
-## Groq Usage via x-ratelimit-* (v0.5.65)
-
-```mermaid
-flowchart LR
-    Req["GET https://api.groq.com/openai/v1/models\nBearer apikey (no token cost)"] --> Headers["x-ratelimit-limit-requests / remaining-requests\nx-ratelimit-limit-tokens / remaining-tokens\nx-ratelimit-reset-requests: 2m59.56s (Go duration)"]
-    Headers --> Parse["ParseGroqQuotasFromHeaders()\nused = limit - remaining\nresetAt = now + ParseDuration"]
-    Parse --> Quota["ProviderQuotaInfo{requests: {used,limit,90%}, tokens: {2000/10000}}"]
-```
-
-## Single Model Lookup Catch-All (v0.5.65 #3588)
-
-```mermaid
-flowchart TD
-    Path["GET /v1/models/*  (chi wildcard)"] --> Suffix["suffix = TrimPrefix(path, /models/)"]
-    Suffix --> IsKind{"kindSlugMap[image,tts,stt,embedding,image-to-text,web]?"}
-    IsKind -->|yes| Kind["HandleModelsByKind() → filter KnownProviders by ImageURL/TTSURL/etc."]
-    IsKind -->|no| Lookup["Build list aliases+combos+customModels\nSearch id == suffix (cc/claude-sonnet-4-6)"]
-    Lookup --> Found{"found?"}
-    Found -->|yes| Single["200 {id, object:model, owned_by, context_length}"]
-    Found -->|no| NotFound["404 {error: model_not_found}"]
-```
-
-## Opencode Muse-Spark Routing (v0.5.65 + 1.3 fix)
-
-```mermaid
-flowchart TD
-    Req["POST /v1/chat/completions\nmodel: oc/muse-spark-1.2/1.3"] --> Check{"strings.Contains(model, muse-spark)?"}
-    Check -->|yes| Build["buildResponsesBody() → {model, input, stream:true, store:false}\nreasoning max→xhigh + summary:auto"]
-    Build --> Forward["POST https://opencode.ai/zen/v1/responses\nx-opencode-* headers"]
-    Forward --> SSE["handleCodexStream() SSE → sseToOpenAIJSON() dedup name/args"]
-    SSE --> Resp["OpenAI chat.completion / Claude message"]
-    Check -->|no| OpenAI["ForwardOpenAI() /v1/chat/completions"]
-```
-
-## Safety, Thread-Safety & Concurrency (v1.8.3)
-
-```mermaid
-flowchart TD
-    Req["HTTP Request"] --> MaxBody["middleware.MaxBody(10MB)\nMaxBytesReader OOM Guard"]
-    MaxBody --> CtxUsage["translator.WithUsageCapture(ctx)\nContext-Isolated Usage Storage"]
-    CtxUsage --> CommitW["committedResponseWriter(w)\nTrack header writes via IsCommitted()"]
-    
-    CommitW --> PoolCache["proxyPoolCache (sync.Map)\nThread-safe Round-Robin Index + Edge Relay"]
-    CommitW --> DailyMu["upsertDailyUsage()\nProtected by dailyUsageMu Mutex"]
-    
-    CommitW --> Shutdown["http.Server Graceful Shutdown\n15-second drain timeout on SIGINT/SIGTERM"]
-```
-
-- **Context-based Usage Capture**: Replaced global `translator.lastUsage` with context-captured isolation (`WithUsageCapture`, `SetUsage`, `GetAndClearUsage`) to eliminate cross-request data races.
-- **Committed Response Writer**: `committedResponseWriter` tracks header writes (`IsCommitted()`), ensuring fallback retries are aborted if SSE streaming has already started.
-- **Request Body Guard**: `middleware.MaxBody(10MB)` wraps `r.Body` with `http.MaxBytesReader` to protect endpoints against OOM exhaustion attacks.
-- **Thread-safe ProxyPool Cache & Edge Relays**: `proxyPoolCache` (`sync.Map`) caches pool instances so round-robin counters rotate properly across concurrent requests, and injects `x-relay-target` / `x-relay-path` for Vercel/Cloudflare/Deno edge relays.
-- **In-Memory Request Tracker**: Thread-safe tracker with mutex-guarded active concurrency maps and subscriber channels for live SSE telemetry.
-- **Graceful Shutdown**: `cmd/9router-go/main.go` runs `http.Server` with OS signal listener (SIGINT/SIGTERM) and 15-second graceful drain timeout.
+Database migration/bootstrap support, frontend automated tests, additional unported upstream features, and parity gaps belong in `ROADMAP.md` or `TECHNICAL_DEBT.md` only as future work until implemented and verified.

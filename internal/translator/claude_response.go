@@ -93,14 +93,15 @@ func TranslateClaudeChunkToOpenAI(payload []byte, state *ClaudeToOpenAIStreamSta
 				state.Model = model
 			}
 			if u, ok := msg["usage"].(map[string]any); ok {
-				inputTokens, _ := u["input_tokens"].(float64)
-				cacheRead, _ := u["cache_read_input_tokens"].(float64)
-				cacheCreate, _ := u["cache_creation_input_tokens"].(float64)
-				promptTokens := int(inputTokens + cacheRead + cacheCreate)
-				state.Usage = &OpenAIUsage{
-					PromptTokens:             promptTokens,
-					CachedTokens:             int(cacheRead),
-					CacheCreationInputTokens: int(cacheCreate),
+				rawUsage, err := json.Marshal(u)
+				if err == nil {
+					cached := CachedTokensFromJSON(rawUsage)
+					cacheCreate := usageInt(u["cache_creation_input_tokens"])
+					state.Usage = NormalizeClaudeUsage(&OpenAIUsage{
+						PromptTokens:             usageInt(u["input_tokens"]),
+						CachedTokens:             cached,
+						CacheCreationInputTokens: cacheCreate,
+					})
 				}
 			}
 		}
@@ -244,6 +245,19 @@ func TranslateClaudeChunkToOpenAI(payload []byte, state *ClaudeToOpenAIStreamSta
 	return buf.Bytes(), nil
 }
 
+func usageInt(value any) int {
+	switch n := value.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
 // TranslateClaudeResponseToOpenAI converts a non-streaming Claude Messages JSON response to OpenAI format.
 func TranslateClaudeResponseToOpenAI(claudeBody []byte) ([]byte, error) {
 	var raw struct {
@@ -252,10 +266,10 @@ func TranslateClaudeResponseToOpenAI(claudeBody []byte) ([]byte, error) {
 		Role    string `json:"role"`
 		Model   string `json:"model"`
 		Content []struct {
-			Type     string          `json:"type"`
-			Text     string          `json:"text,omitempty"`
-			Thinking string          `json:"thinking,omitempty"`
-			ID       string          `json:"id,omitempty"`
+			Type     string         `json:"type"`
+			Text     string         `json:"text,omitempty"`
+			Thinking string         `json:"thinking,omitempty"`
+			ID       string         `json:"id,omitempty"`
 			Name     string         `json:"name,omitempty"`
 			Input    jsontext.Value `json:"input,omitempty"`
 		} `json:"content"`
@@ -322,7 +336,12 @@ func TranslateClaudeResponseToOpenAI(claudeBody []byte) ([]byte, error) {
 		msgObj["tool_calls"] = toolCalls
 	}
 
-	promptTokens := raw.Usage.InputTokens + raw.Usage.CacheReadInputTokens + raw.Usage.CacheCreationInputTokens
+	usage := NormalizeClaudeUsage(&OpenAIUsage{
+		PromptTokens:             raw.Usage.InputTokens,
+		CompletionTokens:         raw.Usage.OutputTokens,
+		CachedTokens:             raw.Usage.CacheReadInputTokens,
+		CacheCreationInputTokens: raw.Usage.CacheCreationInputTokens,
+	})
 	respObj := map[string]any{
 		"id":      "chatcmpl-" + raw.ID,
 		"object":  "chat.completion",
@@ -336,9 +355,11 @@ func TranslateClaudeResponseToOpenAI(claudeBody []byte) ([]byte, error) {
 			},
 		},
 		"usage": map[string]any{
-			"prompt_tokens":     promptTokens,
-			"completion_tokens": raw.Usage.OutputTokens,
-			"total_tokens":      promptTokens + raw.Usage.OutputTokens,
+			"prompt_tokens":               usage.PromptTokens,
+			"completion_tokens":           usage.CompletionTokens,
+			"total_tokens":                usage.PromptTokens + usage.CompletionTokens,
+			"cached_tokens":               usage.GetCachedTokens(),
+			"cache_creation_input_tokens": usage.CacheCreationInputTokens,
 		},
 	}
 

@@ -3,7 +3,6 @@ package oauth
 import (
 	json "encoding/json/v2"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -25,7 +24,8 @@ var defaultAntigravityScopes = []string{
 	"https://www.googleapis.com/auth/cloud-platform",
 	"https://www.googleapis.com/auth/userinfo.email",
 	"https://www.googleapis.com/auth/userinfo.profile",
-	"openid",
+	"https://www.googleapis.com/auth/cclog",
+	"https://www.googleapis.com/auth/experimentsandconfigs",
 }
 
 func getAntigravityOAuthConfig() (clientID, clientSecret, tokenURL string) {
@@ -54,20 +54,11 @@ func getAntigravityOAuthConfig() (clientID, clientSecret, tokenURL string) {
 }
 
 func getAntigravityRedirectURI(r *http.Request) string {
-	if redirectURI := r.URL.Query().Get("redirect_uri"); redirectURI != "" {
+	redirectURI := strings.TrimSpace(r.URL.Query().Get("redirect_uri"))
+	if validRedirectURI(redirectURI) {
 		return redirectURI
 	}
-	if envURI := os.Getenv("ANTIGRAVITY_REDIRECT_URI"); envURI != "" {
-		return envURI
-	}
-	if r.Host != "" {
-		scheme := "http"
-		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-			scheme = "https"
-		}
-		return scheme + "://" + r.Host + "/api/oauth/antigravity/callback"
-	}
-	return "http://localhost:8080/api/oauth/antigravity/callback"
+	return "http://localhost:8080/callback"
 }
 
 // HandleAntigravityAuthorize returns the Google OAuth authorization URL for Antigravity.
@@ -106,57 +97,46 @@ func (h *OAuthHandler) HandleAntigravityAuthorize(w http.ResponseWriter, r *http
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"url":         authURL,
 		"redirectUrl": authURL,
+		"authUrl":     authURL,
 		"state":       state,
+		"redirectUri": redirectURI,
 	})
 }
 
-// HandleAntigravityCallback exchanges the Google authorization code for tokens and stores the provider connection in DB.
-// GET /api/oauth/antigravity/callback
-// POST /api/oauth/antigravity/callback
-func (h *OAuthHandler) HandleAntigravityCallback(w http.ResponseWriter, r *http.Request) {
-	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
-	redirectURI := r.URL.Query().Get("redirect_uri")
-
-	if code == "" && r.Method == http.MethodPost {
-		var body struct {
-			Code             string `json:"code"`
-			RedirectURI      string `json:"redirect_uri"`
-			RedirectUriCamel string `json:"redirectUri"`
-			State            string `json:"state"`
-		}
-		if raw, err := io.ReadAll(r.Body); err == nil && len(raw) > 0 {
-			_ = json.Unmarshal(raw, &body)
-			code = body.Code
-			if state == "" && body.State != "" {
-				state = body.State
-			}
-			if redirectURI == "" {
-				if body.RedirectURI != "" {
-					redirectURI = body.RedirectURI
-				} else {
-					redirectURI = body.RedirectUriCamel
-				}
-			}
-		}
-	}
-
-	if errParam := r.URL.Query().Get("error"); errParam != "" {
-		desc := r.URL.Query().Get("error_description")
-		h.respondAntigravityError(w, r, http.StatusBadRequest, fmt.Sprintf("oauth error: %s (%s)", errParam, desc), state)
+// HandleAntigravityExchange exchanges a Google authorization code for tokens
+// and stores the Antigravity connection in the database.
+// POST /api/oauth/antigravity/exchange
+func (h *OAuthHandler) HandleAntigravityExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		handlerutil.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	code = cleanAuthCode(code)
+	var body struct {
+		Code        string `json:"code"`
+		RedirectURI string `json:"redirectUri"`
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	code := cleanAuthCode(body.Code)
+	redirectURI := strings.TrimSpace(body.RedirectURI)
 	if code == "" {
-		h.respondAntigravityError(w, r, http.StatusBadRequest, "missing code parameter", state)
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing code parameter")
+		return
+	}
+	if !validRedirectURI(redirectURI) {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing or invalid redirectUri")
 		return
 	}
 
-	if redirectURI == "" {
-		redirectURI = getAntigravityRedirectURI(r)
-	}
-	redirectURI = strings.TrimSpace(redirectURI)
 	clientID, clientSecret, tokenURL := getAntigravityOAuthConfig()
 
 	form := url.Values{
@@ -169,7 +149,7 @@ func (h *OAuthHandler) HandleAntigravityCallback(w http.ResponseWriter, r *http.
 
 	tokenReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		h.respondAntigravityError(w, r, http.StatusInternalServerError, fmt.Sprintf("create token request failed: %v", err), state)
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to create token request")
 		return
 	}
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -181,21 +161,21 @@ func (h *OAuthHandler) HandleAntigravityCallback(w http.ResponseWriter, r *http.
 	tokenResp, err := client.Do(tokenReq)
 	if err != nil {
 		log.Error("oauth", "antigravity token exchange failed", "error", err)
-		h.respondAntigravityError(w, r, http.StatusBadGateway, fmt.Sprintf("token exchange failed: %v", err), state)
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, "antigravity token exchange failed")
 		return
 	}
 	defer tokenResp.Body.Close()
 
 	respBody, err := io.ReadAll(tokenResp.Body)
 	if err != nil {
-		h.respondAntigravityError(w, r, http.StatusBadGateway, "failed to read token response", state)
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to read token response")
 		return
 	}
 
 	if tokenResp.StatusCode != http.StatusOK {
 		// Never log the raw body: token responses carry access/refresh tokens.
 		log.Warn("oauth", "antigravity token exchange non-200", "status", tokenResp.StatusCode, "bytes", len(respBody))
-		h.respondAntigravityError(w, r, http.StatusBadGateway, fmt.Sprintf("token exchange returned status %d: %s", tokenResp.StatusCode, string(respBody)), state)
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("token exchange returned status %d", tokenResp.StatusCode))
 		return
 	}
 
@@ -210,12 +190,12 @@ func (h *OAuthHandler) HandleAntigravityCallback(w http.ResponseWriter, r *http.
 
 	if err := json.Unmarshal(respBody, &tokenData); err != nil {
 		log.Error("oauth", "antigravity decode token response failed", "error", err)
-		h.respondAntigravityError(w, r, http.StatusBadGateway, "failed to decode token response", state)
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to decode token response")
 		return
 	}
 
 	if tokenData.AccessToken == "" {
-		h.respondAntigravityError(w, r, http.StatusBadGateway, "missing access_token in token response", state)
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, "missing access_token in token response")
 		return
 	}
 
@@ -259,7 +239,7 @@ func (h *OAuthHandler) HandleAntigravityCallback(w http.ResponseWriter, r *http.
 
 	dataBytes, err := json.Marshal(dataMap)
 	if err != nil {
-		h.respondAntigravityError(w, r, http.StatusInternalServerError, "failed to marshal connection data", state)
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to marshal connection data")
 		return
 	}
 
@@ -288,12 +268,20 @@ func (h *OAuthHandler) HandleAntigravityCallback(w http.ResponseWriter, r *http.
 		}
 		if err != nil {
 			log.Error("oauth", "save antigravity connection failed", "conn", connID, "error", err)
-			h.respondAntigravityError(w, r, http.StatusInternalServerError, fmt.Sprintf("failed to save connection: %v", err), state)
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to save connection")
 			return
 		}
 	}
 
-	h.respondAntigravitySuccess(w, r, connID, connName, email, state)
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"connection": map[string]any{
+			"id":          connID,
+			"provider":    "antigravity",
+			"email":       email,
+			"displayName": connName,
+		},
+	})
 }
 
 func cleanAuthCode(code string) string {
@@ -322,143 +310,4 @@ func cleanAuthCode(code string) string {
 		code = unescaped
 	}
 	return strings.TrimSpace(code)
-}
-
-func wantsHTML(r *http.Request) bool {
-	return strings.Contains(r.Header.Get("Accept"), "text/html")
-}
-
-func (h *OAuthHandler) respondAntigravityError(w http.ResponseWriter, r *http.Request, statusCode int, msg, state string) {
-	if wantsHTML(r) {
-		renderAntigravityCallbackError(w, statusCode, msg, state)
-		return
-	}
-	handlerutil.WriteJSONError(w, statusCode, msg)
-}
-
-func (h *OAuthHandler) respondAntigravitySuccess(w http.ResponseWriter, r *http.Request, connID, connName, email, state string) {
-	if wantsHTML(r) {
-		renderAntigravityCallbackSuccess(w, connID, connName, email, state)
-		return
-	}
-	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":       "authorized",
-		"id":           connID,
-		"connectionId": connID,
-		"provider":     "antigravity",
-		"name":         connName,
-		"email":        email,
-	})
-}
-
-func renderAntigravityCallbackSuccess(w http.ResponseWriter, connID, connName, email, state string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
-<html lang="id">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>9router — Antigravity Connected</title>
-<style>
-:root{color-scheme:dark}
-body{background:#0b0e14;color:#e6e9f0;font-family:ui-sans-serif,system-ui,sans-serif;margin:0;padding:32px 16px;display:flex;align-items:center;justify-content:center;min-height:80vh}
-.card{max-width:480px;width:100%%;background:#131722;border:1px solid #2a3040;border-radius:12px;padding:24px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.5)}
-h1{font-size:20px;margin:0 0 12px;color:#4ade80}
-p{font-size:14px;color:#9aa3b5;margin:8px 0}
-.email{font-weight:600;color:#e6e9f0}
-#status{font-size:13px;color:#38bdf8;margin-top:16px}
-.btn{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;font-size:14px}
-.btn:hover{background:#1d4ed8}
-</style>
-</head>
-<body>
-<div class="card">
-<h1>✅ Antigravity Terhubung!</h1>
-<p>Koneksi <span class="email">%s</span> berhasil disimpan.</p>
-<p id="status">Mengirim ke dashboard — tab ini akan tertutup otomatis…</p>
-<a href="/dashboard/providers/antigravity" class="btn">Kembali ke Dashboard</a>
-</div>
-<script>
-(function(){
-  var payload = { provider: "antigravity", connectionId: %q, name: %q, email: %q, success: true, at: Date.now() };
-  try {
-    localStorage.setItem("9router.oauth.callback.v1", JSON.stringify({ state: %q, raw: "success", at: Date.now() }));
-  } catch(e) {}
-  try {
-    var bc = new BroadcastChannel("9router-oauth");
-    bc.postMessage(payload);
-    bc.close();
-  } catch(e) {}
-  if (window.opener) {
-    try {
-      window.opener.postMessage({ type: "9router-oauth-success", provider: "antigravity", email: %q }, "*");
-    } catch(e) {}
-  }
-  var n = 3;
-  var statusEl = document.getElementById("status");
-  var timer = setInterval(function(){
-    n -= 1;
-    if (n <= 0) {
-      clearInterval(timer);
-      try { window.close(); } catch(e) {}
-      if (statusEl) statusEl.textContent = "Koneksi berhasil diproses. Tab ini boleh ditutup.";
-    } else {
-      if (statusEl) statusEl.textContent = "Menutup tab ini dalam " + n + "…";
-    }
-  }, 1000);
-})();
-</script>
-</body>
-</html>`, html.EscapeString(connName), connID, connName, email, state, email)
-	_, _ = w.Write([]byte(htmlBody))
-}
-
-func renderAntigravityCallbackError(w http.ResponseWriter, statusCode int, errMsg, state string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(statusCode)
-	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
-<html lang="id">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>9router — Antigravity OAuth Error</title>
-<style>
-:root{color-scheme:dark}
-body{background:#0b0e14;color:#e6e9f0;font-family:ui-sans-serif,system-ui,sans-serif;margin:0;padding:32px 16px;display:flex;align-items:center;justify-content:center;min-height:80vh}
-.card{max-width:480px;width:100%%;background:#131722;border:1px solid #2a3040;border-radius:12px;padding:24px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.5)}
-h1{font-size:20px;margin:0 0 12px;color:#f87171}
-p{font-size:14px;color:#9aa3b5;margin:8px 0}
-.err{color:#fca5a5;background:rgba(239,68,68,0.1);padding:10px;border-radius:8px;font-family:monospace;font-size:12px;margin:12px 0;word-break:break-all}
-.btn{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;font-size:14px}
-.btn:hover{background:#1d4ed8}
-</style>
-</head>
-<body>
-<div class="card">
-<h1>❌ Otorisasi Antigravity Gagal</h1>
-<div class="err">%s</div>
-<p>Silakan coba kembali dari dashboard.</p>
-<a href="/dashboard/providers/antigravity" class="btn">Kembali ke Dashboard</a>
-</div>
-<script>
-(function(){
-  try {
-    localStorage.setItem("9router.oauth.callback.v1", JSON.stringify({ state: %q, error: %q, at: Date.now() }));
-  } catch(e) {}
-  try {
-    var bc = new BroadcastChannel("9router-oauth");
-    bc.postMessage({ provider: "antigravity", error: %q, at: Date.now() });
-    bc.close();
-  } catch(e) {}
-  if (window.opener) {
-    try {
-      window.opener.postMessage({ type: "9router-oauth-error", provider: "antigravity", error: %q }, "*");
-    } catch(e) {}
-  }
-})();
-</script>
-</body>
-</html>`, html.EscapeString(errMsg), state, errMsg, errMsg, errMsg)
-	_, _ = w.Write([]byte(htmlBody))
 }

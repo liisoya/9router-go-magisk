@@ -147,6 +147,21 @@ func TestRequireApiKeyMiddleware(t *testing.T) {
 	}
 }
 
+func TestRequireApiKeyMiddleware_ProtectsAntigravityExchange(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	gate := RequireApiKey(db.NewRepo(database))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/oauth/antigravity/exchange", nil)
+	rec := httptest.NewRecorder()
+	gate.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, expected 401", rec.Code)
+	}
+}
+
 func TestGetAuthenticatedApiKey(t *testing.T) {
 	database, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -201,13 +216,21 @@ func TestExtractApiKey(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "Bearer Authorization header",
-			req:      func() *http.Request { r := httptest.NewRequest("GET", "/", nil); r.Header.Set("Authorization", "Bearer test-key-123"); return r }(),
+			name: "Bearer Authorization header",
+			req: func() *http.Request {
+				r := httptest.NewRequest("GET", "/", nil)
+				r.Header.Set("Authorization", "Bearer test-key-123")
+				return r
+			}(),
 			expected: "test-key-123",
 		},
 		{
-			name:     "lowercase bearer",
-			req:      func() *http.Request { r := httptest.NewRequest("GET", "/", nil); r.Header.Set("Authorization", "bearer test-key"); return r }(),
+			name: "lowercase bearer",
+			req: func() *http.Request {
+				r := httptest.NewRequest("GET", "/", nil)
+				r.Header.Set("Authorization", "bearer test-key")
+				return r
+			}(),
 			expected: "test-key",
 		},
 		{
@@ -226,13 +249,22 @@ func TestExtractApiKey(t *testing.T) {
 			expected: "",
 		},
 		{
-			name:     "X-API-Key header fallback",
-			req:      func() *http.Request { r := httptest.NewRequest("GET", "/", nil); r.Header.Set("X-API-Key", "header-key"); return r }(),
+			name: "X-API-Key header fallback",
+			req: func() *http.Request {
+				r := httptest.NewRequest("GET", "/", nil)
+				r.Header.Set("X-API-Key", "header-key")
+				return r
+			}(),
 			expected: "header-key",
 		},
 		{
-			name:     "Bearer takes priority over X-API-Key header",
-			req:      func() *http.Request { r := httptest.NewRequest("GET", "/", nil); r.Header.Set("Authorization", "Bearer bearer-key"); r.Header.Set("X-API-Key", "header-key"); return r }(),
+			name: "Bearer takes priority over X-API-Key header",
+			req: func() *http.Request {
+				r := httptest.NewRequest("GET", "/", nil)
+				r.Header.Set("Authorization", "Bearer bearer-key")
+				r.Header.Set("X-API-Key", "header-key")
+				return r
+			}(),
 			expected: "bearer-key",
 		},
 		{
@@ -241,8 +273,12 @@ func TestExtractApiKey(t *testing.T) {
 			expected: "",
 		},
 		{
-			name:     "malformed auth with no space",
-			req:      func() *http.Request { r := httptest.NewRequest("GET", "/", nil); r.Header.Set("Authorization", "no-space"); return r }(),
+			name: "malformed auth with no space",
+			req: func() *http.Request {
+				r := httptest.NewRequest("GET", "/", nil)
+				r.Header.Set("Authorization", "no-space")
+				return r
+			}(),
 			expected: "",
 		},
 	}

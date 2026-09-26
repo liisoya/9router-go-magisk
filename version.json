@@ -1,1 +1,5 @@
-{"downloadUrl": "https://github.com/luqman-v1/9router-go/releases/latest", "latestVersion": "1.9.1", "releaseNotes": "v1.9.1: Custom-models parity fix — combo picker unwraps {models} envelope (oc/space-bunny-free visible again); shared parser + typed client; STT/media custom merge + customModelChanged reload."}
+{
+  "downloadUrl": "https://github.com/luqman-v1/9router-go/releases/latest",
+  "latestVersion": "1.9.2",
+  "releaseNotes": "v1.9.2: Dashboard console errors fixed (public version API, PWA manifest/SW routes, provider icons, auth redirect, sidebar nav scroll); media providers failover audit (Antigravity/Xquik search, image/STT, Nvidia TTS); POST /api/models/test accepts dashboard session; make web-dev HMR workflow."
+}

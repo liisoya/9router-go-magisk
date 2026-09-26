@@ -116,3 +116,16 @@ func TestTracker_RingSeededFromHistoryOnce(t *testing.T) {
 		t.Fatalf("expected live push at head, got %+v", state.RecentRequests[0])
 	}
 }
+
+func TestRecentFromHistoryRow_LegacyCachedTokens(t *testing.T) {
+	for _, raw := range []string{
+		`{"cache_read_input_tokens":21}`,
+		`{"prompt_tokens_details":{"cached_tokens":22}}`,
+		`{"input_tokens_details":{"cached_tokens":23}}`,
+	} {
+		row := recentFromHistoryRow(db.UsageHistoryRow{Tokens: raw})
+		if row.CachedTokens == 0 {
+			t.Fatalf("legacy cached tokens lost for %s", raw)
+		}
+	}
+}

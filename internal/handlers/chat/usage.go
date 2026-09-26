@@ -1,20 +1,115 @@
 package chat
 
 import (
-	"9router/proxy/internal/log"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"9router/proxy/internal/constants"
+	"9router/proxy/internal/log"
 	"9router/proxy/internal/pricing"
 	"9router/proxy/internal/translator"
 	"9router/proxy/internal/usagetracker"
 )
 
 var dailyUsageMu sync.Mutex
+
+const maxPersistedErrorLen = 512
+
+// LogFailure persists a bounded, credential-free diagnostic for a failed or
+// aborted request. It intentionally does not touch usageHistory/daily totals.
+func (h *ChatHandler) LogFailure(
+	info *UsageLogInfo,
+	usage *translator.OpenAIUsage,
+	err error,
+	latencyMs int64,
+	requestBody []byte,
+	metrics *streamMetrics,
+) {
+	if info == nil || h.Repo == nil || err == nil {
+		return
+	}
+	if usage == nil {
+		usage = &translator.OpenAIUsage{}
+	}
+	now := time.Now().UTC()
+	reqID := fmt.Sprintf("%d-%s", now.UnixMilli(), info.Model)
+	tokens := map[string]int{
+		"prompt_tokens":               usage.PromptTokens,
+		"completion_tokens":           usage.CompletionTokens,
+		"cached_tokens":               usage.GetCachedTokens(),
+		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
+	}
+	statusCode := http.StatusBadGateway
+	var upstreamErr *upstreamError
+	if errors.As(err, &upstreamErr) && upstreamErr.StatusCode > 0 {
+		statusCode = upstreamErr.StatusCode
+	}
+	if isClientCanceled(nil, err) {
+		statusCode = StatusClientClosedRequest
+	}
+	message := extractErrorText([]byte(err.Error()))
+	if message == "" {
+		var upstreamErr *upstreamError
+		if errors.As(err, &upstreamErr) {
+			message = extractErrorText(upstreamErr.Body)
+		}
+	}
+	if message == "" {
+		message = "request failed"
+	}
+	message = sanitizeDetailError(message)
+	var responseContent string
+	if metrics != nil {
+		responseContent = metrics.ResponseBuf.String()
+		if len(responseContent) > constants.MaxResponseContentLen {
+			responseContent = responseContent[:constants.MaxResponseContentLen] + "...[truncated]"
+		}
+	}
+	reqData, marshalErr := json.Marshal(map[string]any{
+		"id": reqID, "provider": info.Provider, "model": info.Model,
+		"connectionId": info.ConnectionID, "status": "error",
+		"timestamp": now.Format("2006-01-02T15:04:05.000Z"),
+		"latency": map[string]int64{
+			"ttft":  metricsTTFT(metrics),
+			"total": latencyMs,
+		},
+		"tokens":   tokens,
+		"request":  map[string]any{"messages": extractRequestMessages(requestBody)},
+		"response": map[string]any{"error": message, "status": statusCode, "content": responseContent},
+	})
+	if marshalErr != nil {
+		return
+	}
+	if insertErr := h.Repo.InsertRequestDetail(
+		reqID,
+		info.Provider,
+		info.Model,
+		info.ConnectionID,
+		"error",
+		string(reqData),
+	); insertErr != nil {
+		log.Error("usage", "insert failed request detail failed", "error", insertErr)
+	}
+}
+
+func metricsTTFT(metrics *streamMetrics) int64 {
+	if metrics == nil {
+		return 0
+	}
+	return metrics.TTFT
+}
+
+func sanitizeDetailError(message string) string {
+	if len(message) > maxPersistedErrorLen {
+		return message[:maxPersistedErrorLen] + "...[truncated]"
+	}
+	return message
+}
 
 // LogUsage is the exported method to persist a usage record and update connection metadata.
 func (h *ChatHandler) LogUsage(info *UsageLogInfo, usage *translator.OpenAIUsage, latencyMs int64, requestBody []byte, metrics *streamMetrics) {

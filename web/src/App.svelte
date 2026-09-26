@@ -3,7 +3,8 @@
   import { Loader2 } from 'lucide-svelte'
   import {
     api,
-    isAuthenticated,
+    getStoredAPIKey,
+    onUnauthorized,
     type APIKey,
     type Combo,
     type ProviderConnection,
@@ -68,10 +69,11 @@
       selectedProviderId = providerId || null
       const path = providerId ? providerPath(providerId) : TAB_ROUTES.connections
       if (typeof window !== 'undefined' && window.location.pathname !== path) {
+        const snapshot = { tab, providerId: providerId ?? null }
         if (replace) {
-          window.history.replaceState({ tab, providerId }, '', path)
+          window.history.replaceState(snapshot, '', path)
         } else {
-          window.history.pushState({ tab, providerId }, '', path)
+          window.history.pushState(snapshot, '', path)
         }
       }
       return
@@ -79,10 +81,11 @@
     selectedProviderId = null
     const path = TAB_ROUTES[tab]
     if (typeof window !== 'undefined' && window.location.pathname !== path) {
+      const snapshot = { tab }
       if (replace) {
-        window.history.replaceState({ tab }, '', path)
+        window.history.replaceState(snapshot, '', path)
       } else {
-        window.history.pushState({ tab }, '', path)
+        window.history.pushState(snapshot, '', path)
       }
     }
   }
@@ -93,10 +96,11 @@
     selectedMedia = { kind, providerId }
     selectedProviderId = null
     if (typeof window !== 'undefined' && window.location.pathname !== path) {
+      const snapshot = { tab: activeTab, mediaKind: kind, mediaProviderId: providerId }
       if (replace) {
-        window.history.replaceState({ tab: activeTab, media: selectedMedia }, '', path)
+        window.history.replaceState(snapshot, '', path)
       } else {
-        window.history.pushState({ tab: activeTab, media: selectedMedia }, '', path)
+        window.history.pushState(snapshot, '', path)
       }
     }
   }
@@ -124,9 +128,16 @@
     try {
       const authStatus = await api.checkRequireLogin()
       requireLogin = !!authStatus.requireLogin
-      // Trust the server session (auth_token cookie) first; the localStorage
-      // flag is only a hint because the cookie is httpOnly and unreadable by JS.
-      isAuthenticatedState = !!authStatus.authenticated || isAuthenticated() || !requireLogin
+      if (requireLogin) {
+        // When login is required, only the server-verified session cookie is authoritative.
+        isAuthenticatedState = !!authStatus.authenticated
+        if (!isAuthenticatedState) {
+          sessionStorage.removeItem('9router_auth')
+          localStorage.removeItem('9router_auth')
+        }
+      } else {
+        isAuthenticatedState = true
+      }
     } catch {
       requireLogin = false
       isAuthenticatedState = true
@@ -136,15 +147,29 @@
   }
 
   onMount(() => {
-    checkAuth().then(() => {
-      if (isAuthenticatedState && activeTab === 'login') {
-        navigate('endpoint', true)
+    const unsubscribeUnauthorized = onUnauthorized(() => {
+      isAuthenticatedState = false
+      requireLogin = true
+      if (activeTab !== 'login') {
+        navigate('login', true)
       }
     })
-    loadData()
+
+    checkAuth().then(() => {
+      if (requireLogin && !isAuthenticatedState) {
+        if (activeTab !== 'login') {
+          navigate('login', true)
+        }
+      } else {
+        if (activeTab === 'login') {
+          navigate('endpoint', true)
+        }
+        loadData()
+      }
+    })
 
     const rawPath = window.location.pathname.replace(/\/+$/, '') || '/'
-    if (rawPath === '/' || rawPath === '/dashboard') {
+    if (isAuthenticatedState && (rawPath === '/' || rawPath === '/dashboard')) {
       window.history.replaceState({ tab: activeTab }, '', TAB_ROUTES[activeTab])
     }
 
@@ -157,6 +182,7 @@
 
     const interval = setInterval(async () => {
       if (typeof document !== 'undefined' && document.hidden) return
+      if (requireLogin && !isAuthenticatedState) return
       try {
         const [connsRes, nodesRes] = await Promise.all([
           api.getConnections().catch(() => null),
@@ -172,6 +198,7 @@
     return () => {
       clearInterval(interval)
       window.removeEventListener('popstate', handlePopState)
+      unsubscribeUnauthorized()
     }
   })
 

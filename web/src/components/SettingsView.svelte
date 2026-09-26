@@ -92,23 +92,24 @@
 
   <!-- 3 Main Configuration Cards (Stitch Design) -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-    <!-- Card 1: Local Machine Mode & Database -->
+    <!-- Card 1: Runtime Storage -->
     <div class="p-6 rounded-xl bg-surface border border-border space-y-4 shadow-xl flex flex-col justify-between">
       <div class="space-y-3">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
             <Database class="w-4 h-4 text-success" />
-            <h3 class="font-headline text-sm font-bold text-text-main">Local Machine Mode</h3>
+            <h3 class="font-headline text-sm font-bold text-text-main">Runtime Storage</h3>
           </div>
           <span class="font-code text-[10px] text-success bg-success/10 px-2 py-0.5 rounded border border-success/20">
-            Running on :20130
+            Server managed
           </span>
         </div>
 
         <div class="p-3 rounded-lg bg-bg border border-border space-y-1 font-code text-xs">
-          <div class="text-[10px] text-text-muted uppercase">Database File Location</div>
+          <div class="text-[10px] text-text-muted uppercase">Default Database Location</div>
           <div class="text-info font-semibold">~/.9router/db/data.sqlite</div>
-          <div class="text-[10px] text-text-subtle pt-1">18.4 MB • SQLite WAL Mode • SetMaxOpenConns(4)</div>
+          <div class="text-[10px] text-text-subtle pt-1">SQLite WAL • Configurable with DB_PATH or DATA_DIR</div>
+          <div class="text-[10px] text-text-subtle pt-1">No automatic versioned schema migration; initialize a fresh database from a compatible upstream schema.</div>
         </div>
       </div>
 

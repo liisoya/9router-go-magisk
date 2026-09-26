@@ -4,9 +4,14 @@ import (
 	"embed"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"strings"
 )
+
+func init() {
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
 
 //go:embed dist/*
 var DistFS embed.FS
@@ -33,6 +38,13 @@ func Handler() http.Handler {
 			stat, statErr := f.Stat()
 			f.Close()
 			if statErr == nil && !stat.IsDir() {
+				if path == "sw.js" {
+					w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+					w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+					w.Header().Set("Service-Worker-Allowed", "/")
+				} else if path == "manifest.webmanifest" {
+					w.Header().Set("Content-Type", "application/manifest+json")
+				}
 				fileServer.ServeHTTP(w, r)
 				return
 			}

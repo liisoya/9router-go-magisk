@@ -165,6 +165,7 @@ func sseStream(o sseStreamOpts) error {
 			if buf != nil {
 				buf.Write(chunk)
 			}
+			captureUsageFromSSEChunk(ctx, chunk)
 		})
 	}
 
@@ -207,6 +208,25 @@ func sseStream(o sseStreamOpts) error {
 		translator.SetUsage(ctx, usage)
 	}
 	return err
+}
+
+func captureUsageFromSSEChunk(ctx context.Context, chunk []byte) {
+	const maxUsageFrame = 1 << 20
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) > maxUsageFrame {
+		trimmed = trimmed[:maxUsageFrame]
+	}
+	if !bytes.Contains(trimmed, []byte("data:")) {
+		return
+	}
+	_ = proxy.ScanStream(bytes.NewReader(trimmed), func(payload []byte) {
+		if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+			return
+		}
+		if usage := translator.ParseResponseUsage(payload); usage != nil {
+			translator.SetUsage(ctx, usage)
+		}
+	})
 }
 
 // jsonResponse writes the upstream JSON response with optional translation.

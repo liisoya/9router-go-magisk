@@ -107,6 +107,14 @@ func TestTTS_Nvidia_Transform(t *testing.T) {
 	repo := db.NewRepo(database)
 	handler := newTestMediaHandler(repo)
 
+	connData, _ = json.Marshal(map[string]any{
+		"apiKey":  "test-nv-key",
+		"baseUrl": mockNvidia.URL,
+	})
+	if _, err := database.Exec(`UPDATE providerConnections SET data = ? WHERE id = 'conn-nv'`, string(connData)); err != nil {
+		t.Fatalf("point connection at mock: %v", err)
+	}
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/audio/speech", strings.NewReader(`{
 		"model": "nvidia/fastpitch/alloy",
@@ -115,18 +123,28 @@ func TestTTS_Nvidia_Transform(t *testing.T) {
 	}`))
 	req.Header.Set("Content-Type", "application/json")
 
-	// Call forwardNvidiaTTS with mock target URL
-	// We verify that parseTTSModelVoice extracts correctly
 	modelInfo := &chat.ModelInfo{
 		Provider: "nvidia",
 		Model:    "fastpitch/alloy",
 	}
-	handler.forwardNvidiaTTS(rec, req, []byte(`{}`), modelInfo, "Testing nvidia tts", "alloy", "json")
-
-	// Response from actual integrate.api.nvidia.com will be 401 or 404 because test key is mock
-	// Status code should be handled gracefully (not crash)
-	if rec.Code == 0 {
-		t.Fatal("expected status code set")
+	conn, err := repo.GetProviderConnectionByID("conn-nv")
+	if err != nil || conn == nil {
+		t.Fatalf("fetch conn: %v", err)
+	}
+	var cd chat.ConnectionData
+	if err := json.Unmarshal([]byte(conn.Data), &cd); err != nil {
+		t.Fatalf("parse conn data: %v", err)
+	}
+	status, msg, done := handler.tryNvidiaTTSConn(rec, req, []byte(`{}`), modelInfo, "Testing nvidia tts", "alloy", "json", conn, &cd)
+	if !done || status != 0 {
+		t.Fatalf("expected success, got status=%d msg=%s done=%v body=%s", status, msg, done, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out["format"] != "wav" {
+		t.Errorf("expected wav envelope, got %v", out)
 	}
 }
 

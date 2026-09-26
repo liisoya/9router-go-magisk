@@ -8,10 +8,14 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/handlers/chat"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/log"
+	"9router/proxy/internal/models"
+	"9router/proxy/internal/providers"
 )
 
 // XquikTweet represents a tweet item returned by Xquik API.
@@ -61,63 +65,83 @@ func (h *MediaHandler) handleXquikSearch(w http.ResponseWriter, r *http.Request,
 	}
 	_ = json.Unmarshal(body, &reqBody)
 
-	query := reqBody.Query
+	query := sanitizeSearchQuery(reqBody.Query)
 	if query == "" {
-		query = reqBody.Prompt
+		query = sanitizeSearchQuery(reqBody.Prompt)
 	}
 	if query == "" {
-		return fmt.Errorf("missing query in search request")
+		return searchError(http.StatusBadRequest, "missing query in search request")
 	}
 
 	limit := reqBody.MaxResults
 	if limit <= 0 {
-		limit = 10
+		limit = defaultSearchMaxResults
+	}
+	if limit > maxSearchMaxResults {
+		limit = maxSearchMaxResults
 	}
 
 	queryType := reqBody.ProviderOptions.QueryType
-	if queryType == "" {
-		queryType = "Latest"
-	}
-	if queryType != "Latest" && queryType != "Top" {
-		return fmt.Errorf("Xquik queryType must be Latest or Top")
+	if queryType != "" && queryType != "Latest" && queryType != "Top" {
+		return searchError(http.StatusBadRequest, "Xquik queryType must be Latest or Top")
 	}
 
-	conn, connData, err := h.ChatH.GetBestConnection(modelInfo.Provider, modelInfo.ConnectionID, nil, modelInfo.Model)
-	if err != nil || conn == nil {
-		return fmt.Errorf("no active connection for provider %s: %w", modelInfo.Provider, err)
+	// Upstream parity (search.js credential loop): rotate through every active
+	// account, locking the failed one per ClassifyError and trying the next.
+	// A pinned x-connection-id is honored exactly once (no rotation).
+	excludeIDs := []string{}
+	usePinned := modelInfo.ConnectionID != ""
+	var lastErr *searchUpstreamError
+	for {
+		conn, connData, err := h.ChatH.GetBestConnection(modelInfo.Provider, modelInfo.ConnectionID, excludeIDs, modelInfo.Model)
+		if err != nil || conn == nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return searchError(http.StatusBadRequest, fmt.Sprintf("no active connection for provider %s: %v", modelInfo.Provider, err))
+		}
+		attemptErr := h.tryXquikSearchConn(w, r, query, limit, queryType, reqBody.ProviderOptions.Cursor, reqBody.Language, modelInfo.Model, conn, connData)
+		if attemptErr == nil {
+			return nil
+		}
+		lastErr = attemptErr
+		if usePinned || !attemptErr.Retryable {
+			return lastErr
+		}
+		excludeIDs = append(excludeIDs, conn.ID)
 	}
+}
 
+func (h *MediaHandler) tryXquikSearchConn(w http.ResponseWriter, r *http.Request, query string, limit int, queryType, cursor, language, model string, conn *models.ProviderConnection, connData *chat.ConnectionData) *searchUpstreamError {
 	apiKey := chat.ExtractAPIKey(connData)
 	if apiKey == "" {
-		return fmt.Errorf("no API key found for Xquik connection")
+		return searchError(http.StatusUnauthorized, "no API key found for Xquik connection")
 	}
 
 	baseURL := "https://xquik.com/api/v1/x/tweets/search"
-	providerCfg, cfgErr := h.ChatH.GetProviderConfig(modelInfo.Provider, connData)
-	if cfgErr == nil && providerCfg.BaseURL != "" {
+	if providerCfg, cfgErr := h.ChatH.GetProviderConfig("xquik", connData); cfgErr == nil && providerCfg != nil && providerCfg.BaseURL != "" {
 		baseURL = strings.TrimRight(providerCfg.BaseURL, "/")
-		if !strings.HasSuffix(baseURL, "/search") && !strings.HasSuffix(baseURL, "/tweets/search") {
-			baseURL += "/api/v1/x/tweets/search"
+		if !strings.HasSuffix(baseURL, "/api/v1/x/tweets/search") {
+			baseURL = strings.TrimRight(baseURL, "/") + "/api/v1/x/tweets/search"
 		}
 	}
 
-	// Build query params
 	qp := url.Values{}
 	qp.Set("q", query)
 	qp.Set("limit", strconv.Itoa(limit))
-	qp.Set("queryType", queryType)
-	if reqBody.ProviderOptions.Cursor != "" {
-		qp.Set("cursor", reqBody.ProviderOptions.Cursor)
+	if queryType != "" {
+		qp.Set("queryType", queryType)
 	}
-	if reqBody.Language != "" {
-		qp.Set("language", reqBody.Language)
+	if cursor != "" {
+		qp.Set("cursor", cursor)
+	}
+	if language != "" {
+		qp.Set("language", language)
 	}
 
-	fullURL := baseURL + "?" + qp.Encode()
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fullURL, nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, baseURL+"?"+qp.Encode(), nil)
 	if err != nil {
-		return fmt.Errorf("create Xquik request: %w", err)
+		return searchError(http.StatusBadGateway, fmt.Sprintf("create Xquik request: %v", err))
 	}
 	req.Header.Set(constants.HeaderAccept, constants.ContentTypeJSON)
 	req.Header.Set(constants.HeaderXAPIKey, apiKey)
@@ -127,20 +151,45 @@ func (h *MediaHandler) handleXquikSearch(w http.ResponseWriter, r *http.Request,
 		client = h.Client
 	}
 
+	upstreamStart := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("Xquik upstream request failed: %w", err)
+		directReq, err2 := http.NewRequestWithContext(r.Context(), http.MethodGet, baseURL+"?"+qp.Encode(), nil)
+		if err2 == nil {
+			directReq.Header = req.Header.Clone()
+			if resp2, err3 := directHTTPClient.Do(directReq); err3 == nil {
+				resp = resp2
+				err = nil
+			}
+		}
+	}
+	if err != nil {
+		return &searchUpstreamError{Status: http.StatusBadGateway, Message: fmt.Sprintf("Xquik upstream request failed: %v", err), Retryable: true}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("Xquik upstream error (status %d): %s", resp.StatusCode, string(errBody))
+		errText := strings.TrimSpace(string(errBody))
+		if errText == "" {
+			errText = resp.Status
+		}
+		backoff := 0
+		if h.Repo != nil {
+			backoff = h.Repo.GetConnectionBackoffLevel(conn.ID)
+		}
+		classification := providers.ClassifyError(resp.StatusCode, errText, backoff)
+		if classification.ShouldFallback && h.Repo != nil {
+			cooldownSec := max(classification.CooldownMs/1000, 1)
+			_ = h.Repo.LockConnectionModel(conn.ID, model, cooldownSec, classification.NewBackoffLevel)
+			log.Warn("search", "xquik account locked, trying next", "conn", conn.ID[:min(8, len(conn.ID))], "status", resp.StatusCode, "cooldown_s", cooldownSec)
+		}
+		return &searchUpstreamError{Status: resp.StatusCode, Message: fmt.Sprintf("Xquik upstream error (status %d): %s", resp.StatusCode, errText), Retryable: classification.ShouldFallback}
 	}
 
 	var xqResp XquikSearchResponse
 	if err := json.UnmarshalRead(resp.Body, &xqResp); err != nil {
-		return fmt.Errorf("decode Xquik response: %w", err)
+		return &searchUpstreamError{Status: http.StatusBadGateway, Message: fmt.Sprintf("decode Xquik response: %v", err), Retryable: true}
 	}
 
 	tweets := xqResp.Tweets
@@ -211,7 +260,11 @@ func (h *MediaHandler) handleXquikSearch(w http.ResponseWriter, r *http.Request,
 		})
 	}
 
-	h.Repo.UpdateConnectionLastUsed(conn.ID)
+	upstreamLatencyMs := time.Since(upstreamStart).Milliseconds()
+	if h.Repo != nil {
+		h.Repo.UpdateConnectionLastUsed(conn.ID)
+		_ = h.Repo.UnlockConnectionModel(conn.ID, model)
+	}
 
 	var nextCursor any
 	if xqResp.NextCursor != "" {
@@ -231,7 +284,10 @@ func (h *MediaHandler) handleXquikSearch(w http.ResponseWriter, r *http.Request,
 			"has_more":    xqResp.HasNextPage,
 			"next_cursor": nextCursor,
 		},
+		"answer": nil,
 		"metrics": map[string]any{
+			"response_time_ms":        upstreamLatencyMs,
+			"upstream_latency_ms":     upstreamLatencyMs,
 			"total_results_available": nil,
 		},
 		"errors": []any{},

@@ -96,7 +96,7 @@ func TestParseClaudeUsage(t *testing.T) {
 	if u == nil {
 		t.Fatal("expected parsed usage")
 	}
-	if u.PromptTokens != 10 || u.CompletionTokens != 4 || u.CachedTokens != 6 || u.CacheCreationInputTokens != 2 {
+	if u.PromptTokens != 18 || u.CompletionTokens != 4 || u.CachedTokens != 6 || u.CacheCreationInputTokens != 2 {
 		t.Errorf("got %#v", u)
 	}
 	// Non-Claude body (no usage) → nil, never a nil deref.
@@ -112,7 +112,7 @@ func TestParseClaudeUsage(t *testing.T) {
 func TestParseResponseUsage(t *testing.T) {
 	// Claude format
 	u := ParseResponseUsage([]byte(`{"usage":{"input_tokens":10,"output_tokens":4,"cache_read_input_tokens":6}}`))
-	if u == nil || u.PromptTokens != 10 || u.CompletionTokens != 4 || u.CachedTokens != 6 {
+	if u == nil || u.PromptTokens != 16 || u.CompletionTokens != 4 || u.CachedTokens != 6 {
 		t.Errorf("claude format: got %#v", u)
 	}
 	// OpenAI format (the !translate path also serves /v1/chat/completions bodies)
@@ -123,6 +123,31 @@ func TestParseResponseUsage(t *testing.T) {
 	// No usage → nil
 	if ParseResponseUsage([]byte(`{}`)) != nil {
 		t.Error("expected nil for body without usage")
+	}
+}
+
+func TestCachedTokensCompatibilityAndClaudeNormalization(t *testing.T) {
+	for name, raw := range map[string]string{
+		"top level":        `{"cached_tokens":11}`,
+		"claude legacy":    `{"cache_read_input_tokens":12}`,
+		"prompt details":   `{"prompt_tokens_details":{"cached_tokens":13}}`,
+		"input details":    `{"input_tokens_details":{"cached_tokens":14}}`,
+		"null then nested": `{"cached_tokens":null,"input_tokens_details":{"cached_tokens":15}}`,
+	} {
+		if got := CachedTokensFromJSON([]byte(raw)); got == 0 {
+			t.Errorf("%s: expected cached tokens, got 0", name)
+		}
+	}
+
+	usage := &OpenAIUsage{
+		PromptTokens:             10,
+		CachedTokens:             4,
+		CacheCreationInputTokens: 2,
+	}
+	NormalizeClaudeUsage(usage)
+	NormalizeClaudeUsage(usage)
+	if usage.PromptTokens != 16 || usage.GetCachedTokens() != 4 {
+		t.Fatalf("normalization must be idempotent: %+v", usage)
 	}
 }
 

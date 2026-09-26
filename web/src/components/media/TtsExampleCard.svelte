@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { api, type APIKey, type ProviderConnection } from '../../api/client'
+  import { api, getStoredAPIKey, type APIKey, type ProviderConnection } from '../../api/client'
   import { getModelKind, getModelsByProviderId } from '../../lib/models'
   import { TTS_PROVIDER_CONFIG } from '../../lib/ttsProviders'
   import Card from '../../lib/ui/Card.svelte'
@@ -52,10 +52,17 @@
   let tunnelEndpoint = $state('')
   let useTunnel = $state(false)
 
-  let activeApiKey = $derived(apiKeys.find((k) => k.isActive !== 0)?.key || '')
+  let activeApiKey = $state('')
   let connectionCount = $derived(connections.filter((c) => c.provider === providerId && c.isActive !== 0).length)
 
   onMount(() => {
+    const stored = getStoredAPIKey()
+    if (stored) {
+      activeApiKey = stored
+    } else {
+      const active = (apiKeys || []).find((k) => k.isActive !== 0 && k.key)
+      if (active?.key) activeApiKey = active.key
+    }
     if (typeof window !== 'undefined') {
       endpoint = window.location.origin
     }

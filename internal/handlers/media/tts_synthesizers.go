@@ -43,7 +43,10 @@ func doDirectOrClient(ctx context.Context, client *http.Client, req *http.Reques
 		client = directHTTPClient
 	}
 	resp, err := client.Do(req)
-	if err != nil || (resp != nil && resp.StatusCode == http.StatusForbidden) {
+	if err != nil {
+		// Transport-level failure only: retry once direct. A real upstream
+		// 403 (e.g. key rejected) must surface, not be retried against the
+		// same target where a sandbox mock could mask it as success.
 		if resp != nil {
 			resp.Body.Close()
 		}
@@ -160,7 +163,8 @@ func SynthesizeEdgeTTS(ctx context.Context, client *http.Client, text, voice str
 	if err != nil {
 		return nil, fmt.Errorf("read speech response: %w", err)
 	}
-	if len(audio) < 100 {
+	// Upstream parity (edgeTts.js): payloads under 1KiB are error pages, not audio.
+	if len(audio) < 1024 {
 		return nil, fmt.Errorf("bing TTS returned empty audio")
 	}
 	return audio, nil

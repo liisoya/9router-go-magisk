@@ -1,337 +1,179 @@
-# 9Router SQLite Database Schema
+# SQLite Database and Operator Contract
 
-Shared database between the Go proxy and the Next.js dashboard. Single SQLite file — `9router.db`.
+This document describes the storage contract implemented by `9router-go` v1.9.1. It deliberately separates:
 
-## Schema Versioning
+- the core schema that the Go runtime **expects to already exist**;
+- the one Go-only table the runtime creates at startup;
+- compatibility with the historical upstream Next.js database; and
+- the limited, dashboard-triggered backup feature.
 
-Next.js uses the `_meta` table to track the schema version (`SCHEMA_VERSION = 1`).
-Go has no migration system — schema is additive (new columns are ignored by old queries, new tables are created with `CREATE TABLE IF NOT EXISTS`).
+The current Go source is the behavioral authority. The local upstream checkout (`decolua/9router` v0.5.85) is a compatibility reference, not a claim that the two products are identical.
 
-## Tables Overview
+## Storage location
 
-```mermaid
-erDiagram
-    apiKeys ||--o{ usageHistory : ""
-    providerConnections ||--o{ usageHistory : ""
-    providerConnections }o--|| providerNodes : "belongs-to"
-    combos ||--o{ usageHistory : ""
-    settings ||--|| providerConnections : "config"
+`DB_PATH` takes precedence. Otherwise the database is:
 
-    apiKeys {
-        string id PK
-        string key UK
-        string name
-        string machineId
-        int isActive
-        string createdAt
-    }
+| Platform | Default path |
+|----------|--------------|
+| macOS/Linux | `$DATA_DIR/db/data.sqlite`, or `~/.9router/db/data.sqlite` |
+| Windows | `%APPDATA%\9router\db\data.sqlite` |
+| Docker | configured through the mounted data directory |
 
-    providerConnections {
-        string id PK
-        string provider
-        string authType
-        string name
-        string email
-        int priority
-        int isActive
-        string data
-        string lastUsedAt
-        int consecutiveUseCount
-        string createdAt
-        string updatedAt
-    }
+`DATA_DIR` overrides the platform data root. When `DB_PATH` names an existing directory, the resolver recognizes compatible layouts in this order: `db/data.sqlite`, `data.sqlite`, then `9router.db` (`internal/config/config.go`).
 
-    kv {
-        string scope PK
-        string key PK
-        string value
-    }
+SQLite is opened through `modernc.org/sqlite` with WAL, `synchronous=NORMAL`, foreign keys, a 5-second busy timeout, and a maximum of four open connections (`internal/db/client.go`).
 
-    combos {
-        string id PK
-        string name UK
-        string kind
-        string models
-        string createdAt
-        string updatedAt
-    }
+## Schema bootstrap and versioning
 
-    providerNodes {
-        string id PK
-        string type
-        string name
-        string data
-        string createdAt
-        string updatedAt
-    }
+### Current Go behavior
 
-    settings {
-        int id PK
-        string data
-    }
+Production startup does **not** create or migrate the core application schema. `internal/app/database.go` only:
 
-    usageHistory {
-        int id PK
-        string timestamp
-        string provider
-        string model
-        string connectionId
-        string apiKey
-        string endpoint
-        int promptTokens
-        int completionTokens
-        float cost
-        string status
-        string tokens
-        string meta
-    }
+1. opens and configures the SQLite file;
+2. creates `upstream_leases` with `CREATE TABLE IF NOT EXISTS`; and
+3. exposes the connection to repositories and handlers.
 
-    usageDaily {
-        string dateKey PK
-        string data
-    }
+A new empty database therefore opens successfully but is not a working fresh installation. Depending on the operation, a missing table may surface later as an empty settings view, an authentication/DB error, or a failed write. The core tables are not implicitly bootstrapped.
 
-    requestDetails {
-        string id PK
-        string timestamp
-        string provider
-        string model
-        string connectionId
-        string status
-        string data
-    }
+`internal/dbtest.SchemaStatements()` creates tables for Go tests only. It is not a production migrator and must not be presented as the deployed schema.
 
-    proxyPools {
-        string id PK
-        int isActive
-        string testStatus
-        string data
-        string createdAt
-        string updatedAt
-    }
+Go has no `_meta` schema-version check, migration runner, compatibility validation, or automatic repair. It does not alter upstream tables at startup.
+
+### Upstream behavior
+
+The historical Next.js application owns a versioned SQLite layer:
+
+- `src/lib/db/schema.js` declares `SCHEMA_VERSION = 1` and the core table/index schema;
+- `src/lib/db/migrate.js` runs versioned and additive migrations;
+- `src/lib/db/backup.js` writes pre-migration safety backups; and
+- `src/lib/db/paths.js` resolves the same default `DATA_DIR/db/data.sqlite` location.
+
+Starting that upstream application against a compatible DB is the supported way to bootstrap or migrate the core schema today. This is compatibility with upstream persistence, not a claim that Go has implemented the upstream migration system.
+
+## Core tables consumed by Go
+
+The following is the v0.5.85 upstream core schema consumed by the Go repositories. Go does not create these definitions in production.
+
+### `settings`
+
+Single-row global configuration JSON:
+
+```sql
+CREATE TABLE settings (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT NOT NULL
+);
 ```
 
----
+Examples include login and SSO configuration, token savers, combo/provider strategies, proxy-pool routing, auto-update, and the Headroom URL. Provider credentials remain in `providerConnections`; the dashboard password is stored as a bcrypt hash in this JSON.
 
-## Per-Table Details
-
-### 1. `providerConnections` — Core Proxy Table
-
-The most important table. Stores all upstream provider connections (API keys, endpoints, etc.).
+### `providerConnections`
 
 ```sql
 CREATE TABLE providerConnections (
-    id              TEXT PRIMARY KEY,            -- UUID, e.g. "conn-a1b2c3"
-    provider        TEXT NOT NULL,               -- Provider name: "openai", "deepseek", etc
-    authType        TEXT NOT NULL,               -- "apikey" or "oauth"
-    name            TEXT,                        -- Connection display name (optional)
-    email           TEXT,                        -- Account email (optional)
-    priority        INTEGER,                     -- Priority (lower = preferred)
-    isActive        INTEGER DEFAULT 1,           -- 1=active, 0=inactive
-    data            TEXT NOT NULL,               -- JSON blob — see below
-    lastUsedAt      TEXT,                        -- ISO timestamp (Go specific)
-    consecutiveUseCount INTEGER DEFAULT 0,       -- (Go specific)
-    createdAt       TEXT NOT NULL,               -- ISO timestamp
-    updatedAt       TEXT NOT NULL                -- ISO timestamp
+    id          TEXT PRIMARY KEY,
+    provider    TEXT NOT NULL,
+    authType    TEXT NOT NULL,
+    name        TEXT,
+    email       TEXT,
+    priority    INTEGER,
+    isActive    INTEGER DEFAULT 1,
+    data        TEXT NOT NULL,
+    createdAt   TEXT NOT NULL,
+    updatedAt   TEXT NOT NULL
 );
 ```
 
-**Indexes:**
-```sql
-CREATE INDEX idx_pc_provider ON providerConnections(provider);
-CREATE INDEX idx_pc_provider_active ON providerConnections(provider, isActive);
-CREATE INDEX idx_pc_priority ON providerConnections(provider, priority);
-```
+`data` is plaintext JSON. Depending on provider, it can contain `apiKey`, `accessToken`, `refreshToken`, expiry/scope data, provider-specific client secrets, proxy configuration, quota state, and `modelLock_<model>` entries.
 
-#### `data` JSON Blob — Full Structure
-
-This is the most dynamic field — stores everything that doesn't fit into a fixed column.
-
-```json
-{
-  "apiKey": "sk-...",
-  "accessToken": "...",
-  "refreshToken": "...",
-  "expiresAt": "2026-12-31T23:59:59Z",
-  "tokenType": "Bearer",
-  "scope": "read write",
-  "baseUrl": "https://api.openai.com/v1",
-  "projectId": "projects/123",
-
-  "displayName": "My OpenAI Key",
-  "globalPriority": 0,
-  "defaultModel": "gpt-4o",
-
-  "testStatus": "active",
-  "lastTested": "2026-07-20T12:00:00Z",
-  "lastError": "Rate limited",
-  "lastErrorAt": "2026-07-20T12:00:00Z",
-  "errorCode": 429,
-
-  "backoffLevel": 2,
-  "rateLimitedUntil": "2026-07-20T12:05:00Z",
-
-  "modelLock_gpt-4o": "2026-07-21T12:00:00Z",
-  "modelLock_claude-sonnet": null,
-
-  "providerSpecificData": {
-    "organization": "org-xxx",
-    "vertexProject": "my-project"
-  }
-}
-```
-
-**Key fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `apiKey` | string | Primary API key |
-| `accessToken` | string | OAuth access token |
-| `baseUrl` | string | Custom base URL override |
-| `backoffLevel` | int | Exponential backoff level (0-15) |
-| `rateLimitedUntil` | ISO string | Account-level cooldown expiry |
-| `modelLock_<model>` | ISO string \| null | Per-connection model lock — **same format between Go & Next.js** |
-| `testStatus` | string | `"active"`, `"unavailable"`, etc |
-
----
-
-### 2. `kv` — Generic Key-Value Store
+Several successful request paths also call `UpdateConnectionLastUsed`, which requires optional Go columns:
 
 ```sql
-CREATE TABLE kv (
-    scope TEXT NOT NULL,      -- Namespace
-    key   TEXT NOT NULL,      -- Key within scope
-    value TEXT NOT NULL,      -- JSON value
-    PRIMARY KEY (scope, key)
-);
+lastUsedAt          TEXT
+consecutiveUseCount INTEGER DEFAULT 0
 ```
 
-**Index:**
-```sql
-CREATE INDEX idx_kv_scope ON kv(scope);
-```
+Those columns are not in the upstream v0.5.85 schema and Go does not add them. On an unmodified upstream DB, this metadata update can fail; several call sites currently ignore/log that error and continue serving traffic.
 
-**Used Scopes:**
-
-| Scope | Key Format | Value | Purpose |
-|-------|-----------|-------|---------|
-| `modelLock` | `PROVIDER/MODEL` | `{"lockedUntil":"...","lastError":"...","errorCode":429,"backoffLevel":2}` | **Legacy** global model lock (superseded by per-connection locks) |
-| `providerHealth` | `provider/model` | `{"lastStatus":429,"lastLatencyMs":1234,"lastChecked":"...","consecutiveErrors":3,"consecutiveSuccesses":0}` | Health tracking via consecutive error counter |
-| `modelAliases` | alias name | `"openai/gpt-4o"` | Model name alias → provider/model mapping |
-| `pricing` | provider name | JSON object with model pricing | Provider-specific pricing overrides |
-| `customModels` | `"providerAlias\|id\|type"` | JSON model definition | User-defined custom models per provider |
-| `mitmAlias` | tool name | JSON alias mapping | MITM proxy alias configurations |
-| `disabledModels` | provider alias | JSON array of disabled model IDs | Per-provider disabled model lists |
-
----
-
-### 3. `combos` — Model Routing Configuration
-
-```sql
-CREATE TABLE combos (
-    id         TEXT PRIMARY KEY,
-    name       TEXT UNIQUE NOT NULL,    -- e.g. "free-tier", "pro-models"
-    kind       TEXT,                    -- Optional classifier
-    models     TEXT NOT NULL,           -- JSON array: ["openai/gpt-4o", "anthropic/claude-sonnet-4"]
-    createdAt  TEXT NOT NULL,
-    updatedAt  TEXT NOT NULL
-);
-```
-
-**Index:**
-```sql
-CREATE INDEX idx_combo_name ON combos(name);
-```
-
-> **Note:** The `strategy` column does not exist in the base schema. Go handles it gracefully:
-> 1. Default strategy: `"fallback"`
-> 2. Tries `SELECT strategy FROM combos` — if the column exists, uses that value
->
-> Strategy can be set per-combo via settings (Next.js) or directly in the DB.
-
----
-
-### 4. `apiKeys` — Client Authentication
-
-```sql
-CREATE TABLE apiKeys (
-    id        TEXT PRIMARY KEY,
-    key       TEXT UNIQUE NOT NULL,    -- Client API key (generated)
-    name      TEXT,
-    machineId TEXT,                    -- Optional: bind to a specific machine
-    isActive  INTEGER DEFAULT 1,       -- 1=active, 0=disabled
-    createdAt TEXT NOT NULL
-);
-```
-
-**Index:**
-```sql
-CREATE INDEX idx_ak_key ON apiKeys(key);
-```
-
-Used for incoming request validation: `SELECT isActive FROM apiKeys WHERE key = ?`.
-
----
-
-### 5. `providerNodes` — Provider Configuration
+### `providerNodes`
 
 ```sql
 CREATE TABLE providerNodes (
-    id        TEXT PRIMARY KEY,        -- Provider name: "openai", "deepseek", etc
-    type      TEXT,                    -- "root", "executor", etc
+    id        TEXT PRIMARY KEY,
+    type      TEXT,
     name      TEXT,
-    data      TEXT NOT NULL,           -- JSON: {"baseUrl":"...","authType":"bearer",...}
+    data      TEXT NOT NULL,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
 );
 ```
 
-**Index:**
-```sql
-CREATE INDEX idx_pn_type ON providerNodes(type);
-```
+Stores custom/compatible provider nodes and their JSON configuration.
 
-Acts as a fallback provider config — if a provider is not in `KnownProviders` (hardcoded in Go), it checks `providerNodes`.
-
----
-
-### 6. `settings` — Global Configuration
+### `proxyPools`
 
 ```sql
-CREATE TABLE settings (
-    id   INTEGER PRIMARY KEY CHECK (id = 1),   -- Only 1 row allowed
-    data TEXT NOT NULL                           -- JSON blob for all settings
+CREATE TABLE proxyPools (
+    id         TEXT PRIMARY KEY,
+    isActive   INTEGER DEFAULT 1,
+    testStatus TEXT,
+    data       TEXT NOT NULL,
+    createdAt  TEXT NOT NULL,
+    updatedAt  TEXT NOT NULL
 );
 ```
 
-Example `data` content:
-```json
-{
-  "comboStrategies": {
-    "free-tier": { "strategy": "round-robin", "stickyLimit": 3 },
-    "pro-models": { "strategy": "fusion" }
-  },
-  "providerStrategies": {
-    "mimo-free": { "proxyPoolId": "pool-xyz", "rotateStrategy": "round-robin" },
-    "opencode": { "proxyPoolId": "pool-abc" }
-  },
-  "fusionTuning": {
-    "pro-models": { "minPanel": 3, "stragglerGraceMs": 5000 }
-  },
-  "rtk": { "enabled": true },
-  "caveman": { "enabled": false, "mode": "lite" },
-  "ponytail": { "enabled": true, "mode": "lite" }
-}
+`data` can include proxy URLs or credentials, relay type, no-proxy rules, and rotation strategy.
+
+### `apiKeys`
+
+```sql
+CREATE TABLE apiKeys (
+    id        TEXT PRIMARY KEY,
+    key       TEXT UNIQUE NOT NULL,
+    name      TEXT,
+    machineId TEXT,
+    isActive  INTEGER DEFAULT 1,
+    createdAt TEXT NOT NULL
+);
 ```
 
----
+Client keys are stored in plaintext and validated on proxy requests.
 
-### 7. `usageHistory` — Usage Logs
+### `combos`
+
+```sql
+CREATE TABLE combos (
+    id        TEXT PRIMARY KEY,
+    name      TEXT UNIQUE NOT NULL,
+    kind      TEXT,
+    models    TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+);
+```
+
+The current upstream contract does not have a `combos.strategy` column. Go reads strategy from `settings.comboStrategies` (with global fallbacks); an optional `strategy` column is attempted opportunistically during combo create/update, but is not part of the declared schema.
+
+### `kv`
+
+```sql
+CREATE TABLE kv (
+    scope TEXT NOT NULL,
+    key   TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (scope, key)
+);
+```
+
+Important scopes include `modelAliases`, `customModels`, `pricing`, `mitmAlias`, and `disabledModels`. Legacy `modelLock` and `providerHealth` data may also be present. `customModels` is a list encoded in the `value` JSON with a compound key; other scopes commonly use `value` as a JSON string.
+
+### `usageHistory`
 
 ```sql
 CREATE TABLE usageHistory (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,   -- Next.js: autoincrement
-    timestamp        TEXT NOT NULL,                        -- ISO timestamp
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp        TEXT NOT NULL,
     provider         TEXT,
     model            TEXT,
     connectionId     TEXT,
@@ -340,137 +182,65 @@ CREATE TABLE usageHistory (
     promptTokens     INTEGER DEFAULT 0,
     completionTokens INTEGER DEFAULT 0,
     cost             REAL DEFAULT 0,
-    status           TEXT,                                 -- "success", "error", etc
-    tokens           TEXT,                                 -- JSON metadata (pricing/raw tokens)
-    meta             TEXT                                  -- JSON extra metadata
+    status           TEXT,
+    tokens           TEXT,
+    meta             TEXT
 );
 ```
 
-**Indexes:**
-```sql
-CREATE INDEX idx_uh_ts ON usageHistory(timestamp DESC);
-CREATE INDEX idx_uh_provider ON usageHistory(provider);
-CREATE INDEX idx_uh_model ON usageHistory(model);
-CREATE INDEX idx_uh_conn ON usageHistory(connectionId);
-```
+Go omits `id` on insert, allowing the upstream autoincrement column to allocate it, and reads recent rows by implicit `rowid`. Go test fixtures sometimes omit `id`; that fixture difference is not a production schema.
 
-> **Note:** Go's test schema is missing the `id` column. Next.js version has `id INTEGER PRIMARY KEY AUTOINCREMENT`.
-> Go's production code relies on implicit `rowid`.
-
----
-
-### 8. `usageDaily` — Daily Aggregation
+### `usageDaily`
 
 ```sql
 CREATE TABLE usageDaily (
-    dateKey TEXT PRIMARY KEY,     -- Format: "2026-07-21"
-    data    TEXT NOT NULL         -- JSON: {"totalTokens":15000,"totalCost":0.75,...}
+    dateKey TEXT PRIMARY KEY,
+    data    TEXT NOT NULL
 );
 ```
 
----
+One pre-merged JSON aggregate per date. Go protects its read/merge/write path with an in-process mutex, then performs `INSERT OR REPLACE`.
 
-### 9. `requestDetails` — Request/Response Debug Log
+### `requestDetails`
 
 ```sql
 CREATE TABLE requestDetails (
-    id          TEXT PRIMARY KEY,     -- UUID
-    timestamp   TEXT NOT NULL,
-    provider    TEXT,
-    model       TEXT,
+    id           TEXT PRIMARY KEY,
+    timestamp    TEXT NOT NULL,
+    provider     TEXT,
+    model        TEXT,
     connectionId TEXT,
-    status      TEXT,
-    data        TEXT NOT NULL         -- JSON: {request, response, latency}
+    status       TEXT,
+    data         TEXT NOT NULL
 );
 ```
 
-**Indexes:**
-```sql
-CREATE INDEX idx_rd_ts ON requestDetails(timestamp DESC);
-CREATE INDEX idx_rd_provider ON requestDetails(provider);
-CREATE INDEX idx_rd_model ON requestDetails(model);
-CREATE INDEX idx_rd_conn ON requestDetails(connectionId);
-```
+The JSON `data` can contain request messages, response content, token counts, and latency/TTFT. Go currently records truncated content, not an opt-in debug-only sample.
 
-Used for debugging — stores raw request/response payloads with timing info.
+## Go-only table
 
----
+### `upstream_leases`
 
-### 10. `proxyPools` — Proxy Configuration
-
-```sql
-CREATE TABLE proxyPools (
-    id         TEXT PRIMARY KEY,
-    isActive   INTEGER DEFAULT 1,
-    testStatus TEXT,                 -- "active", "failed", etc
-    data       TEXT NOT NULL,        -- JSON: proxy credentials, URL, strategy
-    createdAt  TEXT NOT NULL,
-    updatedAt  TEXT NOT NULL
-);
-```
-
-**Indexes:**
-```sql
-CREATE INDEX idx_pp_active ON proxyPools(isActive);
-CREATE INDEX idx_pp_status ON proxyPools(testStatus);
-```
-
-Example `data` content:
-```json
-{
-  "type": "vercel",
-  "proxyUrl": "https://my-relay.vercel.app",
-  "urls": ["http://user:pass@ip1:port", "http://user:pass@ip2:port"],
-  "noProxy": "localhost,127.0.0.1,api.deepseek.com",
-  "strategy": "round-robin"
-}
-```
-
----
-
-### 11. `upstream_leases` — Cross-Process Coordination (Go only)
-
-Generic lease table so multiple 9router-go processes sharing one DB file
-coordinate upstream state instead of fighting over it. Created idempotently
-at startup (`EnsureUpstreamLeases`, every run — no-op when present) and
-ignored by the Next.js dashboard, which does not know the table.
+`EnsureUpstreamLeases` creates this table idempotently at every startup:
 
 ```sql
 CREATE TABLE IF NOT EXISTS upstream_leases (
-    scope      TEXT NOT NULL,  -- use-case namespace, e.g. "freebuff-session"
-    key        TEXT NOT NULL,  -- hashed identity, NEVER raw secret text
-    value      TEXT NOT NULL,  -- opaque lease payload (instance id, etag…)
-    expires_at TEXT NOT NULL,  -- RFC3339; dead holders stop blocking
-    updated_at TEXT NOT NULL,  -- RFC3339
+    scope      TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     PRIMARY KEY (scope, key)
 );
 ```
 
-**Contract** (`internal/db/leases.go` — `ReadLease` / `AcquireLease` /
-`RefreshLease` / `ReleaseLease`):
+The registered `freebuff-session` scope coordinates admission for one hashed token/model key across cooperating processes. Keys are SHA-256 hashes and values are opaque instance IDs; raw credentials do not belong in this table. The upstream Next.js app does not know this table and will ignore it.
 
-- `Acquire` is atomic across processes (single guarded `UPDATE`-then-`INSERT`);
-  exactly one racer wins, losers read the winner's value and follow it.
-- Expired rows read as absent; a new acquirer takes over explicitly — a
-  crashed process never blocks others past its TTL.
-- `Release` is compare-and-delete (`WHERE value = ?`): a stale holder can
-  never delete a fresh row stored by another process.
-- `LeaseKey(parts...)` = `hex(sha256("a::b::c"))` — raw tokens/API keys
-  must never touch `scope`, `key`, or `value`.
+This table is a narrow coordination primitive, not a general distributed-state layer.
 
-**Registered scopes:**
+## Upstream-only table
 
-| Scope | Key Format | Value | TTL | Purpose |
-|-------|-----------|-------|-----|---------|
-| `freebuff-session` | `hex(sha256(token))::model` | `instanceId` | session TTL (~1h) | One admitter per account+model; followers reuse the stored instance instead of re-claiming (upstream punishes re-claims with 409 `session_superseded`) |
-
-**Rules for new scopes:** add one `LeaseScope*` constant per use-case, never
-reuse a scope for another purpose; keep values small, opaque, and secret-free;
-pick a TTL matching the upstream lifetime (not longer).
-
----
-
-### 12. `_meta` — Schema Version (Next.js only)
+### `_meta`
 
 ```sql
 CREATE TABLE _meta (
@@ -479,58 +249,88 @@ CREATE TABLE _meta (
 );
 ```
 
-Next.js uses this to track `SCHEMA_VERSION` and migration state. Go does not use this table — schema changes are additive only.
+Upstream uses it for backup/migration/app metadata. Go neither creates nor reads it. Its presence does not prove that Go is compatible with every schema version recorded there; operators must test the specific schema and required optional columns.
 
----
+## Compatibility boundaries
 
-## Data Flow Between Tables
+| Area | Current behavior | Operator interpretation |
+|------|------------------|-------------------------|
+| Default path | Go and upstream v0.5.85 both use `DATA_DIR/db/data.sqlite` | Compatible in the common configuration |
+| Core columns | Most Go reads/inserts follow the upstream v0.5.85 schema | Compatible only for paths exercised against that exact schema |
+| Go connection metadata | Go writes optional `lastUsedAt` / `consecutiveUseCount` columns without migration | Upstream DB needs an operator-managed compatible addition, or those metadata updates fail |
+| Schema creation/migration | Upstream owns bootstrap/migrations; Go creates only `upstream_leases` | Do not start a blank DB directly for production |
+| Extra table | Upstream ignores `upstream_leases` | Generally harmless; back up separately if lease continuity matters |
+| JSON payloads | `providerConnections.data` and `kv` are shared conventions | Shape compatibility is field-by-field, not guaranteed by a version check |
+| Write coordination | SQLite serializes writes; only lease admission is explicitly cross-process | Use one active 9router-go writer unless the workload is tested |
 
-```mermaid
-flowchart LR
-    Auth["apiKeys\nClient validation"] --> Handler["Handler"]
-    Handler --> Combo["combos\nModel routing"]
-    Combo --> Conn["providerConnections\nUpstream credentials"]
-    Conn --> Node["providerNodes\nConfig fallback"]
+## Backup scope
 
-    Handler --> Health["kv.scope=providerHealth\nConsecutive errors"]
-    Handler --> Lock["kv.scope=modelLock\nLegacy model locks"]
-    Handler --> ConnLock["providerConnections.data\n.modelLock_gpt-4\nPer-connection locks"]
+There are two different things called “backup” in the product. Neither should be mistaken for a complete physical SQLite snapshot unless verified.
 
-    Handler --> Usage["usageHistory\nUsage logs"]
-    Handler --> Daily["usageDaily\nDaily aggregation"]
-    Handler --> ReqLog["requestDetails\nDebug log"]
+### Dashboard JSON export/import
 
-    Handler --> Settings["settings\nGlobal config\ncomboStrategies"]
-    Handler --> Lease["upstream_leases\nCross-process leases"]
-```
+`GET /api/settings/database` exports a shared dashboard payload containing:
 
-## Go vs Next.js Schema Differences
+- `settings`;
+- `providerConnections` and `providerNodes` with their `data` JSON merged into rows;
+- `proxyPools`;
+- client `apiKeys`;
+- `combos`; and
+- the `modelAliases`, `customModels`, `mitmAlias`, and `pricing` KV scopes.
 
-| Aspect | Go | Next.js |
-|-------|-----|---------|
-| **`_meta` table** | ❌ Not present | ✅ Schema versioning, migration tracking |
-| **providerConnections** | Has `lastUsedAt`, `consecutiveUseCount` as **real columns** | Same fields stored in **JSON `data` blob** |
-| **providerConnections indexes** | ❌ None | ✅ 3 indexes (provider, active, priority) |
-| **combos** | Default strategy `"fallback"`, optional `SELECT strategy` | Strategy from settings table, no strategy column |
-| **usageHistory** | ❌ No `id` column (relies on implicit `rowid`) | ✅ `id INTEGER PRIMARY KEY AUTOINCREMENT` |
-| **usageHistory indexes** | ❌ None | ✅ 4 indexes (timestamp, provider, model, connectionId) |
-| **requestDetails** | `data TEXT` (nullable) | `data TEXT NOT NULL` |
-| **requestDetails indexes** | ❌ None | ✅ 4 indexes |
-| **proxyPools** | Minimal: `id`, `data`, `isActive` | Full: with `testStatus`, `createdAt`, `updatedAt` |
-| **kv indexes** | ❌ PK(scope,key) only | ✅ Plus `idx_kv_scope` |
-| **kv extra scopes** | `modelLock`, `providerHealth`, `modelAliases` | Same + `pricing`, `customModels`, `mitmAlias`, `disabledModels` |
-| **Schema migration** | ❌ None — `CREATE TABLE IF NOT EXISTS` only | ✅ `_meta` table, auto-sync, versioning, backup |
-| **Total indexes** | **0** (implicit PK only) | **18 indexes** |
+The payload is sensitive: it can contain provider API keys/tokens, proxy credentials, client API keys, and the dashboard password hash. It does **not** include `usageHistory`, `usageDaily`, `requestDetails`, `upstream_leases`, `_meta`, or every KV scope. Import is destructive: it deletes and replaces the listed configuration data in one transaction. Treat it as configuration export/restore, not a full disaster-recovery backup.
 
-> **Note:** Since Go and Next.js share the same DB file, they should ideally use the same schema.
-> There are currently some **drifts** — especially `usageHistory.id` (Go has no `id` column,
-> so Go's INSERT would fail on a Next.js schema that expects `AUTOINCREMENT`).
-> And `providerConnections.lastUsedAt`/`consecutiveUseCount` — Go stores as real columns,
-> Next.js stores in the JSON `data` blob. Data could become inconsistent.
+The route is always protected from client API keys and unauthenticated access; it requires a valid dashboard session/local CLI token plus current-password re-authentication where applicable (`internal/middleware/dashboard_auth.go`, `internal/handlers/dashboard/settings.go`).
 
-## SQLite Connection Pooling & Thread Safety (v1.4.0)
+### Physical SQLite backup
 
-- **Max Open Connections**: `SetMaxOpenConns(4)` is set on the SQLite `sql.DB` instance (`internal/db/client.go`). SQLite in WAL mode allows concurrent readers with a single writer; 4 connections provides optimal throughput without lock thrashing.
-- **Daily Usage Thread Safety**: `upsertDailyUsage` uses `dailyUsageMu` (`sync.Mutex`) to serialize the read-modify-write cycle on the `usageDaily` table (`internal/handlers/chat/usage.go`), preventing lost updates under high concurrency.
-- **ProxyPool Caching**: `proxyPoolCache` (`sync.Map`) caches `ProxyPool` instances in memory (`internal/db/proxyPools.go`) to preserve atomic round-robin indices across request lifecycles.
+For a full restore point, copy the SQLite database consistently. The simplest operator procedure is to stop 9router-go and copy the whole database directory, including `data.sqlite-wal` and `data.sqlite-shm` if present. For a live backup, use a SQLite-aware online backup/checkpoint procedure; do not copy only the main file while WAL contains committed pages.
 
+Upstream's automatic pre-schema backup is separate: it lives under `db/backups/`, keeps only the newest three, and intentionally excludes `requestDetails`. Go does not create those upstream migration backups.
+
+## Permissions and secret handling
+
+- The parent data directory is initially created with mode `0755`.
+- On DB open, the database's immediate parent is changed to `0700` (the chmod error is currently ignored).
+- The main DB file is changed to `0600` on every open.
+- WAL/SHM files inherit protection from the private parent directory, but deployments using unusual ACLs, network filesystems, containers, or backups must verify them separately.
+- Provider credentials and client API keys are plaintext in SQLite. Dashboard API responses sanitize many secrets, and dashboard list endpoints do not reveal full client keys, but at-rest encryption is not implemented.
+
+Backups and diagnostic exports inherit the same confidentiality requirements as the live DB.
+
+## Multi-process limitations
+
+SQLite WAL and the five-second busy timeout reduce lock failures; they do not make all application state multi-process safe.
+
+- `usageDaily` is a read/merge/full-row replace guarded only by a process-local mutex. Concurrent processes can lose daily aggregate updates.
+- `UpdateSettingsRaw` performs read/merge/write without a compare-and-swap or cross-process lock. Concurrent settings changes can overwrite each other.
+- Proxy-pool round-robin state and several provider/session/quota caches are process-local. Two active instances can choose different rotations or independently refresh/hold state.
+- `upstream_leases` provides cross-process coordination only for registered lease scopes.
+
+The supported operational model is one active 9router-go process writing a database. Co-running upstream Next.js and Go against the same DB may be useful for migration/testing, but it is not a conflict-free HA topology.
+
+## Operator checklist
+
+Before production use or an upgrade:
+
+- [ ] Confirm the exact DB path with `DATA_DIR`/`DB_PATH`; do not assume `9router.db`.
+- [ ] Run the upstream v0.5.85 application once (or apply a reviewed upstream migration) to create/migrate the core schema; a Go-only blank DB is insufficient.
+- [ ] Verify required tables and columns, especially the two optional connection-metadata columns used by Go success paths.
+- [ ] Check `_meta` separately if the DB came from upstream; Go does not interpret it.
+- [ ] Verify `journal_mode=wal`, a healthy write/read test, and sufficient free space for WAL growth.
+- [ ] Confirm the DB parent is private and the main file/WAL/SHM are not exposed to other OS users or public volumes.
+- [ ] Decide whether prompt/response content retention is acceptable for `requestDetails`.
+- [ ] Run only one active Go writer unless a specific multi-process workflow has been tested.
+- [ ] Take a consistent full SQLite backup before schema changes, upgrades, imports, or destructive operations.
+- [ ] Store dashboard JSON exports and physical backups as secrets; test restore in a separate directory.
+- [ ] Do not treat the dashboard JSON export as a full usage/telemetry/lease backup.
+- [ ] If sharing with upstream Next.js, stop writers during migration/import and verify its additive sync does not remove required data.
+
+## Source references
+
+- Go DB open and PRAGMAs: `internal/db/client.go`
+- Production startup and lease creation: `internal/app/database.go`
+- Lease implementation: `internal/db/leases.go`
+- Usage and diagnostics persistence: `internal/db/usage.go`
+- Dashboard configuration backup: `internal/handlers/dashboard/settings.go`
+- Upstream schema/migrations/backup: `src/lib/db/schema.js`, `src/lib/db/migrate.js`, `src/lib/db/backup.js`

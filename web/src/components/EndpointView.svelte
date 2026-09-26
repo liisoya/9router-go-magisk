@@ -399,6 +399,7 @@
       const res = await api.createApiKey({ name: newKeyName.trim() })
       if (res.key) {
         newlyCreatedKey = res.key
+        localStorage.setItem('9router_key', res.key)
         newKeyName = ''
         isCreateKeyOpen = false
         await loadStatus()

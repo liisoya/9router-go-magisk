@@ -32,7 +32,7 @@ describe('providers & media separation', () => {
   it('retrieves providers by kind', () => {
     const ttsProviders = getProvidersByKind('tts')
     assert.ok(ttsProviders.some((p) => p.id === 'elevenlabs'))
-    assert.ok(ttsProviders.some((p) => p.id === 'coqui'))
+    assert.ok(ttsProviders.some((p) => p.id === 'fish-audio'))
     assert.ok(ttsProviders.some((p) => p.id === 'openai'))
     assert.strictEqual(ttsProviders.some((p) => p.id === 'anthropic'), false)
 

@@ -11,6 +11,8 @@ import (
 
 	"9router/proxy/internal/handlers/chat"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/models"
+	"9router/proxy/internal/providers"
 	"9router/proxy/internal/translator"
 	"9router/proxy/internal/usagetracker"
 )
@@ -43,11 +45,44 @@ func (h *MediaHandler) handleAntigravityImage(w http.ResponseWriter, r *http.Req
 	}
 	cleanModel, aspectRatio := translator.ParseImageConfig(model)
 
-	conn, connData, err := h.ChatH.GetBestConnection("antigravity", modelInfo.ConnectionID, nil, cleanModel)
-	if err != nil || conn == nil {
-		return fmt.Errorf("no active connection for antigravity: %w", err)
+	// Upstream parity (imageGeneration.js credential loop): rotate through every
+	// active account. The UI-pinned x-connection-id travels via modelInfo only
+	// on the combo path; the direct path resolves it from the request header.
+	pinned := modelInfo.ConnectionID
+	if pinned == "" {
+		pinned = imagePinnedConnectionID(r)
 	}
+	usePinned := pinned != ""
+	excludeIDs := []string{}
+	var lastErr error
+	for {
+		conn, connData, err := h.ChatH.GetBestConnection("antigravity", pinned, excludeIDs, cleanModel)
+		if err != nil || conn == nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return fmt.Errorf("no active connection for antigravity: %w", err)
+		}
+		if attemptErr := h.tryAntigravityImageConn(w, r, body, prompt, cleanModel, aspectRatio, conn, connData); attemptErr == nil {
+			return nil
+		} else {
+			lastErr = attemptErr
+		}
+		if usePinned {
+			return lastErr
+		}
+		excludeIDs = append(excludeIDs, conn.ID)
+	}
+}
 
+func imagePinnedConnectionID(r *http.Request) string {
+	if id := r.Header.Get("x-connection-id"); id != "" {
+		return id
+	}
+	return r.Header.Get("x-provider-connection-id")
+}
+
+func (h *MediaHandler) tryAntigravityImageConn(w http.ResponseWriter, r *http.Request, body []byte, prompt, cleanModel, aspectRatio string, conn *models.ProviderConnection, connData *chat.ConnectionData) error {
 	apiKey := chat.ExtractAPIKey(connData)
 	if apiKey == "" {
 		return fmt.Errorf("no API key found for antigravity connection %s", conn.ID)
@@ -98,11 +133,16 @@ func (h *MediaHandler) handleAntigravityImage(w http.ResponseWriter, r *http.Req
 		return fmt.Errorf("get antigravity config: %w", err)
 	}
 
+	var imageReq struct {
+		Image  string   `json:"image"`
+		Images []string `json:"images"`
+	}
+	_ = json.Unmarshal(body, &imageReq)
 	var base64Input string
-	if reqBody.Image != "" {
-		base64Input = reqBody.Image
-	} else if len(reqBody.Images) > 0 {
-		base64Input = reqBody.Images[0]
+	if imageReq.Image != "" {
+		base64Input = imageReq.Image
+	} else if len(imageReq.Images) > 0 {
+		base64Input = imageReq.Images[0]
 	}
 
 	wrappedReq, err := translator.WrapAntigravityImageRequest(prompt, base64Input, projectID, cleanModel, aspectRatio)
@@ -140,7 +180,25 @@ func (h *MediaHandler) handleAntigravityImage(w http.ResponseWriter, r *http.Req
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Warn("media", "antigravity image error", "status", resp.StatusCode, "body", string(respBody[:min(500, len(respBody))]))
+		errText := string(respBody[:min(500, len(respBody))])
+		log.Warn("media", "antigravity image error", "status", resp.StatusCode, "body", errText)
+		if h.Repo != nil {
+			backoff := h.Repo.GetConnectionBackoffLevel(conn.ID)
+			if classification := providers.ClassifyError(resp.StatusCode, errText, backoff); classification.ShouldFallback {
+				cooldownSec := max(classification.CooldownMs/1000, 1)
+				_ = h.Repo.LockConnectionModel(conn.ID, cleanModel, cooldownSec, classification.NewBackoffLevel)
+				var rawModel string
+				var rawBody struct {
+					Model string `json:"model"`
+				}
+				if err := json.Unmarshal(body, &rawBody); err == nil {
+					rawModel = rawBody.Model
+				}
+				if rawModel != "" && rawModel != cleanModel {
+					_ = h.Repo.LockConnectionModel(conn.ID, rawModel, cooldownSec, classification.NewBackoffLevel)
+				}
+			}
+		}
 		return fmt.Errorf("antigravity image failed with status %d: %s", resp.StatusCode, string(respBody[:min(300, len(respBody))]))
 	}
 
@@ -153,13 +211,14 @@ func (h *MediaHandler) handleAntigravityImage(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(formatted)
 
-	if conn != nil {
+	if h.Repo != nil {
 		h.Repo.UpdateConnectionLastUsed(conn.ID)
+		_ = h.Repo.UnlockConnectionModel(conn.ID, cleanModel)
 	}
 	usagetracker.GetTracker().PushRecent(usagetracker.RecentRequest{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Model:     modelInfo.Model,
-		Provider:  modelInfo.Provider,
+		Model:     cleanModel,
+		Provider:  "antigravity",
 		Status:    "ok",
 	}, h.Repo)
 	return nil

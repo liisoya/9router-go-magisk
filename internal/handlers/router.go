@@ -1,12 +1,6 @@
 package handlers
 
 import (
-	json "encoding/json/v2"
-	"github.com/go-chi/chi/v5"
-	"net/http"
-	"net/http/pprof"
-	"os"
-	"strings"
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlers/chat"
@@ -18,6 +12,12 @@ import (
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/middleware"
 	"9router/proxy/web"
+	json "encoding/json/v2"
+	"github.com/go-chi/chi/v5"
+	"net/http"
+	"net/http/pprof"
+	"os"
+	"strings"
 )
 
 // Re-export TokenSaverConfig for root compatibility
@@ -42,11 +42,8 @@ func SetupRoutes(r interface {
 	oauthH := oauth.NewOAuthHandler(repo)
 
 	dashH := dashboard.NewDashboardHandler(repo)
-	// Chat, Version & Models Domain
-	r.Get("/version", chatH.HandleVersion)
-	r.Get("/api/version", chatH.HandleVersion)
-	r.Get("/api/version/status", chatH.HandleVersionStatus)
-	r.Get("/api/version/check", chatH.HandleCheckUpdate)
+	// Chat & Models Domain (no version here: the four version GETs are
+	// public in SetupServerRouter, upstream PUBLIC_API_PATHS parity).
 	r.Get("/changelog", chatH.HandleChangelog)
 	r.Get("/api/changelog", chatH.HandleChangelog)
 	r.Get("/models", chatH.HandleModels)
@@ -62,10 +59,6 @@ func SetupRoutes(r interface {
 	r.Get("/api/models/catalog-sync", chatH.HandleCatalogSyncStatus)
 	r.Post("/api/models/catalog-sync", chatH.HandleCatalogSyncTrigger)
 	r.Get("/api/models", chatH.HandleModels)
-	// /api/models/test moved to the dashboard-auth group (see SetupRouter): it is
-	// the built-in dashboard's model test endpoint (Node parity: internal
-	// pingModelByKind), it must not require membership in the apiKeys table —
-	// a backup import wipes that table and 401'd every model test.
 	r.Post("/chat/completions", chatH.HandleChatCompletions)
 	r.Post("/messages", chatH.HandleMessages)
 	r.Post("/messages/count_tokens", chatH.HandleCountTokens)
@@ -124,15 +117,6 @@ func SetupRoutes(r interface {
 	r.HandleFunc("/api/headroom/proxy/*", headroomH.HandleHeadroomProxy)
 	// OAuth & Import Tokens Domain
 	mountOAuthRoutes(r, oauthH)
-	r.Get("/api/oauth/antigravity/callback", oauthH.HandleAntigravityCallback)
-	r.Post("/api/oauth/antigravity/callback", oauthH.HandleAntigravityCallback)
-
-	// Live Console Logs Domain (dashboard "Monitor Console Log")
-	r.Get("/translator/console-logs", HandleConsoleLogsGet)
-	r.Delete("/translator/console-logs", HandleConsoleLogsDelete)
-	r.Get("/translator/console-logs/stream", HandleConsoleLogsStream)
-	r.Get("/translator/console-logs/level", HandleConsoleLogsLevelGet)
-	r.Put("/translator/console-logs/level", HandleConsoleLogsLevelPut)
 
 	// Usage Real-time SSE Stream & Stats Domain (dashboard topology animation + recent requests)
 	r.Get("/usage/stream", HandleUsageStream(repo))
@@ -151,7 +135,7 @@ func SetupRoutes(r interface {
 // RequireDashboardAuth by the server router, which lets a cookie-authenticated
 // browser session, a valid API key or the local CLI token through when login is
 // enabled (upstream dashboardGuard).
-func SetupDashboardRoutes(r chi.Router, repo *db.Repo) {
+func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) {
 	dashH := dashboard.NewDashboardHandler(repo)
 	ssoH := sso.NewHandler(repo)
 
@@ -203,6 +187,7 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo) {
 	r.Post("/api/models/custom", dashH.HandleSaveCustomModel)
 	r.Delete("/api/models/custom/{key}", dashH.HandleDeleteCustomModel)
 	r.Get("/api/models/disabled", dashH.HandleGetDisabledModels)
+	r.Post("/api/models/test", chatH.HandleTestModel)
 	mediaH := media.NewMediaHandler(repo, nil, nil)
 	r.Get("/api/media-providers/tts/voices", mediaH.HandleAudioVoices)
 	r.Get("/api/media-providers/tts/inworld/voices", mediaH.HandleAudioVoices)
@@ -255,6 +240,19 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo) {
 	mountOAuthRoutes(r, oauthH)
 }
 
+// SetupConsoleLogRoutes mounts operational log APIs behind a full dashboard
+// session or local CLI token. Client API keys are intentionally rejected.
+func SetupConsoleLogRoutes(r chi.Router, repo *db.Repo) {
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireConsoleLogAuth(repo))
+		r.Get("/api/translator/console-logs", HandleConsoleLogsGet)
+		r.Delete("/api/translator/console-logs", HandleConsoleLogsDelete)
+		r.Get("/api/translator/console-logs/stream", HandleConsoleLogsStream)
+		r.Get("/api/translator/console-logs/level", HandleConsoleLogsLevelGet)
+		r.Put("/api/translator/console-logs/level", HandleConsoleLogsLevelPut)
+	})
+}
+
 func mountOAuthRoutes(r interface {
 	Get(pattern string, handlerFn http.HandlerFunc)
 	Post(pattern string, handlerFn http.HandlerFunc)
@@ -269,6 +267,7 @@ func mountOAuthRoutes(r interface {
 	r.Get("/api/oauth/freebuff/session", oauthH.HandleFreebuffSessionStatus)
 	r.Post("/api/oauth/freebuff/session/switch", oauthH.HandleFreebuffSessionSwitch)
 	r.Get("/api/oauth/antigravity/authorize", oauthH.HandleAntigravityAuthorize)
+	r.Post("/api/oauth/antigravity/exchange", oauthH.HandleAntigravityExchange)
 	r.Get("/api/oauth/cline/authorize", oauthH.HandleClineAuthorize)
 	r.Post("/api/oauth/cline/exchange", oauthH.HandleClineExchange)
 	r.Get("/api/oauth/pkce/authorize", oauthH.HandlePKCEAuthorize)
@@ -301,14 +300,20 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
 		w.Write([]byte(`{"status":"ok"}`))
 	})
+	// Version info is public (upstream PUBLIC_API_PATHS): the Sidebar polls
+	// /api/version on every dashboard page including /login, before any
+	// session or API key exists.
+	versionH := chat.NewChatHandler(repo, ts)
+	r.Get("/version", versionH.HandleVersion)
+	r.Get("/api/version", versionH.HandleVersion)
+	r.Get("/api/version/status", versionH.HandleVersionStatus)
+	r.Get("/api/version/check", versionH.HandleCheckUpdate)
 	// Embedded Native Dashboard SPA
 	webH := web.Handler()
 	oauthH := oauth.NewOAuthHandler(repo)
-	// Public OAuth landing page & callbacks: providers redirect browsers here after login
-	// (/callback?code=... or /api/oauth/antigravity/callback?code=...). No API key — browsers carry none.
+	// Public OAuth landing page: providers redirect browsers here after login.
+	// Browsers carry neither the dashboard session nor the engine API key.
 	r.Get("/callback", oauthH.HandleCallbackPage)
-	r.Get("/api/oauth/antigravity/callback", oauthH.HandleAntigravityCallback)
-	r.Post("/api/oauth/antigravity/callback", oauthH.HandleAntigravityCallback)
 	r.Get("/", webH.ServeHTTP)
 	r.Get("/login", webH.ServeHTTP)
 	// Dashboard pages require the login session when requireLogin is on; the
@@ -336,6 +341,9 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	r.HandleFunc("/favicon.ico", webH.ServeHTTP)
 	r.HandleFunc("/favicon.svg", webH.ServeHTTP)
 	r.HandleFunc("/icons.svg", webH.ServeHTTP)
+	r.HandleFunc("/sw.js", webH.ServeHTTP)
+	r.HandleFunc("/manifest.webmanifest", webH.ServeHTTP)
+	r.HandleFunc("/manifest.json", webH.ServeHTTP)
 	r.HandleFunc("/api/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if r.Method != http.MethodHead {
@@ -394,15 +402,8 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	// reachable with a valid API key or the local CLI token (upstream parity).
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireDashboardAuth(repo))
-		SetupDashboardRoutes(r, repo)
+		SetupDashboardRoutes(r, repo, versionH)
 	})
 
-	// Model testing: the built-in dashboard tests models through its admin
-	// session (Node parity: internal pingModelByKind endpoint); CLI keeps using
-	// API keys. Under RequireApiKey this 401'd every model test after a backup
-	// import wiped the apiKeys table — the dashboard must not depend on it.
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.RequireDashboardAuth(repo))
-		r.Post("/api/models/test", chat.NewChatHandler(repo, ts).HandleTestModel)
-	})
+	SetupConsoleLogRoutes(r, repo)
 }

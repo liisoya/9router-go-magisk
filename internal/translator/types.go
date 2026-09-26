@@ -38,6 +38,7 @@ type OpenAIUsage struct {
 	CacheCreationInputTokens int                      `json:"cache_creation_input_tokens"`
 	PromptTokensDetails      *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails  *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	PromptCacheIncluded      bool                     `json:"-"`
 }
 
 type PromptTokensDetails struct {
@@ -184,13 +185,14 @@ type ClaudeThinking struct {
 type ClaudeOutputConfig struct {
 	Effort string `json:"effort,omitempty"`
 }
+
 // ClaudeRequest is the full Claude /v1/messages request body.
 type ClaudeRequest struct {
-	Model       string          `json:"model"`
-	Messages    []ClaudeMessage `json:"messages"`
-	System      jsontext.Value  `json:"system,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	MaxTokens   *int            `json:"max_tokens,omitempty"`
+	Model        string              `json:"model"`
+	Messages     []ClaudeMessage     `json:"messages"`
+	System       jsontext.Value      `json:"system,omitempty"`
+	Temperature  *float64            `json:"temperature,omitempty"`
+	MaxTokens    *int                `json:"max_tokens,omitempty"`
 	Thinking     *ClaudeThinking     `json:"thinking,omitempty"`
 	OutputConfig *ClaudeOutputConfig `json:"output_config,omitempty"`
 	Tools        []ClaudeTool        `json:"tools,omitempty"`

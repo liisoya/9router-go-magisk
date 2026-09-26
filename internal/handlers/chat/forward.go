@@ -100,12 +100,25 @@ func (h *ChatHandler) handleStreamResponse(ctx context.Context, w http.ResponseW
 	flusher := internalproxy.WriteSSEHeaders(hw)
 
 	if !translate {
-		return internalproxy.SSECopy(hw, upstream, flusher, func(chunk []byte) {
+		err := internalproxy.ScanStream(upstream, func(payload []byte) {
 			if metrics.TTFT == 0 {
 				metrics.TTFT = time.Since(startTime).Milliseconds()
 			}
-			metrics.ResponseBuf.Write(chunk)
+			frame := append([]byte("data: "), payload...)
+			frame = append(frame, '\n', '\n')
+			metrics.ResponseBuf.Write(frame)
+			_, _ = hw.Write(frame)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if usage := translator.ParseResponseUsage(payload); usage != nil {
+				translator.SetUsage(ctx, usage)
+			}
 		})
+		if err != nil {
+			return err
+		}
+		return nil
 	}
 
 	sessionKey := fmt.Sprintf("stream-%d", time.Now().UnixNano())

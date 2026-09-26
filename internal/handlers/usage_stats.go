@@ -1,15 +1,15 @@
 package handlers
 
 import (
+	"9router/proxy/internal/db"
+	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/translator"
+	"9router/proxy/internal/usagetracker"
 	json "encoding/json/v2"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-
-	"9router/proxy/internal/db"
-	"9router/proxy/internal/handlerutil"
-	"9router/proxy/internal/usagetracker"
 )
 
 type ProviderUsageItem struct {
@@ -71,20 +71,20 @@ type EndpointUsageItem struct {
 }
 
 type UsageStatsResponse struct {
-	TotalRequests         int                           `json:"totalRequests"`
-	TotalPromptTokens     int64                         `json:"totalPromptTokens"`
-	TotalCompletionTokens int64                         `json:"totalCompletionTokens"`
-	TotalCachedTokens     int64                         `json:"totalCachedTokens"`
-	TotalCost             float64                       `json:"totalCost"`
-	ByProvider            map[string]ProviderUsageItem  `json:"byProvider"`
-	ByModel               map[string]ModelUsageItem     `json:"byModel"`
-	ByAccount             map[string]AccountUsageItem   `json:"byAccount"`
-	ByApiKey              map[string]ApiKeyUsageItem    `json:"byApiKey"`
-	ByEndpoint            map[string]EndpointUsageItem  `json:"byEndpoint"`
-	ActiveRequests        []usagetracker.ActiveRequest  `json:"activeRequests"`
-	RecentRequests        []usagetracker.RecentRequest  `json:"recentRequests"`
-	ErrorProvider         string                        `json:"errorProvider"`
-	Pending               usagetracker.PendingState     `json:"pending"`
+	TotalRequests         int                          `json:"totalRequests"`
+	TotalPromptTokens     int64                        `json:"totalPromptTokens"`
+	TotalCompletionTokens int64                        `json:"totalCompletionTokens"`
+	TotalCachedTokens     int64                        `json:"totalCachedTokens"`
+	TotalCost             float64                      `json:"totalCost"`
+	ByProvider            map[string]ProviderUsageItem `json:"byProvider"`
+	ByModel               map[string]ModelUsageItem    `json:"byModel"`
+	ByAccount             map[string]AccountUsageItem  `json:"byAccount"`
+	ByApiKey              map[string]ApiKeyUsageItem   `json:"byApiKey"`
+	ByEndpoint            map[string]EndpointUsageItem `json:"byEndpoint"`
+	ActiveRequests        []usagetracker.ActiveRequest `json:"activeRequests"`
+	RecentRequests        []usagetracker.RecentRequest `json:"recentRequests"`
+	ErrorProvider         string                       `json:"errorProvider"`
+	Pending               usagetracker.PendingState    `json:"pending"`
 }
 
 // HandleUsageStats returns aggregated stats for the specified period ("today", "24h", "7d", "30d", "60d").
@@ -253,13 +253,9 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 			histRows, err := repo.GetUsageHistorySince(cutoff)
 			if err == nil {
 				for _, r := range histRows {
-					var tokensMap map[string]any
-					if r.Tokens != "" {
-						_ = json.Unmarshal([]byte(r.Tokens), &tokensMap)
-					}
 					promptTok := int64(r.PromptTokens)
 					complTok := int64(r.CompletionTokens)
-					cachedTok := getMapInt64(tokensMap, "cached_tokens")
+					cachedTok := int64(translator.CachedTokensFromJSON([]byte(r.Tokens)))
 					entryCost := r.Cost
 
 					provName := r.Provider
@@ -354,12 +350,7 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 				}
 				seen[k] = true
 
-				var tokensMap map[string]any
-				if rh.Tokens != "" {
-					_ = json.Unmarshal([]byte(rh.Tokens), &tokensMap)
-				}
-				cachedTok := int(getMapInt64(tokensMap, "cached_tokens"))
-
+				cachedTok := int(translator.CachedTokensFromJSON([]byte(rh.Tokens)))
 				status := "ok"
 				if rh.Status != "success" && rh.Status != "ok" && rh.Status != "" {
 					status = rh.Status
@@ -409,10 +400,17 @@ func HandleRequestDetails(repo *db.Repo) http.HandlerFunc {
 
 		details := make([]any, 0, len(rawJSONs))
 		for _, raw := range rawJSONs {
-			var item any
-			if err := json.Unmarshal([]byte(raw), &item); err == nil {
-				details = append(details, item)
+			var item map[string]any
+			if err := json.Unmarshal([]byte(raw), &item); err != nil {
+				continue
 			}
+			if tokens, ok := item["tokens"].(map[string]any); ok {
+				rawTokens, marshalErr := json.Marshal(tokens)
+				if marshalErr == nil {
+					tokens["cached_tokens"] = float64(translator.CachedTokensFromJSON(rawTokens))
+				}
+			}
+			details = append(details, item)
 		}
 
 		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{

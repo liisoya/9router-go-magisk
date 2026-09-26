@@ -36,6 +36,19 @@
       } catch {
         /* BroadcastChannel tidak tersedia — dashboard pakai polling/storage event */
       }
+      if (window.opener) {
+        const origins = [window.location.origin, 'http://localhost:1455']
+        for (const origin of origins) {
+          try {
+            window.opener.postMessage({
+              type: 'oauth_callback',
+              data: { ...payload, error: '', errorDescription: '' },
+            }, origin)
+          } catch {
+            /* opener may have navigated away */
+          }
+        }
+      }
       // Tab ini dibuka via window.open → boleh tutup sendiri.
       countdown = 3
       const timer = setInterval(() => {

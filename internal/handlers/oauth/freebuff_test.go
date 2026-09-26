@@ -5,6 +5,7 @@ import (
 	json "encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -483,9 +484,11 @@ func TestHandleFreebuffPoll_UserWithoutToken_StaysPending(t *testing.T) {
 
 func TestHandleAntigravityAuthorize(t *testing.T) {
 	handler := NewOAuthHandler(nil)
-
-	// JSON response
-	req := httptest.NewRequest(http.MethodGet, "/api/oauth/antigravity/authorize?state=custom_state_123", nil)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/oauth/antigravity/authorize?state=custom_state_123&redirect_uri=http%3A%2F%2Flocalhost%3A20130%2Fcallback",
+		nil,
+	)
 	rec := httptest.NewRecorder()
 	handler.HandleAntigravityAuthorize(rec, req)
 
@@ -493,70 +496,109 @@ func TestHandleAntigravityAuthorize(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	var res map[string]any
+	var res struct {
+		URL         string `json:"url"`
+		RedirectURI string `json:"redirectUri"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
 		t.Fatalf("failed to unmarshal JSON: %v", err)
 	}
 
-	authURL, ok := res["url"].(string)
-	if !ok || authURL == "" {
-		t.Fatalf("missing or empty url in response")
+	authURL, err := url.Parse(res.URL)
+	if err != nil {
+		t.Fatalf("parse auth URL: %v", err)
+	}
+	if authURL.Host != "accounts.google.com" {
+		t.Errorf("auth URL host = %q", authURL.Host)
+	}
+	if got := authURL.Query().Get("redirect_uri"); got != "http://localhost:20130/callback" {
+		t.Errorf("redirect_uri = %q", got)
+	}
+	if res.RedirectURI != "http://localhost:20130/callback" {
+		t.Errorf("response redirectUri = %q", res.RedirectURI)
+	}
+	if authURL.Query().Get("state") != "custom_state_123" {
+		t.Errorf("state = %q", authURL.Query().Get("state"))
+	}
+	if authURL.Query().Get("access_type") != "offline" {
+		t.Errorf("access_type = %q", authURL.Query().Get("access_type"))
+	}
+	expectedScopes := []string{
+		"https://www.googleapis.com/auth/cloud-platform",
+		"https://www.googleapis.com/auth/userinfo.email",
+		"https://www.googleapis.com/auth/userinfo.profile",
+		"https://www.googleapis.com/auth/cclog",
+		"https://www.googleapis.com/auth/experimentsandconfigs",
+	}
+	if got := authURL.Query().Get("scope"); got != strings.Join(expectedScopes, " ") {
+		t.Errorf("scope = %q", got)
 	}
 
-	if !strings.Contains(authURL, "accounts.google.com") {
-		t.Errorf("auth URL should contain accounts.google.com, got %s", authURL)
-	}
-	if !strings.Contains(authURL, "client_id=") {
-		t.Errorf("auth URL should contain client_id, got %s", authURL)
-	}
-	if !strings.Contains(authURL, "scope=") {
-		t.Errorf("auth URL should contain scope, got %s", authURL)
-	}
-	if !strings.Contains(authURL, "custom_state_123") {
-		t.Errorf("auth URL should contain state custom_state_123, got %s", authURL)
-	}
-	if !strings.Contains(authURL, "access_type=offline") {
-		t.Errorf("auth URL should request offline access, got %s", authURL)
-	}
-
-	// Redirect response
 	reqRedirect := httptest.NewRequest(http.MethodGet, "/api/oauth/antigravity/authorize?redirect=true", nil)
 	recRedirect := httptest.NewRecorder()
 	handler.HandleAntigravityAuthorize(recRedirect, reqRedirect)
-
 	if recRedirect.Code != http.StatusFound {
 		t.Errorf("expected 302 redirect, got %d", recRedirect.Code)
 	}
-	location := recRedirect.Header().Get("Location")
-	if !strings.Contains(location, "accounts.google.com") {
-		t.Errorf("expected redirect to accounts.google.com, got %s", location)
+}
+
+func TestGetAntigravityRedirectURI(t *testing.T) {
+	tests := []struct {
+		name     string
+		request  *http.Request
+		expected string
+	}{
+		{
+			name:     "explicit loopback callback wins",
+			request:  httptest.NewRequest(http.MethodGet, "/?redirect_uri=http%3A%2F%2Flocalhost%3A20130%2Fcallback", nil),
+			expected: "http://localhost:20130/callback",
+		},
+		{
+			name:     "invalid callback falls back upstream default",
+			request:  httptest.NewRequest(http.MethodGet, "/", nil),
+			expected: "http://localhost:8080/callback",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := getAntigravityRedirectURI(test.request); got != test.expected {
+				t.Fatalf("getAntigravityRedirectURI() = %q, expected %q", got, test.expected)
+			}
+		})
 	}
 }
 
-func TestHandleAntigravityCallback_Errors(t *testing.T) {
+func TestHandleAntigravityExchangeErrors(t *testing.T) {
 	handler := NewOAuthHandler(nil)
 
-	// Missing code
-	req := httptest.NewRequest(http.MethodGet, "/api/oauth/antigravity/callback", nil)
-	rec := httptest.NewRecorder()
-	handler.HandleAntigravityCallback(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing code, got %d", rec.Code)
+	tests := []struct {
+		name         string
+		method       string
+		body         string
+		expectedCode int
+	}{
+		{name: "method must be post", method: http.MethodGet, expectedCode: http.StatusMethodNotAllowed},
+		{name: "missing code", method: http.MethodPost, body: `{"redirectUri":"http://localhost:20130/callback"}`, expectedCode: http.StatusBadRequest},
+		{name: "missing redirect uri", method: http.MethodPost, body: `{"code":"code-123"}`, expectedCode: http.StatusBadRequest},
+		{name: "invalid redirect uri", method: http.MethodPost, body: `{"code":"code-123","redirectUri":"javascript:alert(1)"}`, expectedCode: http.StatusBadRequest},
 	}
-
-	// Error param from Google
-	reqErr := httptest.NewRequest(http.MethodGet, "/api/oauth/antigravity/callback?error=access_denied&error_description=user+declined", nil)
-	recErr := httptest.NewRecorder()
-	handler.HandleAntigravityCallback(recErr, reqErr)
-	if recErr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for oauth error, got %d", recErr.Code)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(test.method, "/api/oauth/antigravity/exchange", strings.NewReader(test.body))
+			rec := httptest.NewRecorder()
+			handler.HandleAntigravityExchange(rec, req)
+			if rec.Code != test.expectedCode {
+				t.Fatalf("status = %d, expected %d: %s", rec.Code, test.expectedCode, rec.Body.String())
+			}
+		})
 	}
 }
 
-func TestHandleAntigravityCallback_Success(t *testing.T) {
+func TestHandleAntigravityExchangeSuccess(t *testing.T) {
 	database, cleanup := setupTestDB(t)
 	defer cleanup()
 	repo := db.NewRepo(database)
+	const redirectURI = "http://localhost:20130/callback"
 
 	mockGoogleServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/token" {
@@ -568,9 +610,15 @@ func TestHandleAntigravityCallback_Success(t *testing.T) {
 			return
 		}
 
-		_ = r.ParseForm()
-		code := r.Form.Get("code")
-		if code != "valid_google_code_123" {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		if got := r.Form.Get("redirect_uri"); got != redirectURI {
+			http.Error(w, "redirect mismatch", http.StatusBadRequest)
+			return
+		}
+		if got := r.Form.Get("code"); got != "valid_google_code_123" {
 			http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
 			return
 		}
@@ -598,33 +646,39 @@ func TestHandleAntigravityCallback_Success(t *testing.T) {
 	defer func() { googleOAuthTokenURL = oldTokenURL }()
 
 	handler := NewOAuthHandler(repo)
-	req := httptest.NewRequest(http.MethodGet, "/api/oauth/antigravity/callback?code=valid_google_code_123", nil)
+	body := `{"code":"valid_google_code_123","redirectUri":"` + redirectURI + `","state":"state-123"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/oauth/antigravity/exchange", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 
-	handler.HandleAntigravityCallback(rec, req)
+	handler.HandleAntigravityExchange(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var res map[string]any
+	var res struct {
+		Success    bool `json:"success"`
+		Connection struct {
+			ID       string `json:"id"`
+			Provider string `json:"provider"`
+			Email    string `json:"email"`
+		} `json:"connection"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
 		t.Fatalf("failed to parse response JSON: %v", err)
 	}
-
-	if res["status"] != "authorized" {
-		t.Errorf("expected status 'authorized', got %v", res["status"])
+	if !res.Success {
+		t.Error("expected success response")
 	}
-	if res["provider"] != "antigravity" {
-		t.Errorf("expected provider 'antigravity', got %v", res["provider"])
+	if res.Connection.Provider != "antigravity" {
+		t.Errorf("expected provider 'antigravity', got %q", res.Connection.Provider)
 	}
-	if res["email"] != "antigravity-user@gmail.com" {
-		t.Errorf("expected email 'antigravity-user@gmail.com', got %v", res["email"])
+	if res.Connection.Email != "antigravity-user@gmail.com" {
+		t.Errorf("expected email 'antigravity-user@gmail.com', got %q", res.Connection.Email)
 	}
-
-	connID, ok := res["connectionId"].(string)
-	if !ok || connID == "" {
-		t.Fatalf("missing connectionId in response: %v", res)
+	connID := res.Connection.ID
+	if connID == "" {
+		t.Fatalf("missing connection id in response: %s", rec.Body.String())
 	}
 
 	// Verify DB record

@@ -77,6 +77,14 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 		if conn == nil {
 			return nil, nil, fmt.Errorf("connection %s not found", connectionID)
 		}
+		// A pinned connection must still belong to the requested provider:
+		// callers forward x-connection-id straight from the client, so without
+		// this check a connection for provider A could serve provider B and
+		// send A's credentials to B's upstream (upstream getProviderCredentials
+		// always scopes the lookup to the provider).
+		if conn.Provider != provider {
+			return nil, nil, fmt.Errorf("connection %s belongs to provider %s, not %s", connectionID, conn.Provider, provider)
+		}
 	} else {
 		connections, queryErr := h.Repo.GetProviderConnections(provider, true)
 		if queryErr != nil {

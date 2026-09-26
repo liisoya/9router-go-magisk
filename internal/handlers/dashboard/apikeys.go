@@ -8,14 +8,24 @@ import (
 
 	"github.com/google/uuid"
 
+	"9router/proxy/internal/auth"
 	"9router/proxy/internal/handlerutil"
 )
 
 // HandleGetApiKeys handles GET /api/keys.
-// Returns key metadata with secrets masked: full key values are shown once at
-// creation time only. This endpoint is reachable with a low-privilege client
-// API key, so listing full secrets here lets one leaked key dump them all.
+// Upstream parity: the Next dashboard returns full key values here and the
+// media example cards use them directly as Bearer credentials for Run.
+// Full secrets are returned only to fully authenticated dashboard callers
+// (login session cookie, local CLI token, or requireLogin=false which
+// upstream treats as authenticated). Callers presenting only a low-privilege
+// client API key get masked display values: unlike upstream (which rejects
+// them at the guard), this router lets API keys through dashboard auth for
+// CLI compat, so listing full secrets there would let one leaked key dump
+// them all. Creation still returns the full value once.
 func (h *DashboardHandler) HandleGetApiKeys(w http.ResponseWriter, r *http.Request) {
+	reveal := auth.SessionValid(r) ||
+		auth.ValidCLIToken(r.Header.Get(auth.CLITokenHeader)) ||
+		!auth.RequireLogin(h.Repo)
 	keys, err := h.Repo.GetApiKeys()
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
@@ -26,8 +36,12 @@ func (h *DashboardHandler) HandleGetApiKeys(w http.ResponseWriter, r *http.Reque
 		if k == nil {
 			continue
 		}
+		key := k.Key
+		if !reveal {
+			key = maskClientKey(key)
+		}
 		sanitized = append(sanitized, map[string]any{
-			"id": k.ID, "key": maskClientKey(k.Key), "name": k.Name,
+			"id": k.ID, "key": key, "name": k.Name,
 			"machineId": k.MachineID, "isActive": k.IsActive, "createdAt": k.CreatedAt,
 		})
 	}

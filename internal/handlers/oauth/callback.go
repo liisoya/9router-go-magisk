@@ -69,6 +69,15 @@ ol li{margin:4px 0}
   function handOff(payload){
     try{localStorage.setItem(CB_KEY,JSON.stringify(payload))}catch(e){}
     try{var bc=new BroadcastChannel(CB_CHANNEL);bc.postMessage(payload);bc.close()}catch(e){}
+    try{
+      if(window.opener){
+        var callbackData={code:code,state:state,error:err||"",errorDescription:errDesc||""};
+        var origins=[location.origin,"http://localhost:1455"];
+        origins.forEach(function(origin){
+          try{window.opener.postMessage({type:"oauth_callback",data:callbackData},origin)}catch(e){}
+        });
+      }
+    }catch(e){}
   }
   if(err){
     setStatus(false,"Login gagal: "+err+(errDesc?" — "+errDesc:""));

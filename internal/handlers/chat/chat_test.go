@@ -13,6 +13,7 @@ import (
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/dbtest"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/translator"
 	"os"
 )
 
@@ -1419,5 +1420,41 @@ func TestAccountFallback_PinnedConnection_NotFound(t *testing.T) {
 	err := handler.handleAccountFallback(context.Background(), rec, "deepseek", "deepseek-chat", "nonexistent-conn", body, false, false, "/v1/chat/completions")
 	if err == nil {
 		t.Fatal("expected error for nonexistent pinned connection, got nil")
+	}
+}
+
+func TestLogFailurePersistsSingleSanitizedError(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	handler := NewChatHandler(repo)
+	handler.LogFailure(
+		&UsageLogInfo{Provider: "openai", Model: "gpt-test", ConnectionID: "conn-1", APIKey: "sk-secret", Endpoint: "/v1/chat/completions"},
+		&translator.OpenAIUsage{PromptTokens: 7, CachedTokens: 3},
+		&upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(`{"error":{"message":"rate limited"}}`)},
+		42,
+		[]byte(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`),
+		nil,
+	)
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM requestDetails WHERE status = 'error'`).Scan(&count); err != nil {
+		t.Fatalf("count details: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("failure details = %d, want 1", count)
+	}
+	var data string
+	if err := database.QueryRow(`SELECT data FROM requestDetails WHERE status = 'error'`).Scan(&data); err != nil {
+		t.Fatalf("read detail: %v", err)
+	}
+	if strings.Contains(data, "sk-secret") || !strings.Contains(data, "rate limited") {
+		t.Fatalf("unsafe or unhelpful failure detail: %s", data)
+	}
+	var status string
+	if err := database.QueryRow(`SELECT status FROM requestDetails`).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "error" {
+		t.Fatalf("status = %q, want error", status)
 	}
 }

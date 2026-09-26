@@ -15,6 +15,8 @@ import (
 
 	"9router/proxy/internal/handlers/chat"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/models"
+	"9router/proxy/internal/providers"
 	"9router/proxy/internal/translator"
 	"9router/proxy/internal/usagetracker"
 )
@@ -94,18 +96,34 @@ func (h *MediaHandler) handleAntigravitySTT(w http.ResponseWriter, r *http.Reque
 	}
 	model = translator.NormalizeAntigravityModel(model)
 
-	preferredConnID := r.Header.Get("x-connection-id")
-	if preferredConnID == "" {
-		preferredConnID = r.Header.Get("x-provider-connection-id")
+	pinned := modelInfo.ConnectionID
+	if pinned == "" {
+		pinned = imagePinnedConnectionID(r)
 	}
-	if preferredConnID == "" {
-		preferredConnID = modelInfo.ConnectionID
+	usePinned := pinned != ""
+	excludeIDs := []string{}
+	var lastErr error
+	for {
+		conn, connData, err := h.ChatH.GetBestConnection("antigravity", pinned, excludeIDs, model)
+		if err != nil || conn == nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return fmt.Errorf("no active connection for antigravity: %w", err)
+		}
+		if attemptErr := h.tryAntigravitySTTConn(w, r, body, fileBytes, filename, model, language, prompt, responseFormat, conn, connData); attemptErr == nil {
+			return nil
+		} else {
+			lastErr = attemptErr
+		}
+		if usePinned {
+			return lastErr
+		}
+		excludeIDs = append(excludeIDs, conn.ID)
 	}
-	conn, connData, err := h.ChatH.GetBestConnection("antigravity", preferredConnID, nil, model)
-	if err != nil || conn == nil {
-		return fmt.Errorf("no active connection for antigravity: %w", err)
-	}
+}
 
+func (h *MediaHandler) tryAntigravitySTTConn(w http.ResponseWriter, r *http.Request, body, fileBytes []byte, filename, model, language, prompt, responseFormat string, conn *models.ProviderConnection, connData *chat.ConnectionData) error {
 	apiKey := chat.ExtractAPIKey(connData)
 	if apiKey == "" {
 		return fmt.Errorf("no API key found for antigravity connection %s", conn.ID)
@@ -217,7 +235,15 @@ func (h *MediaHandler) handleAntigravitySTT(w http.ResponseWriter, r *http.Reque
 		return fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		log.Warn("media", "antigravity stt upstream error", "status", resp.StatusCode, "body", string(respBody[:min(500, len(respBody))]))
+		errText := string(respBody[:min(500, len(respBody))])
+		log.Warn("media", "antigravity stt upstream error", "status", resp.StatusCode, "body", errText)
+		if h.Repo != nil {
+			backoff := h.Repo.GetConnectionBackoffLevel(conn.ID)
+			if classification := providers.ClassifyError(resp.StatusCode, errText, backoff); classification.ShouldFallback {
+				cooldownSec := max(classification.CooldownMs/1000, 1)
+				_ = h.Repo.LockConnectionModel(conn.ID, model, cooldownSec, classification.NewBackoffLevel)
+			}
+		}
 		return fmt.Errorf("antigravity stt failed with status %d: %s", resp.StatusCode, string(respBody[:min(300, len(respBody))]))
 	}
 
@@ -253,13 +279,14 @@ func (h *MediaHandler) handleAntigravitySTT(w http.ResponseWriter, r *http.Reque
 		_, _ = w.Write(respJSON)
 	}
 
-	if conn != nil {
+	if h.Repo != nil {
 		h.Repo.UpdateConnectionLastUsed(conn.ID)
+		_ = h.Repo.UnlockConnectionModel(conn.ID, model)
 	}
 	usagetracker.GetTracker().PushRecent(usagetracker.RecentRequest{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Model:     modelInfo.Model,
-		Provider:  modelInfo.Provider,
+		Model:     model,
+		Provider:  "antigravity",
 		Status:    "ok",
 	}, h.Repo)
 	return nil

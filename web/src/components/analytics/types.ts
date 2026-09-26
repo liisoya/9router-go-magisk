@@ -23,6 +23,7 @@ export interface RecentRequestItem {
   model?: string
   provider?: string
   promptTokens?: number
+  cachedTokens?: number
   completionTokens?: number
   timestamp?: string
 }
@@ -48,6 +49,7 @@ export interface RequestDetailItem {
     prompt_tokens?: number
     completion_tokens?: number
     cached_tokens?: number
+    cache_read_input_tokens?: number
   }
   [key: string]: unknown
 }
@@ -86,6 +88,10 @@ export const TABLE_OPTIONS: { value: TableView; label: string }[] = [
 
 export function fmt(n?: number): string {
   return (n || 0).toLocaleString()
+}
+
+export function cachedTokensFor(detail: RequestDetailItem): number {
+  return detail.tokens?.cached_tokens ?? detail.tokens?.cache_read_input_tokens ?? 0
 }
 
 export function fmtCost(n?: number): string {

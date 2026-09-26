@@ -39,3 +39,25 @@ func TestClassifyError_Status503Fallback(t *testing.T) {
 		t.Errorf("expected backoff level 1 for 503, got %d", cls.NewBackoffLevel)
 	}
 }
+
+func TestClassifyError_RequestScoped4xxNoFallback(t *testing.T) {
+	// Upstream parity (checkFallbackError): request-scoped 4xx must not lock the account.
+	for _, status := range []int{http.StatusBadRequest, http.StatusMethodNotAllowed, http.StatusConflict, http.StatusUnprocessableEntity} {
+		cls := ClassifyError(status, "bad request body", 0)
+		if cls.ShouldFallback {
+			t.Errorf("expected no fallback for %d, got %+v", status, cls)
+		}
+	}
+	// Account-scoped statuses keep fallback.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests} {
+		cls := ClassifyError(status, "", 0)
+		if !cls.ShouldFallback {
+			t.Errorf("expected fallback for %d, got %+v", status, cls)
+		}
+	}
+	// 404 keeps its rule (upstream NON_RETRIABLE + status rule).
+	cls := ClassifyError(http.StatusNotFound, "", 0)
+	if !cls.ShouldFallback {
+		t.Errorf("expected fallback for 404, got %+v", cls)
+	}
+}

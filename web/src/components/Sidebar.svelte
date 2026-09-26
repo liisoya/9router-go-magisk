@@ -155,17 +155,17 @@
 </script>
 
 <aside
-  class="flex w-72 flex-col border-r border-border-subtle bg-sidebar backdrop-blur-xl transition-colors duration-300 min-h-full flex-shrink-0 select-none z-30"
+  class="flex h-full max-h-screen w-72 flex-col overflow-hidden border-r border-border-subtle bg-sidebar backdrop-blur-xl transition-colors duration-300 flex-shrink-0 select-none z-30"
 >
   <!-- Window control / traffic lights -->
-  <div class="flex items-center gap-2 px-6 pt-5 pb-2">
+  <div class="flex items-center gap-2 px-6 pt-5 pb-2 shrink-0">
     <div class="w-3 h-3 rounded-full bg-[#FF5F56]"></div>
     <div class="w-3 h-3 rounded-full bg-[#FFBD2E]"></div>
     <div class="w-3 h-3 rounded-full bg-[#27C93F]"></div>
   </div>
 
   <!-- Brand header: 9router-go with official favicon.svg logo -->
-  <div class="px-6 py-4 flex flex-col gap-2">
+  <div class="px-6 py-4 flex flex-col gap-2 shrink-0">
     <a
       href={TAB_ROUTES.endpoint}
       onclick={(e) => handleNav('endpoint', e)}
@@ -223,7 +223,7 @@
   </div>
 
   <!-- Navigation -->
-  <nav class="flex-1 px-4 py-2 space-y-0.5 overflow-y-auto custom-scrollbar">
+  <nav class="flex-1 min-h-0 px-4 py-2 space-y-0.5 overflow-y-auto custom-scrollbar">
     <!-- 1-7 Main navigation links -->
     {#each mainNavLinks as item (item.tab)}
       {@const active = isLinkActive(item.tab)}
@@ -337,7 +337,7 @@
   </nav>
 
   <!-- Bottom connection summary -->
-  <div class="p-4 border-t border-border-subtle">
+  <div class="p-4 border-t border-border-subtle shrink-0">
     <div
       class="p-2.5 rounded-[10px] bg-surface border border-border-subtle flex items-center justify-between"
     >

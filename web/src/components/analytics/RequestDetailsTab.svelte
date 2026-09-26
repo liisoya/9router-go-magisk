@@ -4,7 +4,7 @@
   import Button from '../../lib/ui/Button.svelte'
   import Card from '../../lib/ui/Card.svelte'
   import { getIconPath } from '../connections/types'
-  import { fmt, timeAgo, type RequestDetailItem } from './types'
+  import { cachedTokensFor, fmt, timeAgo, type RequestDetailItem } from './types'
 
   interface Props {
     details?: RequestDetailItem[]
@@ -25,6 +25,7 @@
   }: Props = $props()
 
   let selectedDetail = $state<RequestDetailItem | null>(null)
+
 </script>
 
 <Card padding="none" class="overflow-hidden border border-border">
@@ -119,7 +120,7 @@
                 {fmt(item.tokens?.completion_tokens)}
               </td>
               <td class="py-3 px-4 text-right text-info">
-                {fmt(item.tokens?.cached_tokens)}
+                {fmt(cachedTokensFor(item))}
               </td>
               <td class="py-3 px-4 text-right">
                 <button
@@ -210,6 +211,12 @@
             <div class="text-text-muted text-[10px] uppercase font-bold">Output Tokens</div>
             <div class="font-code text-sm font-bold text-success mt-1">
               {fmt(selectedDetail.tokens?.completion_tokens)}
+            </div>
+          </div>
+          <div class="p-3 rounded-lg bg-surface-2 border border-border col-span-2 sm:col-span-4">
+            <div class="text-text-muted text-[10px] uppercase font-bold">Cached Tokens</div>
+            <div class="font-code text-sm font-bold text-info mt-1">
+              {fmt(cachedTokensFor(selectedDetail))}
             </div>
           </div>
         </div>

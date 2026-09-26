@@ -1,8 +1,8 @@
 package middleware
 
 import (
-	"context"
 	"9router/proxy/internal/log"
+	"context"
 	"net/http"
 	"strings"
 
@@ -17,22 +17,12 @@ type ContextKey string
 // ApiKeyContextKey is the context key for the authenticated API key object.
 const ApiKeyContextKey ContextKey = "apiKey"
 
-// IsPublicApiKeyPath reports whether the path is exempt from API key requirements (e.g. OAuth callbacks).
-func IsPublicApiKeyPath(path string) bool {
-	return path == "/api/oauth/antigravity/callback"
-}
-
 // RequireApiKey creates a middleware handler that authenticates requests using client API keys.
 // It checks the Authorization header (Bearer <key>) and the query parameter `key`.
 // Valid keys are retrieved from the SQLite database; inactive or disabled keys are rejected with 401.
 func RequireApiKey(repo *db.Repo) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if IsPublicApiKeyPath(r.URL.Path) {
-				next.ServeHTTP(w, r)
-				return
-			}
-
 			apiKeyString := ExtractApiKey(r)
 			if apiKeyString == "" {
 				handlerutil.WriteJSONError(w, http.StatusUnauthorized, "Authentication required. Provide an API key via Authorization: Bearer <key> header or ?key=<key> query parameter.")

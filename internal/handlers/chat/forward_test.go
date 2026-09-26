@@ -14,6 +14,7 @@ import (
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/translator"
 )
 
 // setupHandlerForForward wires a ChatHandler to a temp DB (no connections needed for forward tests).
@@ -247,7 +248,7 @@ func TestHandleStreamResponse_NonTranslate(t *testing.T) {
 	h, cleanup := setupHandlerForForward(t)
 	defer cleanup()
 
-	upstream := strings.NewReader("chunk1chunk2")
+	upstream := strings.NewReader("data: chunk1\n\ndata: chunk2\n\n")
 	rec := httptest.NewRecorder()
 	metrics := &streamMetrics{}
 	if err := h.handleStreamResponse(context.Background(), rec, upstream, false, time.Now(), metrics); err != nil {
@@ -256,14 +257,12 @@ func TestHandleStreamResponse_NonTranslate(t *testing.T) {
 	if rec.Header().Get(constants.HeaderContentType) != constants.ContentTypeEventStream {
 		t.Errorf("expected event-stream content type, got %q", rec.Header().Get(constants.HeaderContentType))
 	}
-	if rec.Body.String() != "chunk1chunk2" {
+	if rec.Body.String() != "data: chunk1\n\ndata: chunk2\n\n" {
 		t.Errorf("expected raw passthrough, got %q", rec.Body.String())
 	}
-	if metrics.ResponseBuf.String() != "chunk1chunk2" {
+	if metrics.ResponseBuf.String() != "data: chunk1\n\ndata: chunk2\n\n" {
 		t.Errorf("expected accumulated response buffer, got %q", metrics.ResponseBuf.String())
 	}
-	// ttft recorded on first chunk (may be 0 on a sub-millisecond fast path, so
-	// assert the callback executed rather than the exact value).
 	if metrics.TTFT < 0 {
 		t.Errorf("expected non-negative ttft, got %d", metrics.TTFT)
 	}
@@ -289,7 +288,7 @@ func TestForwardRequest_StreamSetsAcceptHeader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.HeaderContentType, constants.ContentTypeEventStream)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: ok\n\ndata: [DONE]\n\n"))
+		w.Write([]byte("data: {\"id\":\"x\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":6}}}\n\ndata: [DONE]\n\n"))
 	}))
 	defer srv.Close()
 
@@ -302,16 +301,21 @@ func TestForwardRequest_StreamSetsAcceptHeader(t *testing.T) {
 		StaticHeaders: map[string]string{},
 	}
 
-	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"model": "x", "messages": []any{}})
-	err := h.forwardRequest(context.Background(), rec, cfg, "k", body, true, false, &streamMetrics{})
+	ctx := translator.WithUsageCapture(context.Background())
+	rec := httptest.NewRecorder()
+	err := h.forwardRequest(ctx, rec, cfg, "k", body, true, false, &streamMetrics{})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("stream request: %v", err)
+	}
+	usage := translator.GetAndClearUsage(ctx)
+	if usage == nil || usage.PromptTokens != 9 || usage.GetCachedTokens() != 6 {
+		t.Fatalf("terminal usage not captured: %+v", usage)
 	}
 	if rec.Header().Get(constants.HeaderContentType) != constants.ContentTypeEventStream {
 		t.Errorf("expected event-stream content type on client response, got %q", rec.Header().Get(constants.HeaderContentType))
 	}
-	if !strings.HasPrefix(rec.Body.String(), "data: ok\n\n") {
+	if !strings.HasPrefix(rec.Body.String(), "data: {") {
 		t.Errorf("expected streamed body, got %q", rec.Body.String())
 	}
 }

@@ -1,11 +1,10 @@
 package middleware
 
 import (
-	"net/http"
-
 	"9router/proxy/internal/auth"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
+	"net/http"
 )
 
 // RequireDashboardAuth gates the dashboard REST API behind the login session
@@ -32,9 +31,21 @@ func IsAlwaysProtectedPath(path string) bool {
 	}
 }
 
-// IsPublicDashboardPath reports whether the path is exempt from dashboard login requirements.
-func IsPublicDashboardPath(path string) bool {
-	return path == "/api/oauth/antigravity/callback"
+// RequireConsoleLogAuth gates console-log APIs to dashboard sessions or the
+// local CLI token. Engine client API keys never grant access to operational
+// logs, and requireLogin=false still allows an unauthenticated local dashboard.
+func RequireConsoleLogAuth(repo *db.Repo) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !auth.RequireLogin(repo) ||
+				auth.SessionValid(r) ||
+				auth.ValidCLIToken(r.Header.Get(auth.CLITokenHeader)) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "Unauthorized: dashboard session required")
+		})
+	}
 }
 
 // RequireAdminAuth ensures that only requests with a valid dashboard session (auth_token cookie)
@@ -46,7 +57,7 @@ func RequireAdminAuth() func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			handlerutil.WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "Unauthorized: admin session or CLI token required"})
+			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "Unauthorized: admin session or CLI token required")
 		})
 	}
 }
@@ -54,10 +65,6 @@ func RequireAdminAuth() func(http.Handler) http.Handler {
 func RequireDashboardAuth(repo *db.Repo) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if IsPublicDashboardPath(r.URL.Path) {
-				next.ServeHTTP(w, r)
-				return
-			}
 			// Always-protected routes strictly require valid session cookie or CLI token (upstream parity).
 			// API keys and requireLogin=false are forbidden here.
 			if IsAlwaysProtectedPath(r.URL.Path) {
@@ -65,7 +72,7 @@ func RequireDashboardAuth(repo *db.Repo) func(http.Handler) http.Handler {
 					next.ServeHTTP(w, r)
 					return
 				}
-				handlerutil.WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "Unauthorized: admin session or CLI token required"})
+				handlerutil.WriteJSONError(w, http.StatusUnauthorized, "Unauthorized: admin session or CLI token required")
 				return
 			}
 
@@ -83,7 +90,7 @@ func RequireDashboardAuth(repo *db.Repo) func(http.Handler) http.Handler {
 					return
 				}
 			}
-			handlerutil.WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "Unauthorized"})
+			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "Unauthorized: dashboard session required")
 		})
 	}
 }

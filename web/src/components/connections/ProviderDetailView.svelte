@@ -21,6 +21,7 @@
     OAUTH_CHANNEL,
     readCallback,
     savePending,
+    oauthLoopbackCallbackURL,
   } from '../../lib/oauth-handoff'
   import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
   import { notifyCustomModelsChanged } from '../../lib/customModels'
@@ -295,6 +296,11 @@
     return dashboardCallbackURL(dashboardOrigin())
   }
 
+  function antigravityCallback(): string {
+    if (typeof window === 'undefined') return 'http://localhost:8080/callback'
+    return oauthLoopbackCallbackURL(window.location.port, window.location.protocol === 'https:')
+  }
+
   function rememberPending(p: { state: string; verifier?: string; redirectUri?: string; extra?: Record<string, string> }) {
     if (typeof window === 'undefined') return
     try {
@@ -373,6 +379,31 @@
     }
     window.addEventListener('storage', onStorage)
     const onWindowMessage = (e: MessageEvent) => {
+      const trustedOrigin = e.origin === window.location.origin || e.origin === new URL(antigravityCallback()).origin
+      if (!trustedOrigin) return
+      if (e.data?.type === 'oauth_callback' && e.data?.data) {
+        const data = e.data.data as {
+          code?: string
+          token?: string
+          state?: string
+          error?: string
+          errorDescription?: string
+        }
+        if (data.error) {
+          oauthError = `Login gagal: ${data.error}${data.errorDescription ? ` — ${data.errorDescription}` : ''}`
+          return
+        }
+        const raw = data.code || data.token || ''
+        if (raw) {
+          try {
+            writeCallback(window.localStorage, { state: data.state || '', raw, error: '', errorDesc: '' })
+          } catch {
+            /* storage blocked */
+          }
+          consumeOAuthCallback()
+        }
+        return
+      }
       if (e.data?.type === '9router-oauth-success' && e.data?.provider === 'antigravity') {
         showOAuthModal = false
         onRefresh()
@@ -1157,12 +1188,13 @@
     callbackInput = ''
     copiedAuthUrl = false
     try {
-      const res = await api.getAntigravityAuthorizeUrl()
-      oauthAuthUrl = res.url || res.redirectUrl
+      const redirectUri = antigravityCallback()
+      const res = await api.getAntigravityAuthorizeUrl(redirectUri)
+      oauthAuthUrl = res.authUrl || res.url || res.redirectUrl
       if (res.state) {
         rememberPending({
           state: res.state,
-          redirectUri: `${dashboardOrigin()}/api/oauth/antigravity/callback`,
+          redirectUri: res.redirectUri || redirectUri,
         })
       }
       showOAuthModal = true
@@ -1654,9 +1686,16 @@
         }
         return
       }
-      const res = await api.antigravityCallback(code, redirectUri)
+      let pending = null
+      try {
+        pending = matchPending(loadPendings(window.localStorage), providerId, '')
+      } catch {
+        pending = null
+      }
+      const exchangeRedirectUri = redirectUri || pending?.redirectUri || antigravityCallback()
+      const res = await api.antigravityExchange(code, exchangeRedirectUri, pending?.state)
       if (res?.success === false || (res as { error?: string })?.error) {
-        oauthError = (res as { error?: string })?.error || res?.error || 'Authorization failed'
+        oauthError = (res as { error?: string })?.error || 'Authorization failed'
       } else {
         showOAuthModal = false
         onRefresh()
@@ -3292,9 +3331,7 @@
             bind:value={callbackInput}
             placeholder={providerId === 'freebuff'
               ? 'https://freebuff.com/onboard?auth_code=... atau paste authToken'
-              : providerId === 'antigravity'
-                ? `${dashboardOrigin()}/api/oauth/antigravity/callback?state=...&code=...`
-                : `${dashboardOrigin()}/callback?code=...`}
+              : `${dashboardCallback()}?code=...&state=...`}
             class="w-full px-2.5 py-1.5 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary font-mono"
           />
           <p class="text-[11px] text-text-muted mt-1">

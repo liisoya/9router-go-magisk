@@ -20,7 +20,7 @@ var BackoffConfig = struct {
 	MaxMs    int
 	MaxLevel int
 }{
-	BaseMs:   2000,       // 2 seconds base
+	BaseMs:   2000,          // 2 seconds base
 	MaxMs:    5 * 60 * 1000, // 5 minutes cap
 	MaxLevel: 15,
 }
@@ -30,25 +30,25 @@ const TransientCooldownMs = 30 * 1000 // 30 seconds
 
 // cooldown durations (ms) used by ERROR_RULES
 const (
-	cooldownLong  = 2 * 60 * 1000  // 2 minutes
-	cooldownShort = 5 * 1000       // 5 seconds
+	cooldownLong  = 2 * 60 * 1000 // 2 minutes
+	cooldownShort = 5 * 1000      // 5 seconds
 )
 
 // ErrorRules is the ordered list of error classification rules, matching Next.js ERROR_RULES.
 // Checked top-to-bottom: text rules first (by order), then status rules.
 var ErrorRules = []ErrorRule{
 	// --- Text-based rules (checked first, order = priority) ---
-	{Text: "no credentials",              CooldownMs: cooldownLong},
-	{Text: "request not allowed",         CooldownMs: cooldownShort},
-	{Text: "improperly formed request",   CooldownMs: cooldownLong},
-	{Text: "rate limit",                  Backoff: true},
-	{Text: "too many requests",           Backoff: true},
-	{Text: "quota exceeded",              Backoff: true},
-	{Text: "capacity",                    Backoff: true},
-	{Text: "overloaded",                  Backoff: true},
-	{Text: "resource_exhausted",          Backoff: true},
+	{Text: "no credentials", CooldownMs: cooldownLong},
+	{Text: "request not allowed", CooldownMs: cooldownShort},
+	{Text: "improperly formed request", CooldownMs: cooldownLong},
+	{Text: "rate limit", Backoff: true},
+	{Text: "too many requests", Backoff: true},
+	{Text: "quota exceeded", Backoff: true},
+	{Text: "capacity", Backoff: true},
+	{Text: "overloaded", Backoff: true},
+	{Text: "resource_exhausted", Backoff: true},
 	{Text: "resource has been exhausted", Backoff: true},
-	{Text: "model_capacity_exhausted",    Backoff: true},
+	{Text: "model_capacity_exhausted", Backoff: true},
 	{Text: "server is temporarily unavailable", Backoff: true},
 
 	// --- Status-based rules (fallback when text doesn't match) ---
@@ -61,6 +61,7 @@ var ErrorRules = []ErrorRule{
 	{Status: 503, Backoff: true},
 	{Status: 504, Backoff: true},
 }
+
 // GetQuotaCooldown calculates exponential backoff cooldown for rate limits.
 // Level 0 → 2s, Level 1 → 2s, Level 2 → 4s, Level 3 → 8s, ... capped at MaxMs.
 func GetQuotaCooldown(backoffLevel int) int {
@@ -119,6 +120,13 @@ func ClassifyError(statusCode int, errorText string, backoffLevel int) ErrorClas
 				NewBackoffLevel: backoffLevel,
 			}
 		}
+	}
+	// Upstream parity (open-sse/services/accountFallback.js checkFallbackError):
+	// request-scoped 4xx that match no rule say nothing about the credential,
+	// so the account must not be cooled down. Account-scoped statuses keep
+	// their rules above (401/402/403/404/429 + quota/capacity text rules).
+	if statusCode >= 400 && statusCode < 500 && statusCode != 401 && statusCode != 402 && statusCode != 403 && statusCode != 429 {
+		return ErrorClassification{ShouldFallback: false}
 	}
 
 	// Default: transient cooldown for any unmatched error

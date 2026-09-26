@@ -14,6 +14,8 @@ import (
 	"9router/proxy/internal/handlers/chat"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/models"
+	"9router/proxy/internal/providers"
 	"9router/proxy/internal/usagetracker"
 )
 
@@ -125,15 +127,38 @@ func (h *MediaHandler) forwardNvidiaTTS(w http.ResponseWriter, r *http.Request, 
 	if preferredConnID == "" {
 		preferredConnID = modelInfo.ConnectionID
 	}
-	conn, connData, err := h.ChatH.GetBestConnection("nvidia", preferredConnID, nil, modelInfo.Model)
-	if err != nil || connData == nil {
-		handlerutil.WriteJSONError(w, http.StatusNotFound, "no active connections for provider: nvidia")
-		return
+	// Upstream parity (tts.js credential loop): rotate accounts, lock failures.
+	usePinned := preferredConnID != ""
+	excludeIDs := []string{}
+	var lastStatus int
+	var lastMsg string
+	for {
+		conn, connData, err := h.ChatH.GetBestConnection("nvidia", preferredConnID, excludeIDs, modelInfo.Model)
+		if err != nil || connData == nil {
+			if lastMsg != "" {
+				handlerutil.WriteJSONError(w, lastStatus, lastMsg)
+				return
+			}
+			handlerutil.WriteJSONError(w, http.StatusNotFound, "no active connections for provider: nvidia")
+			return
+		}
+		status, msg, done := h.tryNvidiaTTSConn(w, r, body, modelInfo, input, voice, respFmt, conn, connData)
+		if done {
+			return
+		}
+		lastStatus, lastMsg = status, msg
+		if usePinned {
+			handlerutil.WriteJSONError(w, status, msg)
+			return
+		}
+		excludeIDs = append(excludeIDs, conn.ID)
 	}
+}
+
+func (h *MediaHandler) tryNvidiaTTSConn(w http.ResponseWriter, r *http.Request, body []byte, modelInfo *chat.ModelInfo, input, voice, respFmt string, conn *models.ProviderConnection, connData *chat.ConnectionData) (int, string, bool) {
 	apiKey := chat.ExtractAPIKey(connData)
 	if apiKey == "" {
-		handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no API key found for nvidia")
-		return
+		return http.StatusUnauthorized, "no API key found for nvidia", false
 	}
 
 	modelID := strings.Split(modelInfo.Model, "/")[0]
@@ -159,11 +184,10 @@ func (h *MediaHandler) forwardNvidiaTTS(w http.ResponseWriter, r *http.Request, 
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
-	targetURL := "https://integrate.api.nvidia.com/v1/audio/speech"
+	targetURL := nvidiaTTSURL(h.ChatH, connData)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(payloadBytes))
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to create nvidia tts request")
-		return
+		return http.StatusInternalServerError, "failed to create nvidia tts request", false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -171,27 +195,50 @@ func (h *MediaHandler) forwardNvidiaTTS(w http.ResponseWriter, r *http.Request, 
 	client := h.ChatH.GetClientForConnection(connData)
 	resp, err := client.Do(req)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, "nvidia tts request failed: "+err.Error())
-		return
+		return http.StatusBadGateway, "nvidia tts request failed: " + err.Error(), true
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errBytes, _ := io.ReadAll(resp.Body)
-		log.Warn("media", "nvidia tts upstream error", "status", resp.StatusCode, "body", string(errBytes))
-		handlerutil.WriteJSONError(w, resp.StatusCode, string(errBytes))
-		return
+		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		errText := strings.TrimSpace(string(errBytes))
+		if errText == "" {
+			errText = resp.Status
+		}
+		log.Warn("media", "nvidia tts upstream error", "status", resp.StatusCode, "body", errText)
+		if h.Repo != nil {
+			backoff := h.Repo.GetConnectionBackoffLevel(conn.ID)
+			if classification := providers.ClassifyError(resp.StatusCode, errText, backoff); classification.ShouldFallback {
+				cooldownSec := max(classification.CooldownMs/1000, 1)
+				_ = h.Repo.LockConnectionModel(conn.ID, modelInfo.Model, cooldownSec, classification.NewBackoffLevel)
+				return resp.StatusCode, errText, true
+			}
+		}
+		return resp.StatusCode, errText, false
 	}
 
 	audioBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to read nvidia audio response")
-		return
+		return http.StatusBadGateway, "failed to read nvidia audio response", true
 	}
 
-	if conn != nil {
+	if h.Repo != nil {
 		h.Repo.UpdateConnectionLastUsed(conn.ID)
+		_ = h.Repo.UnlockConnectionModel(conn.ID, modelInfo.Model)
 	}
 	h.trackTTSUsage("nvidia", modelInfo.Model)
 	h.writeTTSResponse(w, r, respFmt, audioBytes, "audio/wav", "wav")
+	return 0, "", true
+}
+
+// nvidiaTTSURL honors provider/connection base URL overrides (upstream
+// genericFormats nvidia uses cfg.baseUrl); falls back to NVIDIA NIM cloud.
+func nvidiaTTSURL(chatH *chat.ChatHandler, connData *chat.ConnectionData) string {
+	if connData != nil && connData.BaseURL != "" {
+		return strings.TrimRight(connData.BaseURL, "/")
+	}
+	if cfg, err := chatH.GetProviderConfig("nvidia", connData); err == nil && cfg != nil && cfg.BaseURL != "" {
+		return strings.TrimRight(cfg.BaseURL, "/")
+	}
+	return "https://integrate.api.nvidia.com/v1/audio/speech"
 }

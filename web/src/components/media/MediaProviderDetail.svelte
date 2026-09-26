@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { api, type APIKey, type ProviderConnection, type Settings } from '../../api/client'
+  import { api, getStoredAPIKey, type APIKey, type ProviderConnection, type Settings } from '../../api/client'
   import { getModelKind, getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
   import { parseCustomModelsResponse, subscribeCustomModelsChanged } from '../../lib/customModels'
   import type { ProviderCatalogItem } from '../../lib/providers'
@@ -378,18 +378,13 @@
   $effect(() => {
     if (apiKeys && apiKeys.length > 0) {
       const active = apiKeys.find((k) => k.isActive === 1 && k.key)
-      if (active) activeApiKey = active.key
+      if (active?.key) activeApiKey = active.key
     }
   })
 
-  onMount(async () => {
-    if (!activeApiKey) {
-      try {
-        const keys = await api.getApiKeys()
-        const active = keys.find((k) => k.isActive === 1 && k.key)
-        if (active) activeApiKey = active.key
-      } catch {}
-    }
+  onMount(() => {
+    const stored = getStoredAPIKey()
+    if (stored) activeApiKey = stored
   })
 
   let exampleEndpoint = $derived.by(() => {
@@ -499,7 +494,7 @@
         res = await fetch('/v1/images/generations', {
           method: 'POST',
           headers,
-          body: JSON.stringify({ model: qualifiedModel, prompt: exampleInput, n: 1, size: 'auto', quality: 'auto', output_format: 'png' })
+          body: JSON.stringify({ model: qualifiedModel, prompt: exampleInput, n: 1, size: 'auto', quality: 'auto', background: 'auto', image_detail: 'high', output_format: 'png' })
         })
       } else if (kind === 'tts') {
         headers['Content-Type'] = 'application/json'

@@ -870,7 +870,10 @@ func (h *ChatHandler) comboLockRetryable(excludeIDs *[]string, connID, provider,
 	}
 	currentLevel := h.Repo.GetConnectionBackoffLevel(connID)
 	cls := providers.ClassifyError(ue.StatusCode, extractErrorText(ue.Body), currentLevel)
-	if cls.CooldownMs <= 0 {
+	// Upstream parity (checkFallbackError): request-scoped 4xx (400/404/405/
+	// 409/422/...) must not lock the account — the bug is in the request,
+	// not the credential. Only lock when ShouldFallback is set.
+	if !cls.ShouldFallback || cls.CooldownMs <= 0 {
 		return
 	}
 	cooldownSec := int((cls.CooldownMs + 999) / 1000)

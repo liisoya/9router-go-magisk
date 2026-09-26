@@ -106,6 +106,57 @@ func TestRequireDashboardAuth(t *testing.T) {
 	}
 }
 
+func TestRequireConsoleLogAuth(t *testing.T) {
+	t.Setenv("JWT_SECRET", "middleware-test-secret")
+	t.Setenv("DATA_DIR", t.TempDir())
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	gate := RequireConsoleLogAuth(repo)(okHandler())
+
+	anonymous := httptest.NewRequest(http.MethodGet, "/api/translator/console-logs", nil)
+	rec := httptest.NewRecorder()
+	gate.ServeHTTP(rec, anonymous)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous console status = %d", rec.Code)
+	}
+
+	keyReq := httptest.NewRequest(http.MethodGet, "/api/translator/console-logs", nil)
+	keyReq.Header.Set("Authorization", "Bearer valid-token")
+	rec = httptest.NewRecorder()
+	gate.ServeHTTP(rec, keyReq)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("client API key console status = %d", rec.Code)
+	}
+
+	token, err := auth.Sign(auth.Secret(), time.Now())
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	cookieReq := httptest.NewRequest(http.MethodGet, "/api/translator/console-logs", nil)
+	cookieReq.AddCookie(&http.Cookie{Name: auth.CookieName, Value: token})
+	rec = httptest.NewRecorder()
+	gate.ServeHTTP(rec, cookieReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dashboard session console status = %d", rec.Code)
+	}
+}
+
+func TestRequireDashboardAuth_ProtectsAntigravityExchange(t *testing.T) {
+	t.Setenv("JWT_SECRET", "middleware-test-secret")
+	t.Setenv("DATA_DIR", t.TempDir())
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	gate := RequireDashboardAuth(repo)(okHandler())
+	req := httptest.NewRequest(http.MethodPost, "/api/oauth/antigravity/exchange", nil)
+	rec := httptest.NewRecorder()
+	gate.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, expected 401", rec.Code)
+	}
+}
+
 func TestRequireAdminAuth(t *testing.T) {
 	t.Setenv("JWT_SECRET", "middleware-test-secret")
 	t.Setenv("DATA_DIR", t.TempDir())

@@ -426,8 +426,9 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		TTFTMs:     metrics.TTFT,
 	})
 
+	usage := translator.GetAndClearUsage(ctx)
 	if completed {
-		// Clear any existing model lock on success (matching Next.js clearAccountError)
+		// Clear any existing model lock on success (matching Next.js clearAccountError).
 		lockKey := canonicalLockModel(provider, model)
 		if unlockErr := h.Repo.UnlockConnectionModel(connectionID, lockKey); unlockErr != nil {
 			log.Warn("fallback", "unlock failed", "provider", provider, "model", lockKey, "error", unlockErr)
@@ -435,7 +436,6 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		if lockKey != model {
 			_ = h.Repo.UnlockConnectionModel(connectionID, model)
 		}
-		usage := translator.GetAndClearUsage(ctx)
 		if usage == nil {
 			usage = &translator.OpenAIUsage{}
 		}
@@ -448,19 +448,35 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		}
 		h.logUsage(logInfo, usage, latencyMs, body, metrics)
 		fwdErr = nil
+		return nil
+	}
+
+	// Consume any terminal usage even when streaming aborts, then persist one
+	// failure row. A later fallback attempt gets its own usage holder because
+	// the outer handler installs capture once and tryForward never replaces it.
+	statusCode := 0
+	if errors.As(fwdErr, &ue) {
+		statusCode = ue.StatusCode
+	}
+	h.LogFailure(
+		&UsageLogInfo{
+			Provider:     provider,
+			Model:        model,
+			ConnectionID: connectionID,
+			Endpoint:     endpoint,
+		},
+		usage,
+		fwdErr,
+		latencyMs,
+		body,
+		metrics,
+	)
+	if isClientCanceled(ctx, fwdErr) {
+		log.Info("fallback", "client canceled request", "provider", provider, "model", model, "conn", connectionID)
+	} else if projectProbeCached(connectionID) {
+		log.Debug("fallback", "upstream skipped (cached no-project)", "provider", provider, "model", model, "conn", connectionID, "error", fwdErr)
 	} else {
-		var ue *upstreamError
-		statusCode := 0
-		if errors.As(fwdErr, &ue) {
-			statusCode = ue.StatusCode
-		}
-		if isClientCanceled(ctx, fwdErr) {
-			log.Info("fallback", "client canceled request", "provider", provider, "model", model, "conn", connectionID)
-		} else if projectProbeCached(connectionID) {
-			log.Debug("fallback", "upstream skipped (cached no-project)", "provider", provider, "model", model, "conn", connectionID, "error", fwdErr)
-		} else {
-			log.Warn("fallback", "upstream failed", "provider", provider, "model", model, "conn", connectionID, "status", statusCode, "error", fwdErr)
-		}
+		log.Warn("fallback", "upstream failed", "provider", provider, "model", model, "conn", connectionID, "status", statusCode, "error", fwdErr)
 	}
 	return fwdErr
 }

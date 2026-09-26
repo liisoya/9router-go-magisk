@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"bytes"
 	"database/sql"
+	json "encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,7 @@ import (
 
 	"9router/proxy/internal/auth"
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/dbtest"
 )
 
 func setupTestDB(t *testing.T) (*sql.DB, func()) {
@@ -26,6 +29,11 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	if err != nil {
 		os.Remove(tmpFile.Name())
 		t.Fatalf("OpenDatabase failed: %v", err)
+	}
+	if err := dbtest.CreateTables(database); err != nil {
+		database.Close()
+		os.Remove(tmpFile.Name())
+		t.Fatalf("CreateTables failed: %v", err)
 	}
 
 	cleanup := func() {
@@ -109,8 +117,7 @@ func TestSetupRoutes_OAuthEndpointsMounted(t *testing.T) {
 		{"GET", "/api/oauth/freebuff/session"},
 		{"POST", "/api/oauth/freebuff/session/switch"},
 		{"GET", "/api/oauth/antigravity/authorize"},
-		{"GET", "/api/oauth/antigravity/callback"},
-		{"POST", "/api/oauth/antigravity/callback"},
+		{"POST", "/api/oauth/antigravity/exchange"},
 	}
 
 	for _, ep := range endpoints {
@@ -157,6 +164,25 @@ func TestSetupServerRouter_PprofDisabledByDefault(t *testing.T) {
 		r.ServeHTTP(w, req)
 		if w.Code != http.StatusNotFound {
 			t.Errorf("expected %s to return 404 Not Found by default, got %d", path, w.Code)
+		}
+	}
+}
+func TestSetupServerRouter_VersionPublic(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := db.NewRepo(database)
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	// Sidebar polls /api/version on every dashboard page including /login,
+	// before any session or API key exists (upstream PUBLIC_API_PATHS).
+	for _, path := range []string{"/version", "/api/version", "/api/version/status", "/api/version/check"} {
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code == http.StatusUnauthorized || w.Code == http.StatusNotFound {
+			t.Errorf("expected %s to be public, got %d", path, w.Code)
 		}
 	}
 }
@@ -221,6 +247,16 @@ func TestSetupServerRouter_SPARoutes(t *testing.T) {
 		t.Errorf("expected GET /providers/anthropic.png to return 200, got %d", wAsset.Code)
 	}
 
+	// PWA shell files referenced by index.html must be served at root
+	for _, p := range []string{"/sw.js", "/manifest.webmanifest", "/manifest.json"} {
+		req := httptest.NewRequest("GET", p, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected GET %s to return 200, got %d", p, w.Code)
+		}
+	}
+
 	// Ensure non-existent static assets return 404
 	reqMissing := httptest.NewRequest("GET", "/assets/missing.js", nil)
 	wMissing := httptest.NewRecorder()
@@ -236,5 +272,85 @@ func TestSetupServerRouter_SPARoutes(t *testing.T) {
 	// When no API keys exist in test DB, RequireApiKey allows or denies based on settings
 	if wAPI.Code == http.StatusNotFound {
 		t.Errorf("expected /api/settings to be handled by API handler, not 404")
+	}
+}
+
+func TestConsoleLogsRoutesUseDashboardSessionGate(t *testing.T) {
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	anonymous := httptest.NewRequest(http.MethodGet, "/api/translator/console-logs", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, anonymous)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous console request status = %d", rec.Code)
+	}
+
+	var body map[string]map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if body["error"]["message"] == "" {
+		t.Fatalf("missing nested error message: %s", rec.Body.String())
+	}
+	// A valid engine key must not unlock operational logs.
+	keyReq := httptest.NewRequest(http.MethodGet, "/api/translator/console-logs", nil)
+	keyReq.Header.Set("Authorization", "Bearer test-api-key")
+	if _, err := database.Exec(`INSERT INTO apiKeys (id, key, name, isActive, createdAt) VALUES ('console-test', 'test-api-key', 'test', 1, '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, keyReq)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("engine key console request status = %d", rec.Code)
+	}
+
+	// requireLogin=false matches upstream's permissive dashboard guard.
+	if err := repo.UpdateSettingsRaw(map[string]any{"requireLogin": false}); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/translator/console-logs", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open dashboard console request status = %d", rec.Code)
+	}
+}
+
+// TestSetupServerRouter_ModelTestDashboardSession — POST /api/models/test is a
+// dashboard endpoint (upstream src/app/api/models/test/route.js behind
+// dashboardGuard): a valid login session must pass the guard, an anonymous
+// request must still get 401.
+func TestSetupServerRouter_ModelTestDashboardSession(t *testing.T) {
+	t.Setenv("JWT_SECRET", "router-test-secret")
+	database, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := db.NewRepo(database)
+	r := chi.NewRouter()
+	SetupServerRouter(r, repo, nil)
+
+	// requireLogin defaults to on when no settings row exists.
+	anon := httptest.NewRequest(http.MethodPost, "/api/models/test", bytes.NewReader([]byte(`{"model":"openai/gpt-4"}`)))
+	anon.Header.Set("Content-Type", "application/json")
+	anonRec := httptest.NewRecorder()
+	r.ServeHTTP(anonRec, anon)
+	if anonRec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous /api/models/test status = %d, want 401", anonRec.Code)
+	}
+
+	token, err := auth.Sign("router-test-secret", time.Now())
+	if err != nil {
+		t.Fatalf("sign session token: %v", err)
+	}
+	sess := httptest.NewRequest(http.MethodPost, "/api/models/test", bytes.NewReader([]byte(`{"model":"openai/gpt-4"}`)))
+	sess.Header.Set("Content-Type", "application/json")
+	sess.AddCookie(&http.Cookie{Name: auth.CookieName, Value: token})
+	sessRec := httptest.NewRecorder()
+	r.ServeHTTP(sessRec, sess)
+	if sessRec.Code != http.StatusOK {
+		t.Fatalf("session-authenticated /api/models/test status = %d, want 200 (ping outcome, not auth 401): %s", sessRec.Code, sessRec.Body.String())
 	}
 }

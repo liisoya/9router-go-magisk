@@ -1,14 +1,17 @@
-# 9Router (Next.js) vs 9router-go (Go) — Feature Comparison
+# 9router-go vs Historical Upstream 9Router
 
-> **Context:** `htdocs/9router` is the original (Next.js, dashboard + engine monolith).
-> `9router-go` is the engine swap to Go for performance (proxy/streaming/SSE).
-> This document tracks the feature gap for porting decisions.
+This document compares the current native `9router-go` v1.9.1 with the local historical upstream checkout (`decolua/9router` v0.5.85, Next.js dashboard and gateway). It is not a provider-by-provider certification.
 
-> **Sync:** `9router-go v1.8.9` is synced with `decolua/9router v0.5.69` (19 commits `v0.5.65...v0.5.69`) — 100% engine parity.
+## Version and comparison scope
 
-**Date:** 2026-09-06
+`9router-go` v1.9.1 is the current release (`VERSION`, `version.json`, `internal/updater.CurrentVersion`). The declared manifest/README sync target is upstream v0.5.85. `CHANGELOG.md` separately records two selected v0.5.86 parity ports and explicitly defers one feature; that does not make the whole v0.5.86 release synced. Treat the release declarations as a known documentation gap until they are reconciled.
 
----
+Statuses below mean:
+
+- **Current**: implemented in the Go binary and/or embedded Svelte SPA now.
+- **Parity target**: a path or behavior intentionally aligned with upstream v0.5.85; parity is scoped, not universal.
+- **Accepted limitation**: current native behavior differs intentionally or is explicitly deferred.
+- **Future work**: no current claim of completion.
 
 ## 0. 端点 parity 巡检（机器可验 · 2026-09-26 新增）
 
@@ -72,110 +75,110 @@ python3 tools/check-parity.py --write-baseline   # 烧掉缺口后收紧棘轮�
 
 ---
 
-## 1. Arsitektur
+## Architecture
 
-| | Next.js | Go |
-|---|---------|-----|
-| Routing | Next App Router + Express + `http-proxy-middleware` | chi router |
-| SSE/streaming | Node stream + `custom-server.js` (anti-XFF IP) | native, `sse_scanner` + StallReader + eventstream parser |
-| SQLite | sql.js (+ better-sqlite3 optional) | `modernc.org/sqlite` (WAL) |
-| CLI | `cli/` npm | urfave/cli (`version`, `update`, `mitm`) |
-| Auth | login/OIDC/API key | API key middleware (`RequireApiKey`) |
+| Area | Current 9router-go | Historical upstream v0.5.85 | Classification |
+|------|--------------------|-----------------------------|----------------|
+| Runtime | One Go server, default port `20130` | Next.js/Node gateway and dashboard, production port `20128` | Different architecture |
+| Dashboard | Svelte 5 + Vite SPA embedded into the Go binary (`web/`, `web/embed.go`) | Next.js App Router / React dashboard | Current native implementation, not the historical UI |
+| Routing | chi router (`internal/handlers/router.go`) | Next route handlers and Node routing stack | Different architecture |
+| Persistence | SQLite via `modernc.org/sqlite`, WAL | SQLite layer with versioned/additive migrations and backups | Shared data contract with material differences; see `DATABASE.md` |
+| Distribution | Standalone Go binary, Docker image, embedded web assets | Node/Bun application plus separate CLI launcher | Different distribution |
+| Proxy engine | Native Go routing, translation, SSE and provider executors | Node engine under `open-sse` and Next API routes | Ported/parity-tested behavior, not source-level equivalence |
 
-**Kesimpulan:** engine proxy/streaming sudah di-swap penuh ke Go dan setara Next
-pada semua format proxy (chat, messages, embeddings, images, audio, videos,
-responses, media, model listing).
+The current dashboard is served by the same binary as the gateway. It is not a browser UI for a separately running historical Next.js process.
 
----
+## Proxy and media routes
 
-## 2. Per-Endpoint — Proxy/Formats (✅ setara di Go)
+The current chi router mounts the following primary routes. Unlike upstream, most operations are root-native; the router does not register a blanket `/v1/*` middleware alias. The explicit `/v1` registrations are limited (notably models and video job paths), so clients that depend on upstream's `/api/v1/...` or `/v1/...` rewriting must use the routes actually exposed by the Go server.
 
-| Next route | Go route | Status |
-|-----------|----------|--------|
-| `v1/chat/completions` | `POST /chat/completions` | ✅ |
-| `v1/messages` | `POST /messages` | ✅ |
-| `v1/messages/count_tokens` | `POST /messages/count_tokens` | ✅ |
-| `v1/embeddings` | `POST /embeddings` | ✅ |
-| `v1/responses` | `POST /responses` | ✅ |
-| `v1/responses/compact` | `POST /responses/compact` | ✅ |
-| `v1/images/generations` | `POST /images/generations` | ✅ |
-| `v1/audio/speech` | `POST /audio/speech` | ✅ |
-| `v1/audio/transcriptions` | `POST /audio/transcriptions` | ✅ |
-| `v1/audio/voices` | `GET /audio/voices` | ✅ |
-| `v1/videos/generations\|edits\|extensions` | `POST /videos/*` | ✅ |
-| `v1/videos/{id}` | `GET /videos/{id}` | ✅ |
-| `v1/search` | `POST /search` | ✅ |
-| `v1/scrape` | `POST /scrape` | ✅ |
-| `v1/web/fetch` | `POST /web/fetch` | ✅ |
-| `v1/models` | `GET /models` | ✅ |
-| `v1/models/info` | `GET /models/info` | ✅ |
-| `v1/models/[kind]` | `GET /models/{kind}` | ✅ |
-| `v1/models/[...model]` | `GET /v1/models/*` + `GET /api/v1/models/*` | ✅ | Catch-all `cc/claude-sonnet-4-6` + kind `image/tts/web` (`#3588`) |
-| `v1beta/models` + `[...path]` | `GET /v1/models/*` (alias) | ✅ | Di-handle via `HandleModelLookup` yang sama |
-| `v1/api/chat` (Ollama) | `POST /api/chat` | ✅ |
-| `v1/web/fetch` (ollama) | `POST /web/fetch` via `ollama FetchURL https://ollama.com/api/web_fetch` | ✅ | `links` + scoped `webfetch:ollama` lock |
+| Capability | Current Go route | Classification / limit |
+|------------|------------------|-----------------------|
+| OpenAI chat | `POST /chat/completions` | Current parity target; root-native, not a general `/v1` alias |
+| Claude messages and count | `POST /messages`, `/messages/count_tokens` | Current parity target |
+| Responses | `POST /responses`, `/responses/compact` | Current parity target |
+| Embeddings | `POST /embeddings` | Current parity target |
+| Images | `POST /images/generations` | Current; model behavior depends on configured providers |
+| Audio | `POST /audio/speech`, `/audio/transcriptions`; `GET /audio/voices` | Current; no claim of identical provider/model catalogs |
+| Video | `POST /videos/generations|edits|extensions`; `GET /videos/{id}` | Current async job surface; provider support is conditional |
+| Search/fetch | `POST /search`, `/scrape` | Current; upstream provider-specific behavior is not exhaustively certified |
+| System One | `POST /systemone` | Current v0.5.85-aligned route |
+| Models | root, `/v1`, and `/api/v1` model/catalog routes | Current aliases; catalogs remain provider/config dependent |
 
-Note: Next.js uses prefix `/api/v1/...`, Go uses root `/...` + `v1`/`api/v1` aliases. All `v1beta` is covered.
+Do not infer provider parity from a shared route. Provider executors, model aliases, model capabilities, cloaking, OAuth behavior, and provider account policies can differ at any release. A feature is only parity-classified after a source-backed, path-specific comparison or executable contract test.
 
----
+## Native dashboard coverage
 
-## 3. Per-Endpoint — Dashboard/Admin Engine Ports (✅ 100% Core Engine Ported)
+The embedded Svelte SPA currently contains these main areas:
 
-| Feature / Endpoint | Go Route | Status | Notes |
-|--------------------|----------|--------|------------|
-| **Realtime Usage Stream** | `GET /api/usage/stream`, `GET /usage/stream` | ✅ | In-memory in-flight tracker, SSE broadcasting for dashboard topology graph animation |
-| **Realtime Usage Stats** | `GET /api/usage/stats`, `GET /usage/stats` | ✅ | Realtime concurrency and model counters |
-| **Proxy-Pools Deploy** | `POST /proxy-pools/*-deploy`, `GET /proxy-pools/deploy-status` | ✅ | Vercel, Deno, and Cloudflare automated edge relay deploy |
-| **Headroom Engine** | `POST /headroom/*`, `ANY /headroom/proxy/*` | ✅ | Process lifecycle manager & reverse proxy for token compression |
-| **CLI-Tools Statuses** | `GET /cli-tools/all-statuses`, `GET /cli-tools/{tool}/status` | ✅ | Per-CLI status (codex, claude, opencode, cline, cursor, etc.) |
-| **Media TTS Voices** | `GET /audio/voices`, `GET /v1/audio/voices` | ✅ | Dynamic voice fetcher for ElevenLabs, Deepgram, MiniMax, Inworld |
-| **Translator Console Logs** | `GET /api/translator/stream`, `GET /translator/console-logs` | ✅ | Live streaming in-process log buffer for dashboard |
-| **OAuth Token Refresh** | `POST /v1/oauth/refresh`, `POST /v1/oauth/authorize` | ✅ | Antigravity, xAI, Codex, GitHub, iFlow, Gemini CLI, Kimi Coding, Qoder, CodeBuddy CN/INTL, Grok CLI |
-| **App Version & Self-Update**| `GET /api/version`, `POST /api/version/update` | ✅ | Semver check and in-place binary update |
-| **CRUD Providers/Keys/Combos**| Direct SQLite Shared Access | ✅ | Next.js reads/writes directly to shared SQLite `9router.db` |
+- endpoint and API-key setup;
+- providers, compatible nodes, API-key/OAuth connections, probes, and per-connection detail;
+- combo creation/editing, routing strategies, judge/fusion configuration, and vision/audio capacity adapters;
+- usage analytics, real-time topology, request details, quota tracker, and live console log;
+- proxy pools and Vercel/Cloudflare/Deno deployment helpers;
+- media views for embedding, image, TTS, STT, video, System One, and web tools;
+- token saver/Headroom controls, tunnel/Tailscale status, settings, and profile configuration; and
+- Agent Skills instructions and in-app version/changelog UI.
 
----
+These are current native surfaces. The changelog often calls individual ports “full parity,” but that wording is per feature; it is not evidence that every upstream screen, provider, locale, or route is complete.
 
-## 4. Database Schema — 100% Compatible
+## Authentication and operations
 
-| Table | Next.js | Go | Status |
-|-------|------|----|--------|
-| `providerConnections` | ✅ | ✅ | 100% Identical + Go metadata `lastUsedAt`, `consecutiveUseCount`, `modelLock_<model>` |
-| `providerNodes` | ✅ | ✅ | 100% Identical |
-| `proxyPools` | ✅ | ✅ | 100% Identical (HTTP/SOCKS5/Vercel/Cloudflare/Deno) |
-| `apiKeys` | ✅ | ✅ | 100% Identical |
-| `combos` | ✅ | ✅ | 100% Identical (fallback, round-robin, random, fusion, weight) |
-| `kv` | ✅ | ✅ | 100% Identical |
-| `usageHistory` | ✅ | ✅ | 100% Identical (12 columns + token breakdowns) |
-| `usageDaily` | ✅ | ✅ | 100% Identical (daily JSON aggregations) |
-| `requestDetails` | ✅ | ✅ | 100% Identical |
-| `settings` | ✅ | ✅ | 100% Identical (`data` JSON blob includes `providerStrategies`, token savers) |
-| `_meta` | ✅ | ✅ | 100% Identical (`SCHEMA_VERSION = 1`) |
+| Area | Current 9router-go | Upstream alignment / difference |
+|------|--------------------|--------------------------------|
+| Client API auth | SQLite-backed `apiKeys`; proxy routes accept bearer or `X-API-Key`; SSE stream routes also accept query keys | Scoped compatibility, not identical middleware |
+| Dashboard session | HS256 `auth_token` cookie, 24-hour expiry, local CLI token, login lockout/tunnel checks | Mirrors important upstream contracts |
+| Admin boundary | Shutdown, update, database export/import, and health reset require dashboard session/local CLI token, not client API keys | Intentional upstream-aligned protection |
+| OIDC/SAML | Current routes test OIDC/SAML configuration and serve SAML metadata; the Svelte login links target start/callback routes that are not currently mounted by the Go router | Accepted partial difference; configuration UI is not a complete SSO login flow |
+| Default password compatibility | `INITIAL_PASSWORD` is used when configured; the dashboard code still accepts upstream's well-known `123456` fallback and forces change for remote access | Compatibility behavior, not a recommendation |
+| Tunnel/Tailscale | Native status and enable/disable endpoints | Current; exact upstream cloud behavior is not claimed |
+| Auto-update | Go manifest/GitHub release check and in-place update | Current operational feature with the integrity limitation in `TECHNICAL_DEBT.md` |
+| Cloud sync | No current native cloud-sync implementation | Accepted limitation versus historical upstream features |
+| Historical npm CLI/tray | Embedded dashboard plus Go CLI/binary distribution | Accepted difference; no claim that npm tray behavior is ported |
 
-**Conclusion:** Columns & types 1:1. Next.js dashboard can read/write directly to Go's SQLite in realtime without conflicts or migration.
+## Database and backup relationship
 
----
+Go and upstream use the same default `DATA_DIR/db/data.sqlite` path and mostly shared table/JSON conventions. This is **schema compatibility for exercised paths**, not “100% identical schema”:
 
-## 5. Architecture Conclusion
+- upstream bootstraps and migrates core tables; Go production startup does not;
+- Go creates only the optional `upstream_leases` table;
+- Go success paths optionally write `lastUsedAt` and `consecutiveUseCount`, columns absent from upstream v0.5.85;
+- `_meta` belongs to upstream migration handling and is not consumed by Go;
+- Go's dashboard JSON export covers configuration, not all usage/diagnostic/lease data; and
+- shared JSON blobs must be verified field by field.
 
-> **Model:**
-> Next.js acts as Dashboard UI, while `9router-go` handles 100% of proxy traffic, SSE streaming, multi-provider translations, token compression, and in-flight usage tracking.
+`DATABASE.md` is authoritative for bootstrap, permissions, backup, and multi-process limits.
 
-### Advantages of `9router-go`:
-1. **High Performance**: 32K+ peak RPS with only ~42 MB memory (vs ~500 RPS and 270 MB on Next.js).
-2. **Non-Blocking Connections**: SQLite WAL mode with safe connection pooling, no write contention.
-3. **Resilience**: Exponential 429 lock backoff, reactive 401 OAuth refresh, auto-capability routing, and SSE stall detection (6 min).
-4. **Full Parity**: All 100+ providers, media modalities (image, video, audio TTS/STT/music, search, fetch), and dashboard animation stream fully operational.
+## Current differences and accepted limitations
 
----
+1. **Blank DB is not production-ready for Go alone.** Bootstrap/migrate with compatible upstream first; do not claim migration-free fresh installation.
+2. **Public route aliases are incomplete.** Go exposes many operations at root paths and does not implement upstream's blanket `/api/v1/*` and `/v1/*` rewrites. Model lookup has selected aliases; client compatibility must be checked per route.
+3. **Provider/model parity is partial.** For example, upstream v0.5.85 lists Qoder CN and Xiaomi MiMo desktop work, while the native registries do not establish the same coverage and the changelog explicitly defers MiMo v2.6 desktop login.
+4. **Single active Go writer is the supported operational model.** WAL avoids immediate lock errors but does not make settings merges, daily aggregates, or caches process-coherent.
+5. **Plaintext credential storage.** Upstream-compatible SQLite stores provider/client secrets; filesystem controls reduce exposure but do not encrypt at rest.
+6. **OIDC/SAML is incomplete as a login flow.** Configuration tests and metadata are not successful end-to-end SSO parity.
+7. **Dynamic CLI-tool configuration is not ported.** Native status/instructions exist, but upstream v0.5.85's per-tool configuration management is not present.
+8. **Dashboard MITM and Translator workbench are not ported.** Go has a MITM engine and console stream, but not upstream's complete dashboard management surfaces or Translator workbench.
+9. **Analytics, pricing, and backup transport differ.** Some declared breakdown fields are not populated, pricing is approximate rather than upstream's full DB-backed pricing behavior, and the Svelte backup download/import transport does not currently match the handler's re-auth/JSON contract.
+10. **Combo surface is not full v0.5.85 parity.** Core strategies and capacity adapters are implemented, while upstream preset/bulk-management behavior is not established as current.
+11. **No native cloud-sync or npm tray parity.** The dashboard supports local configuration handling, not historical cloud synchronization or the upstream npm tray launcher.
+12. **Version declarations are inconsistent.** v1.9.1 declares upstream v0.5.85 sync while the changelog separately lists selected v0.5.86 ports. Resolve release metadata before describing a blanket version sync.
 
-## Appendix: File References
+## Future-work candidates
 
-| Repo | Path |
-|------|------|
-| Go routes | `internal/handlers/router.go` |
-| Go server | `cmd/9router-go/main.go` |
-| Go DB schema | `DATABASE.md` |
-| Next routes | `src/app/api/**/route.js` |
-| Next DB schema | `src/lib/db/schema.js` |
-| Next server wrap | `custom-server.js` |
+- add a versioned Go schema manifest, compatibility probe, and explicit migration/bootstrap strategy;
+- add deliberate public route aliases or a compatibility middleware rather than relying on path-specific assumptions;
+- finish or remove the Svelte OIDC/SAML start/callback surface so the UI does not advertise unsupported login paths;
+- complete or remove the dashboard backup controls and align their request contract with the Go handlers;
+- decide whether dynamic CLI-tool configuration, dashboard MITM, Translator workbench, cloud sync, tray launcher, localization, or other upstream features are required for a later release;
+- create a generated, source-backed endpoint/provider parity inventory; and
+- refresh benchmark and comparison artifacts against the current binary and clearly identify historical results.
+
+## Evidence
+
+- Current version: `VERSION`, `version.json`, `internal/updater/updater.go`
+- Current route and embedded UI surface: `internal/handlers/router.go`, `web/src/App.svelte`, `web/src/components/Sidebar.svelte`
+- Current authentication: `internal/middleware/auth.go`, `internal/middleware/dashboard_auth.go`, `internal/auth/session.go`
+- Current SSO routes: `internal/handlers/sso/sso.go`, `internal/handlers/router.go`
+- Database contract: `DATABASE.md`
+- Historical upstream: `/Users/luqmannul.hakim/htdocs/9router/package.json` and `src/`

@@ -323,8 +323,10 @@ func TestHandleResponses_ComboFallback_AllFail(t *testing.T) {
 
 	handler.HandleResponses(rec, req)
 
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("expected 502, got %d: %s", rec.Code, rec.Body.String())
+	// Both combo members fail with 500: the last upstream status is preserved
+	// (not collapsed to 502).
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

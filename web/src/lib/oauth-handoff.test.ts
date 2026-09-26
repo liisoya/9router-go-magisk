@@ -7,6 +7,7 @@ import {
   matchPending,
   OAUTH_CALLBACK_KEY,
   OAUTH_PENDING_KEY,
+  oauthLoopbackCallbackURL,
   parseCallbackURL,
   readCallback,
   savePending,
@@ -123,6 +124,15 @@ describe('dashboardCallbackURL', () => {
   test('pins to origin, trims slashes', () => {
     expect(dashboardCallbackURL('http://localhost:20131/')).toBe('http://localhost:20131/callback')
     expect(dashboardCallbackURL('https://dash.example.com')).toBe('https://dash.example.com/callback')
+    expect(dashboardCallbackURL('https://dash.example.com///')).toBe('https://dash.example.com/callback')
+  })
+})
+
+describe('oauthLoopbackCallbackURL', () => {
+  test('matches upstream Antigravity loopback behavior', () => {
+    expect(oauthLoopbackCallbackURL('20130', false)).toBe('http://localhost:20130/callback')
+    expect(oauthLoopbackCallbackURL('', false)).toBe('http://localhost:80/callback')
+    expect(oauthLoopbackCallbackURL('', true)).toBe('http://localhost:443/callback')
   })
 })
 

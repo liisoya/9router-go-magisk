@@ -10,7 +10,7 @@ AUTO_UPDATE ?= false
 
 LDFLAGS := -s -w -X '9router/proxy/internal/updater.CurrentVersion=$(VERSION)'
 
-.PHONY: build run dev version update test test-short vet bench bench-go cross mitm-enable mitm-disable mitm-status docker docker-build clean help web-build
+.PHONY: build run dev version update test test-short vet bench bench-go cross mitm-enable mitm-disable mitm-status docker docker-build clean help web-build web-dev
 
 ## web-build — build frontend static assets (Svelte/Vite) into web/dist
 web-build:
@@ -30,6 +30,10 @@ run: build
 ## dev — start with go run (auto-rebuild)
 dev:
 	PORT=$(PORT) DATA_DIR=$(DATA_DIR) go run -ldflags="$(LDFLAGS)" ./cmd/9router-go/ $(if $(RTK),--rtk=$(RTK)) $(if $(CAVEMAN),--caveman=$(CAVEMAN)) $(if $(PONYTAIL),--ponytail=$(PONYTAIL)) --auto-update=$(AUTO_UPDATE)
+
+## web-dev — Vite dev server (HMR) on :5173, API proxied to Go :20130. FE changes hot-reload without rebuilding the binary.
+web-dev:
+	cd web && bun run dev
 
 ## version — display binary version info
 version: build

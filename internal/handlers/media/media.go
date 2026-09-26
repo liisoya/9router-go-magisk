@@ -10,6 +10,7 @@ import (
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/proxy/executor"
+	"9router/proxy/internal/translator"
 	"9router/proxy/internal/usagetracker"
 	"bytes"
 	"encoding/base64"
@@ -272,7 +273,11 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 	}
 	client := h.ChatH.GetClientForConnection(connData)
 	resp, err := client.Do(req)
-	if err != nil || (resp != nil && resp.StatusCode == http.StatusForbidden) {
+	if err != nil {
+		// Transport-level failure only (proxy block, DNS, reset): retry once
+		// direct before failing. A real upstream status (e.g. 403 account
+		// verification) must surface — retrying direct against the same
+		// target would mask it.
 		directReq, err2 := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(finalBody))
 		if err2 == nil {
 			directReq.Header = req.Header.Clone()
@@ -612,6 +617,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	// Handle combo fallback if model is a combo
 	if len(modelInfo.ComboModels) > 0 {
 		var lastErr string
+		lastStatus := http.StatusBadGateway
 		for _, entry := range modelInfo.ComboModels {
 			subInfo, err := h.ChatH.ResolveModel(entry)
 			if err != nil {
@@ -621,7 +627,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				if err := h.handleAntigravitySearch(w, r, body, subInfo); err == nil {
 					return
 				} else {
-					lastErr = err.Error()
+					lastErr, lastStatus = searchErrorParts(err)
 					continue
 				}
 			}
@@ -629,7 +635,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				if err := h.handleXquikSearch(w, r, body, subInfo); err == nil {
 					return
 				} else {
-					lastErr = err.Error()
+					lastErr, lastStatus = searchErrorParts(err)
 					continue
 				}
 			}
@@ -708,8 +714,21 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			if resp.StatusCode >= 400 {
 				errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024))
 				resp.Body.Close()
-				log.Warn("media", "upstream combo error", "endpoint", endpoint, "provider", subInfo.Provider, "model", subInfo.Model, "conn", conn.ID[:min(8, len(conn.ID))], "status", resp.StatusCode, "body", string(errBody))
-				lastErr = fmt.Sprintf("upstream status %d: %s", resp.StatusCode, string(errBody[:min(200, len(errBody))]))
+				errText := strings.TrimSpace(string(errBody))
+				if errText == "" {
+					errText = resp.Status
+				}
+				log.Warn("media", "upstream combo error", "endpoint", endpoint, "provider", subInfo.Provider, "model", subInfo.Model, "conn", conn.ID[:min(8, len(conn.ID))], "status", resp.StatusCode, "body", errText)
+				// Upstream parity (videoGeneration CREATE_ROTATION_STATUSES):
+				// billable video creation must not rotate on 5xx — the job
+				// may already exist upstream. Auth/quota errors rotate.
+				if isVideoCreateEndpoint(endpoint) && resp.StatusCode >= 500 {
+					lastErr = fmt.Sprintf("upstream status %d: %s", resp.StatusCode, errText[:min(200, len(errText))])
+					lastStatus = resp.StatusCode
+					break
+				}
+				lastErr = fmt.Sprintf("upstream status %d: %s", resp.StatusCode, errText[:min(200, len(errText))])
+				lastStatus = resp.StatusCode
 				continue
 			}
 			defer resp.Body.Close()
@@ -721,20 +740,20 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			h.Repo.UpdateConnectionLastUsed(conn.ID)
 			return
 		}
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("all combo models failed: %s", lastErr))
+		handlerutil.WriteJSONError(w, lastStatus, fmt.Sprintf("all combo models failed: %s", lastErr))
 		return
 	}
 
 	if endpoint == "/v1/search" && modelInfo.Provider == "antigravity" {
 		if err := h.handleAntigravitySearch(w, r, body, modelInfo); err != nil {
-			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
+			writeSearchError(w, err)
 		}
 		return
 	}
 
 	if endpoint == "/v1/search" && (modelInfo.Provider == "xquik" || modelInfo.Provider == "xquik-search") {
 		if err := h.handleXquikSearch(w, r, body, modelInfo); err != nil {
-			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
+			writeSearchError(w, err)
 		}
 		return
 	}
@@ -801,8 +820,15 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	finalBody := body
 	if !strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
 		finalBody = handlerutil.UpdateModelInBody(body, modelInfo.Model)
-	} else if model != modelInfo.Model {
-		finalBody = bytes.Replace(body, []byte(model), []byte(modelInfo.Model), 1)
+	} else if model != "" && model != modelInfo.Model {
+		// Upstream parity (videoGeneration byte-exact multipart): never
+		// rewrite inside the binary payload — a byte.Replace could corrupt
+		// file bytes that happen to match. Rebuild only the model part.
+		if rebuilt, err := rewriteMultipartModelPart(body, r.Header.Get("Content-Type"), model, modelInfo.Model); err == nil {
+			finalBody = rebuilt
+		} else {
+			log.Warn("media", "multipart model rewrite skipped", "endpoint", endpoint, "error", err)
+		}
 	}
 	client := h.ChatH.GetClientForConnection(connData)
 
@@ -827,8 +853,9 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			if err := json.Unmarshal(body, &checkStream); err == nil {
 				isStream = checkStream.Stream
 			}
+			usageCtx := translator.WithUsageCapture(r.Context())
 			mediaReq := &executor.Request{
-				Ctx:           r.Context(),
+				Ctx:           usageCtx,
 				Client:        client,
 				Config:        providerCfg,
 				APIKey:        apiKey,
@@ -840,8 +867,6 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				SessionID:     handlerutil.ExtractSessionID(r),
 				StartTime:     time.Now(),
 			}
-			// Same client_id cloaking as chat fallback: pass the connection's
-			// providerSpecificData so cloaking executors keep a stable id.
 			if connData != nil && len(connData.ProviderSpecificData) > 0 {
 				mediaReq.ConnData = connData.ProviderSpecificData
 			}
@@ -857,12 +882,19 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			if conn != nil {
 				h.Repo.UpdateConnectionLastUsed(conn.ID)
 			}
-			usagetracker.GetTracker().PushRecent(usagetracker.RecentRequest{
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-				Model:     modelInfo.Model,
-				Provider:  modelInfo.Provider,
-				Status:    "ok",
-			}, h.Repo)
+			h.ChatH.LogUsage(
+				&shared.UsageLogInfo{
+					Provider:     modelInfo.Provider,
+					Model:        modelInfo.Model,
+					ConnectionID: connID,
+					APIKey:       apiKey,
+					Endpoint:     endpoint,
+				},
+				translator.GetAndClearUsage(usageCtx),
+				time.Since(mediaReq.StartTime).Milliseconds(),
+				body,
+				nil,
+			)
 			return
 		}
 	}
@@ -1007,6 +1039,64 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		}
 		h.ChatH.LogUsage(logInfo, nil, latencyMs, body, nil)
 	}
+}
+
+// rewriteMultipartModelPart rebuilds a multipart body with only the "model"
+// part value replaced (upstream videoGeneration byte-exact parity). Every
+// other part — including binary file bytes — is copied verbatim, so a model
+// string occurring inside file bytes can never be corrupted.
+func rewriteMultipartModelPart(body []byte, contentType, oldModel, newModel string) ([]byte, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil || params["boundary"] == "" {
+		return nil, fmt.Errorf("invalid multipart content type: %w", err)
+	}
+	mr := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.SetBoundary(params["boundary"]); err != nil {
+		return nil, err
+	}
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			return nil, err
+		}
+		value := string(data)
+		if part.FormName() == "model" && strings.TrimSpace(value) == oldModel {
+			value = newModel
+		}
+		fw, err := mw.CreatePart(part.Header)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := fw.Write([]byte(value)); err != nil {
+			return nil, err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// isVideoCreateEndpoint reports whether the endpoint creates a billable async
+// video job (upstream videoGeneration CREATE_ROTATION_STATUSES parity:
+// 5xx must not rotate — the job may already exist upstream).
+func isVideoCreateEndpoint(endpoint string) bool {
+	switch endpoint {
+	case "/v1/videos/generations", "/videos/generations",
+		"/v1/videos/edits", "/videos/edits",
+		"/v1/videos/extensions", "/videos/extensions":
+		return true
+	}
+	return false
 }
 
 // BuildEmbeddingsURL converts a chat completions URL to an embeddings URL.

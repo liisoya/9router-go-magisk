@@ -1,376 +1,106 @@
-# 9router-go Native Embedded Dashboard: Migration & Architecture Guide
-*(Dokumentasi Migrasi & Arsitektur Dashboard Native Embedded 9router-go)*
+# 9router-go Native Embedded Dashboard: Build and Architecture Guide
 
-> **Bahasa**: Bilingual (Bahasa Indonesia & English)  
-> **Status Proyek**: Active / Production Ready  
-> **Target Rilis**: 9router-go v0.7.0+
+This document describes the current native Go gateway and its embedded Svelte/Vite dashboard. It is a build and operations guide, not a feature-compatibility checklist. The current release metadata is `v1.9.1`; the repository manifest tracks upstream `v0.5.85`, while the changelog separately lists `v0.5.86` parity items. Do not treat those statements as a complete upstream-parity guarantee.
 
----
+## Architecture
 
-## Daftar Isi / Table of Contents
-1. [Ringkasan & Arsitektur Utama (Overview & Core Architecture)](#1-ringkasan--arsitektur-utama-overview--core-architecture)
-   - [Single Binary Embedded Architecture](#11-single-binary-embedded-architecture)
-   - [Eliminasi Node.js Runtime di Production](#12-eliminasi-nodejs-runtime-di-production)
-   - [Modern Frontend Stack: Svelte 5 + Tailwind CSS v4](#13-modern-frontend-stack-svelte-5--tailwind-css-v4)
-   - [Backend Dependency Injection (Uber Fx) & Configuration (Viper)](#14-backend-dependency-injection-uber-fx--configuration-viper)
-   - [Prinsip Modularitas Ketat (Strict Modularity Rules)](#15-prinsip-modularitas-ketat-strict-modularity-rules)
-2. [Status Implementasi & Milestone Checklist (Progress Tracker)](#2-status-implementasi--milestone-checklist-progress-tracker)
-   - [Phase 1: Uber Fx DI & Viper Config](#phase-1-uber-fx-dependency-injection--viper-config-env-integration)
-   - [Phase 2: Client-Side SPA Router (HTML5 History & popstate)](#phase-2-client-side-spa-router-dengan-html5-history-api--popstate)
-   - [Phase 3: Freebuff Provider, OAuth Device Flow & Session Status API](#phase-3-freebuff-provider-oauth-device-flow--session-status-api)
-   - [Phase 4: Strict Model Assignment & Multi-Account Model Binding](#phase-4-strict-model-assignment--multi-account-model-binding)
-   - [Phase 5: Combos Modal Redesign & Nested Routing](#phase-5-combos-modal-redesign--nested-routing)
-   - [Phase 6: Pemisahan Format Chat/LLM vs Media Providers](#phase-6-pemisahan-format-chatllm-vs-media-providers)
-3. [Struktur Berkas Utama (Key File Structure)](#3-struktur-berkas-utama-key-file-structure)
-   - [Frontend Components Directory (`web/src/components/`)](#31-frontend-components-directory)
-   - [Frontend Library & Routing (`web/src/lib/`)](#32-frontend-library--routing)
-   - [Backend Modules (`internal/app/` & `internal/handlers/`)](#33-backend-modules)
-4. [Panduan Build & Deploy (Build & Run Guide)](#4-panduan-build--deploy-build--run-guide)
-   - [Prasyarat (Prerequisites)](#41-prasyarat-prerequisites)
-   - [Langkah Build Frontend (Frontend Build Steps)](#42-langkah-build-frontend-frontend-build-steps)
-   - [Langkah Kompilasi Binary Go (Go Binary Compilation)](#43-langkah-kompilasi-binary-go-go-binary-compilation)
-   - [Menjalankan Gateway (Running the Gateway)](#44-menjalankan-gateway-running-the-gateway)
-   - [Verifikasi & Healthcheck (Verification & Healthcheck)](#45-verifikasi--healthcheck-verification--healthcheck)
-5. [Rencana Selanjutnya / Next Steps (Roadmap)](#5-rencana-selanjutnya--next-steps-roadmap)
-
----
-
-## 1. Ringkasan & Arsitektur Utama (Overview & Core Architecture)
-
-### 1.1 Single Binary Embedded Architecture
-**Indonesian:**  
-Sebelumnya, dashboard administratif sering membutuhkan proses terpisah (misalnya server Node.js/Next.js) atau web server proxy eksternal (Nginx). Dalam arsitektur baru ini, seluruh aplikasi Single Page Application (SPA) dikompilasi menjadi static assets yang langsung disematkan (*embedded*) ke dalam binary Go executable menggunakan fitur standar Go `//go:embed dist/*` pada paket `web/embed.go`.
-
-**English:**  
-Previously, administrative dashboards often required a separate daemon (e.g., Node.js/Next.js runtime) or an external reverse proxy (Nginx). In this new architecture, the entire Single Page Application (SPA) is compiled into optimized static assets and directly embedded inside the compiled Go binary using standard `//go:embed dist/*` in `web/embed.go`.
+The Go process owns the HTTP server, SQLite repository, authentication, proxy handlers, and lifecycle. The dashboard is a Svelte 5 + TypeScript + Vite SPA. During a build, Vite writes optimized static files to `web/dist`; `web/embed.go` embeds `dist/*` into the Go executable. At runtime the browser receives the embedded files and calls the Go HTTP API.
 
 ```mermaid
-graph TD
-    subgraph Build Phase
-        A[Svelte 5 / TS Source in web/src] -->|bun run build| B[Compiled Assets in web/dist]
-        B -->|go:embed dist/*| C[web/embed.go]
-        C -->|rtk go build| D[Single Binary: 9router-go]
-    end
-
-    subgraph Production Runtime
-        Client[Browser / CLI] -->|HTTP :20130| D
-        D -->|/api/*, /v1/*| E[Go Chi API & Proxy Handlers]
-        D -->|/, /dashboard/*, /assets/*| F[Embedded SPA FileServer]
-    end
+graph LR
+  S[Svelte/Vite source] -->|bun run build| D[web/dist]
+  D -->|go:embed| B[9router-go executable]
+  B --> H[Go HTTP server and SQLite]
+  B --> W[Embedded dashboard assets]
 ```
 
-### 1.2 Eliminasi Node.js Runtime di Production
-- **Zero Node.js dependency at runtime**: Server produksi hanya membutuhkan file biner tunggal `9router-go` dan database SQLite lokal. Tidak ada Node.js, `npm`, `pnpm`, ataupun Bun yang berjalan di server.
-- **Portability**: Biner dapat langsung dijalankan di sistem operasi Linux, macOS, atau Windows tanpa setup environment JavaScript.
-- **Memory footprint**: Mengurangi konsumsi memori produksi hingga >150 MB (menghilangkan overhead V8 runtime).
+Production does not need Node.js, Bun, or Vite after the binary is built. The generated `web/dist` directory is ignored by Git and may be absent in a fresh checkout. A Go build therefore needs the frontend prerequisites and a successful frontend build first. `go build` is not a self-sufficient substitute for that prerequisite.
 
-### 1.3 Modern Frontend Stack: Svelte 5 + Tailwind CSS v4
-- **Svelte 5 Runes**: Memanfaatkan reaktivitas modern Svelte 5 (`$state`, `$derived`, `$props`, `$effect`, dan `$bindable`) untuk manajemen state yang presisi, performa tinggi, dan tanpa overhead virtual DOM.
-- **Tailwind CSS v4 Dark Mode**: Sistem tema modern dengan CSS variables dan palette gelap terintegrasi (`bg-surface`, `border-border`, `text-text-main`, `brand-500`).
-- **Lucide Icons (`lucide-svelte`)**: Ikon SVG ringan dan konsisten di seluruh navigasi dan indikator model.
-- **Vite & Bun**: Perkakas build kilat dengan module bundler modern dan HMR saat pengembangan lokal.
+## Prerequisites
 
-### 1.4 Backend Dependency Injection (Uber Fx) & Configuration (Viper)
-- **Uber Fx (`go.uber.org/fx`)**:
-  Seluruh lifecycle server, database repo, handler HTTP, dan background workers dikelola menggunakan declarative Dependency Injection:
-  - `ConfigModule`: Menyediakan konfigurasi Viper dan parsing file `.env`.
-  - `DatabaseModule`: Menyediakan koneksi SQLite dan `*db.Repo`.
-  - `HandlersModule`: Menginisialisasi seluruh router Chi dan HTTP handlers.
-  - `ServerModule`: Mengelola lifecycle `*http.Server`, graceful shutdown, catalog sync background, dan updater background.
-- **Viper Configuration (`github.com/spf13/viper`)**:
-  Mendukung pembacaan konfigurasi otomatis dari `.env` dengan fallback default yang aman (Port 20130, salt otentikasi, RTK token saver flag).
+Install the versions used by the repository before building:
 
-### 1.5 Prinsip Modularitas Ketat (Strict Modularity Rules)
-**Indonesian:**  
-Untuk menjaga kemudahan pemeliharaan jangka panjang dan menghindari "god components", setiap file subkomponen diwajibkan memiliki ukuran baris maksimal $\le 300$ baris kode (*Strict Modularity Rule*). Komponen yang kompleks dipecah menjadi subkomponen independen dan helper file terpisah (contoh: `pickerData.ts`, `CapacityAdapterSection.svelte`, `ModelPill.svelte`).
+- Go **1.27** (from `go.mod` and the release workflow).
+- Bun **1.4.2** (from `.github/workflows/ci.yml` and `release.yml`).
+- A writable `DATA_DIR`, or the default platform data directory (`~/.9router` on Unix-like systems, `%APPDATA%/9router` on Windows).
+- Configuration for `JWT_SECRET` and `INITIAL_PASSWORD` when deploying. The application can generate a JWT secret when one is not supplied, but operators should set a strong value explicitly. Do not ship a known initial password.
+- For optional release/cross-build work: the target Go toolchains and the platform-specific tools required by the selected build path. `RTK` is optional and is not required to build.
 
-**English:**  
-To prevent maintenance bottlenecks and "god components", every single subcomponent file must adhere to a strict line-count budget of $\le 300$ lines. Complex views are cleanly decomposed into isolated subcomponents and data helpers (e.g., `pickerData.ts`, `CapacityAdapterSection.svelte`, `ModelPill.svelte`).
+## Build the frontend
 
----
-
-## 2. Status Implementasi & Milestone Checklist (Progress Tracker)
-
-| Fase / Phase | Status | Deskripsi Ringkas / Summary |
-| :--- | :---: | :--- |
-| **Phase 1** | [x] Selesai | Uber Fx Dependency Injection & Viper Config (`.env` integration) |
-| **Phase 2** | [x] Selesai | Client-Side SPA Router dengan HTML5 History API & `popstate` event |
-| **Phase 3** | [x] Selesai | Freebuff Provider, OAuth Device Flow & Session Status API (`/api/oauth/freebuff/session`) |
-| **Phase 4** | [x] Selesai | Strict Model Assignment & Multi-Account Model Binding (mencegah error 409 `model_locked`) |
-| **Phase 5** | [x] Selesai | Combos Modal Redesign (Combos pills di atas, nested combos, capability badges 👁️/🧠) |
-| **Phase 6** | [x] Selesai | Pemisahan Format Chat/LLM vs Media Providers (Accordion Media, Embedding, TTS, STT, Image, Video, Web) |
-| **Phase 7** | [x] Selesai | Freebuff OAuth Device Flow, Auth Modal & Auth-Type Segregation (Penanganan spesifik No-Auth, Device Flow, Web OAuth & API Key) |
-
----
-
-### Phase 1: Uber Fx Dependency Injection & Viper Config (.env integration)
-- **Tujuan**: Menggantikan inisialisasi manual monolitik pada `cmd/9router-go/main.go` dengan arsitektur DI yang modular, testable, dan terstruktur rapi.
-- **Implementasi**:
-  - `internal/app/app.go`: Menggabungkan `AppModule` dan fungsi `Run(fxApp *fx.App)` untuk graceful signal handling (`SIGINT`, `SIGTERM`).
-  - `internal/app/config.go`: Menyediakan `*config.Config` melalui `config.NewViper()`.
-  - `internal/app/database.go`: Menyediakan koneksi SQLite dan instance `*db.Repo`.
-  - `internal/app/handlers.go`: Menyediakan `http.Handler` dari router Chi utama.
-  - `internal/app/server.go`: Mengonfigurasi `*http.Server` dan lifecycle hooks `OnStart` dan `OnStop`.
-  - `internal/config/config.go`: Menghubungkan Viper ke file `.env` dengan fallback environment variables.
-
----
-
-### Phase 2: Client-Side SPA Router dengan HTML5 History API & popstate
-- **Tujuan**: Menyediakan navigasi instan tanpa refresh halaman penuh, dengan sinkronisasi URL browser yang ramah bookmark dan reload langsung.
-- **Implementasi Frontend (`web/src/lib/router.ts` & `App.svelte`)**:
-  - `ActiveTab` type union: `'analytics' | 'combos' | 'connections' | 'settings' | 'keys' | 'terminal' | 'media-embedding' | 'media-image' | 'media-tts' | 'media-stt' | 'media-video' | 'media-web'`.
-  - `TAB_ROUTES` dan `ROUTE_TO_TAB` dictionaries memetakan URL path ke tab aktif.
-  - `pathToTab(pathname)`: Normalisasi route yang toleran terhadap format URL lama dan baru.
-  - `window.history.pushState` & `window.history.replaceState` untuk update URL tanpa page reload.
-  - `window.addEventListener('popstate', handlePopState)` untuk tombol Back/Forward browser.
-- **Implementasi Backend (`web/embed.go` & `internal/handlers/router.go`)**:
-  - Fallback handler menyajikan `index.html` untuk route navigasi client-side, namun mengembalikan status HTTP 404 jika file asset berekstensi (`.js`, `.css`, `.png`) tidak ditemukan.
-  - Mendaftarkan rute dashboard eksplisit pada Chi router (`/`, `/dashboard`, `/dashboard/*`, `/connections`, `/combos`, `/media-providers/*`, dll.).
-
----
-
-### Phase 3: Freebuff Provider, OAuth Device Flow & Session Status API
-- **Tujuan**: Mengintegrasikan provider Freebuff dengan otentikasi Device Code Flow OAuth dan tracking kuota sesi aktif.
-- **Implementasi**:
-  - Endpoint Backend:
-    - `POST /api/oauth/freebuff/poll`: Polling token Freebuff selama device flow berlangsung.
-    - `GET /api/oauth/freebuff/session`: Mengambil status sesi aktif langsung dari Freebuff upstream (`/api/v1/freebuff/session`).
-    - `POST /api/oauth/freebuff/session/switch`: Mengakhiri sesi yang sedang dipegang lalu melakukan admission ulang pada model yang diminta.
-  - **Status sesi yang informatif**: `GET /api/oauth/freebuff/session` kini mengembalikan `connectionId`/`connectionName` (akun mana yang dilaporkan), `accessTier`, `countryCode`, `countryBlockReason`, dan `rateLimit` (`limit`, `recentCount`, `poolLabel`, `resetAt`). Status `banned` (upstream 403 `{"status":"banned"}`) dibedakan dari `unauthorized`, karena artinya tambahkan akun lain — bukan ulangi login. Field identitas sesi (`currentModel`/`instanceId`/`expiresAt`) hanya dikirim saat sesi benar-benar dipegang (active/queued).
-  - **Penanganan blokir region**: `freebuffCountryRefusal()` + `newCountryBlockedError()` di `internal/proxy/executor/freebuff_session.go` mengenali penolakan berbasis negara (`country_blocked`, `country_not_allowed`, "not available in your country") pada respons 403 dan mengembalikan error terstruktur 403 `type: country_blocked` dengan nama negara + alasannya. Deteksi hanya diterapkan pada respons **non-200** — sesi yang tetap di-admit untuk region terbatas juga membawa `countryBlockReason`, dan memperlakukannya sebagai kegagalan akan mematikan setiap request di region itu.
-  - **Panel sesi selalu tampil**: `FreebuffSessionBanner` dirender untuk semua status (active, queued, none, unauthorized, banned, country_blocked), bukan hanya saat active — sebelumnya status non-active tidak menampilkan apa pun sehingga tombol switch ikut hilang. Panel memilih koneksi Freebuff lewat `isActive === 1`, bukan `providerConnections[0]` (yang diurutkan by priority dan bisa berisi akun non-aktif/banned, sehingga panel tampak kosong walau seat hidupnya ada di akun berikutnya).
-  - File handler backend: `internal/handlers/oauth/freebuff_session.go`, `internal/handlers/oauth/freebuff_session_switch.go` & `internal/proxy/executor/freebuff_session.go`.
-  - **Switch model tanpa menunggu 1 jam**: Freebuff mengikat satu akun ke satu model per sesi, dan sesi tetap hidup 1 jam walau idle — request ke model lain ditolak dengan `model_locked`. Ini mengikuti jalur *explicit pick* CLI (`cli/src/hooks/use-freebuff-session.ts`): `DELETE /api/v1/freebuff/session` dengan header `x-freebuff-instance-id` untuk melepas seat, lalu `POST` admission dengan header `x-freebuff-model` untuk model baru. Respons DELETE dapat membawa `freebucksRefund` yang ikut dilaporkan ke dashboard. Penggantian model **hanya** terjadi lewat aksi eksplisit pengguna (setiap switch memakai satu sesi baru); request background tetap tidak melepas seat.
-  - Komponen Frontend: `web/src/components/connections/FreebuffSessionBanner.svelte` yang menampilkan status login, sisa waktu sesi, pemilih model + tombol switch, dan refund Freebucks; badge 🔒 pada daftar model sudah dihapus karena model lain kini bisa dipilih.
-
----
-
-### Phase 4: Strict Model Assignment & Multi-Account Model Binding
-- **Tujuan**: Mencegah kegagalan runtime (HTTP 409 `model_locked`) ketika beberapa akun/koneksi dari satu provider dibatasi hanya untuk model tertentu (misal akun A untuk `gpt-4o`, akun B untuk `o3-mini`).
-- **Implementasi**:
-  - Logika filtering `filterConnectionsForModel` di `internal/handlers/chat/connections.go`.
-  - Mendukung pembacaan `assignedModel` dan `freebuffModel` baik di level root `Data` maupun di dalam `providerSpecificData`.
-  - Membaca konfigurasi `ProviderStrategies[provider].StrictModelAssignment` di tabel settings.
-  - Jika `StrictModelAssignment` aktif, request hanya akan diarahkan ke koneksi yang modelnya cocok secara eksklusif.
-  - Didukung dengan unit test komprehensif pada `internal/handlers/chat/strict_model_test.go`.
-
----
-
-### Phase 5: Combos Modal Redesign & Nested Routing
-- **Tujuan**: Mendesain ulang modal pemilihan model untuk pembuatan combo routing cerdas (fallback, round-robin, fusion).
-- **Fitur Utama**:
-  1. **Combos Pills di Bagian Paling Atas**: Bagian "Combos" diletakkan di urutan pertama pada `ModelPickerModal.svelte`, memungkinkan pembuatan *nested combos* (combo di dalam combo).
-  2. **Capability Badges**:
-     - 👁️ **Vision Badge**: Menandai model yang mendukung input gambar (`caps.vision = true`).
-     - 🧠 **Reasoning / Thinking Badge**: Menandai model dengan kemampuan penalaran mendalam (`caps.reasoning = true`).
-  3. **Bulk Toggle Selection**: Klik sekali untuk menambahkan model, klik kedua untuk menghapusnya langsung dari combo.
-  4. **Pemisahan Logika & Tampilan**: Seluruh transformasi data diekstrak ke `pickerData.ts` sehingga template modal tetap di bawah batasan 300 baris kode.
-
----
-
-### Phase 6: Pemisahan Format Chat/LLM vs Media Providers
-- **Tujuan**: Memisahkan antarmuka LLM Chat murni dari model multimodal/media (Embedding, Image, Voice, Video, Web Scraping) agar dashboard teratur dan tidak membingungkan pengguna.
-- **Implementasi**:
-  - **Sidebar Accordion**: Menu "Media Providers" di `web/src/components/Sidebar.svelte` dengan status toggle buka/tutup dan submenu:
-    - 🔢 **Embedding** (`/dashboard/media-providers/embedding`)
-    - 🎨 **Text to Image** (`/dashboard/media-providers/image`)
-    - 🔊 **Text To Speech (TTS)** (`/dashboard/media-providers/tts`)
-    - 🎙️ **Speech To Text (STT)** (`/dashboard/media-providers/stt`)
-    - 🎬 **Video** (`/dashboard/media-providers/video`)
-    - 🌐 **Web Fetch & Search** (`/dashboard/media-providers/web`)
-  - **Catalog Filtering**:
-    - Fungsi `isChatProvider(p)` di `web/src/lib/providers.ts` memastikan hanya provider bertipe `llm` yang muncul di menu utama `/dashboard/providers`.
-    - `pickerData.ts` mengecualikan media provider dari pemilihan model chat combo.
-  - **Komponen Tampilan Khusus**: `MediaKindView.svelte`, `MediaWebView.svelte`, `MediaProviderCard.svelte`, dan `MediaModelCard.svelte`.
-
----
-
-### Phase 7: Freebuff OAuth Device Flow, Auth Modal & Auth-Type Segregation
-- **Tujuan**: Memperbaiki alur otentikasi CLI Device Flow untuk Freebuff upstream, mengintegrasikan modal otentikasi interaktif (copy link, browser open, auto-polling indicator, dan manual check), serta memisahkan logika klasifikasi provider (*No-Auth*, *Free Device Flow*, *Web OAuth*, dan *API Key*) agar tidak dipukul rata.
-- **Implementasi Backend (`internal/handlers/oauth/freebuff.go`)**:
-  - `HandleFreebuffInitiate`: Memanggil endpoint resmi `POST https://freebuff.com/api/auth/cli/code` untuk mendaftarkan session secara upstream dan memperoleh `loginUrl` serta `fingerprintHash` resmi. Menyimpan `expiresAt` ke `freebuffPendingSessions` in-memory map.
-  - `HandleFreebuffPoll`: Menggunakan `GET https://freebuff.com/api/auth/cli/status?fingerprintId=...&fingerprintHash=...&expiresAt=...` dengan query params resmi.
-  - Mengatasi bug fatal `unexpected EOF` (502 Bad Gateway) dengan mengenali respon HTTP 401 dan empty body sebagai status `pending` (HTTP 200).
-  - Menangani fleksibilitas token upstream (`accessToken`, `access_token`, `authToken`, `token`) serta metadata user (`userId`, `email`, `name`).
-  - **Membaca kredensial dari objek `user` bersarang**: sesuai kontrak CLI resmi (`cli/src/login/login-flow.ts`), status sukses berbentuk `{"user":{"authToken":...,"email":...,"name":...,"id":...}}` dengan HTTP 200. Sebelumnya token hanya dicari di level atas sehingga polling selalu berakhir `pending` walau otorisasi browser sudah sukses. Jika payload menyatakan authorized tanpa token yang bisa dipakai, status dipertahankan `pending` (disertai log warning) agar klien tidak menerima sukses palsu.
-- **Implementasi Frontend Catalog (`web/src/lib/providers.ts`)**:
-  - Memastikan `freebuff` dikategorikan sebagai `"oauth"` (bukan `"free"` no-auth dan bukan `"apikey"`), sehingga form koneksi dan alur device flow muncul sesuai peruntukannya.
-- **Implementasi Frontend UI & Modal (`web/src/components/connections/ProviderDetailView.svelte`)**:
-  - Menghilangkan asumsi "pukul rata" bahwa semua provider kategori free tidak memiliki otentikasi; `isNoAuth` dibatasi khusus untuk provider yang memang `noAuth === true` (seperti `mimo`, `opencode`).
-  - Menyediakan **Freebuff Auth Modal** terintegrasi:
-    - Step 1: URL login dengan tombol `Open` dan `Copy`.
-    - Live auto-polling status spinner.
-    - Step 2: Input box manual untuk URL redirect (`/onboard?auth_code=...`) atau raw token dengan tombol `Check & Connect`.
-  - Menyematkan kembali `<FreebuffSessionBanner>` dan badge visual status sesi aktif pada daftar model.
----
-
-## 3. Struktur Berkas Utama (Key File Structure)
-
-```
-9router-go/
-├── cmd/
-│   └── 9router-go/
-│       └── main.go                      # Entry point CLI (Fx app bootstrap)
-├── internal/
-│   ├── app/                             # Uber Fx DI Modules
-│   │   ├── app.go                       # AppModule definition & Run()
-│   │   ├── config.go                    # ConfigModule (Viper injection)
-│   │   ├── database.go                  # DatabaseModule (SQLite & db.Repo)
-│   │   ├── handlers.go                  # HandlersModule (HTTP Chi router)
-│   │   ├── params.go                    # CLIParams struct
-│   │   └── server.go                    # ServerModule (*http.Server & hooks)
-│   ├── config/
-│   │   └── config.go                    # Viper configuration loader (.env support)
-│   └── handlers/
-│       ├── router.go                    # Main HTTP routes & static web handler
-│       ├── chat/                        # Chat completion, Combos & Strict Model routing
-│       │   ├── combo.go                 # Combo execution & failover
-│       │   ├── connections.go           # filterConnectionsForModel implementation
-│       │   └── strict_model_test.go     # Unit tests for strict model binding
-│       ├── dashboard/                   # Dashboard REST API handlers
-│       │   ├── connections.go           # Provider connection CRUD
-│       │   ├── combos.go                # Combo configuration CRUD
-│       │   ├── apikeys.go               # Virtual API Keys management
-│       │   └── settings.go              # Quota & Token Saver settings
-│       ├── media/                       # Multimodal handlers (embeddings, image, audio, web)
-│       │   └── media.go
-│       └── oauth/                       # OAuth handlers (Freebuff & Antigravity)
-│           ├── freebuff.go
-│           └── freebuff_session.go      # Freebuff active session status API
-├── web/
-│   ├── embed.go                         # Go embedded FS (//go:embed dist/*) & fallback
-│   ├── package.json                     # Bun/Vite configuration
-│   ├── vite.config.ts                   # Vite bundler configuration
-│   └── src/
-│       ├── App.svelte                   # Main dashboard layout & SPA state manager
-│       ├── main.ts                      # Svelte mounting script
-│       ├── api/
-│       │   └── client.ts                # Strongly typed HTTP API client
-│       ├── lib/
-│       │   ├── router.ts                # Client-side route mappings & helpers
-│       │   ├── providers.ts             # Provider catalog, kinds & isChatProvider filter
-│       │   ├── models.ts                # Model helpers & capability parser
-│       │   └── ui/                      # Base UI design system components (Badge, Button, Card)
-│       └── components/
-│           ├── Sidebar.svelte           # Left navigation bar with Media Accordion
-│           ├── TopBar.svelte            # Header bar with connection metrics & theme toggle
-│           ├── connections/             # Provider management subcomponents
-│           │   ├── ConnectionsView.svelte
-│           │   ├── ProvidersOverviewGrid.svelte
-│           │   ├── ProviderCard.svelte
-│           │   └── FreebuffSessionBanner.svelte
-│           ├── combos/                  # Combo builder & routing subcomponents
-│           │   ├── CombosView.svelte
-│           │   ├── ModelPickerModal.svelte
-│           │   ├── ModelPill.svelte     # Model badge with 👁️ Vision & 🧠 Reasoning
-│           │   ├── pickerData.ts        # Data filtering and grouping logic (<= 300 LOC)
-│           │   └── CapacityAdapterSection.svelte
-│           └── media/                   # Multimodal media provider views
-│               ├── MediaKindView.svelte
-│               ├── MediaWebView.svelte
-│               ├── MediaProviderCard.svelte
-│               ├── MediaModelCard.svelte
-│               └── mediaTypes.ts
-└── docs/
-    └── BUILD_DASHBOARD.md               # File dokumentasi ini (Architecture & Guide)
-```
-
----
-
-## 4. Panduan Build & Deploy (Build & Run Guide)
-
-### 4.1 Prasyarat (Prerequisites)
-Pastikan lingkungan Anda memiliki perkakas berikut:
-- **Go**: versi 1.23+ atau lebih baru.
-- **Bun**: versi 1.1+ (atau Node.js 20+ jika menggunakan npm/pnpm).
-- **RTK (Rust Token Killer)**: perkakas pembantu build opsional untuk efisiensi token.
-
-### 4.2 Langkah Build Frontend (Frontend Build Steps)
-Kompilasi asset frontend dari direktori `web/` ke folder `web/dist/`:
+From the repository root:
 
 ```bash
-# Masuk ke direktori web
 cd web
-
-# Install dependensi frontend
-bun install
-
-# Jalankan linter dan unit test (opsional)
-bun run test
-
-# Kompilasi static production bundle ke web/dist/
+bun install --frozen-lockfile
+bun run lint
 bun run build
-
-# Kembali ke direktori root proyek
 cd ..
 ```
 
-*Catatan: Pastikan direktori `web/dist/index.html` telah terbuat sebelum melanjutkan ke kompilasi biner Go.*
+`bun run build` runs the TypeScript project build and Vite production build. It must produce at least `web/dist/index.html` and the referenced assets. The current `web/package.json` does not define a `test` script; do not document `bun run test` as an available build prerequisite. Frontend test automation is tracked in `ROADMAP.md` until the manifest and CI provide a test command.
 
-### 4.3 Langkah Kompilasi Binary Go (Go Binary Compilation)
-Kompilasi source Go dengan asset web yang tertanam langsung:
-
-```bash
-# Menggunakan RTK (rekomendasi repo):
-rtk go build -o 9router-go ./cmd/9router-go
-
-# Atau menggunakan standard Go toolchain:
-go build -o 9router-go ./cmd/9router-go
-```
-
-### 4.4 Menjalankan Gateway (Running the Gateway)
-Jalankan file biner yang telah dikompilasi:
+`web/dist` is generated, not source. Remove or rebuild it when diagnosing stale assets:
 
 ```bash
-# Menjalankan gateway secara langsung
-./9router-go
+rm -rf web/dist
+cd web && bun install --frozen-lockfile && bun run build
 ```
 
-Secara default, 9router-go akan mendengarkan di port `20130`.  
-Buka browser dan akses dashboard di:
-👉 **`http://localhost:20130/`** atau **`http://localhost:20130/dashboard`**
+## Build the Go binary
 
-Untuk menjalankan pada port khusus atau menggunakan konfigurasi tertentu, Anda dapat menyediakannya melalui `.env` atau flag environment:
-```bash
-PORT=8080 ./9router-go
-```
-
-### 4.5 Verifikasi & Healthcheck (Verification & Healthcheck)
-Anda dapat memverifikasi status gateway menggunakan `curl`:
+The normal path is the repository Makefile. It builds `web/dist` when it is missing, then embeds it and compiles the binary with the version from `VERSION` (or the documented fallback):
 
 ```bash
-# Periksa health status gateway
-curl -i http://localhost:20130/health
-# Respons: HTTP/1.1 200 OK -> {"status":"ok"}
-
-# Periksa status dashboard endpoint
-curl -i http://localhost:20130/api/hello
-# Respons: HTTP/1.1 200 OK -> {"status":"ok","message":"hello"}
-
-# Periksa routing embedded asset
-curl -I http://localhost:20130/dashboard/providers
-# Respons: HTTP/1.1 200 OK (Content-Type: text/html; charset=utf-8)
+make build
 ```
 
----
+`make web-build` is a prerequisite-only target. It runs `bun install --frozen-lockfile` and `bun run build` only when `web/dist/index.html` is missing or `FORCE=1` is set. It is not a substitute for an explicit frontend verification.
 
-## 5. Rencana Selanjutnya / Next Steps (Roadmap)
+For a direct build, complete the frontend step first and then run:
 
-1. **Auto-Discovery & Dynamic Probe Engine**:
-   - Integrasi pengecekan latensi otomatis (*health probe*) untuk provider yang aktif secara berkala pada background worker.
-   - Penandaan otomatis model yang mengalami degradasi kuota / rate-limit langsung di dashboard UI.
+```bash
+test -f web/dist/index.html
+go build -ldflags="-s -w -X '9router/proxy/internal/updater.CurrentVersion=$(cat VERSION)'" -o 9router-go ./cmd/9router-go
+```
 
-2. **WebSockets / Server-Sent Events (SSE) Metric Live Stream**:
-   - Menggantikan polling interval 3 detik pada `App.svelte` dengan koneksi real-time SSE untuk metrik request langsung, log terminal, dan perubahan status koneksi.
+RTK may wrap the Go command in a developer environment, but it is optional and must not obscure failures from `go build`.
 
-3. **Media Provider Playground**:
-   - Menambahkan interactive testing playground untuk halaman Media (misal: input prompt untuk Text to Image atau audio player untuk preview Text to Speech langsung di dashboard).
+## Run and verify
 
-4. **Multi-User RBAC & Granular Virtual Keys**:
-   - Memperluas fitur Virtual API Keys dengan kuota berbasis anggaran per model, per tag, dan pembatasan IP whitelist.
+Configure a data directory and secrets, then start the binary:
 
-5. **Backup & Export Configuration**:
-   - Fitur ekspor/impor seluruh konfigurasi connections, combos, dan settings ke dalam file JSON/YAML terenkripsi langsung dari UI Dashboard.
+```bash
+export DATA_DIR="$HOME/.9router"
+export JWT_SECRET="$(openssl rand -hex 32)" # use a persistent, protected value in deployments
+export INITIAL_PASSWORD='set-a-unique-local-password'
+PORT=20130 ./9router-go
+```
 
----
-*Dokumen ini dibuat dan dikelola sebagai standar arsitektur resmi untuk pengembangan Native Embedded Dashboard 9router-go.*
+The server listens on `http://localhost:20130` by default. Check both the gateway and the embedded dashboard:
+
+```bash
+curl -i http://127.0.0.1:20130/health
+curl -i http://127.0.0.1:20130/api/hello
+curl -I http://127.0.0.1:20130/
+```
+
+With a fresh, valid embedded bundle, `/` and client-side dashboard routes return the SPA; missing asset paths return 404 rather than silently becoming HTML. Browser dashboard routes may redirect to `/login` when login is required. The login/session API is separate from the client API-key routes; do not infer authorization from the fact that a page loads.
+
+Before using an existing SQLite file, verify that its schema is compatible with the current Go handlers. The Go database layer currently has an idempotent `upstream_leases` table bootstrap, not the full upstream versioned migration runner. Fresh-database schema bootstrap and legacy migration are therefore explicit hardening work in `ROADMAP.md`; this guide does not promise a no-action migration.
+
+## Docker build
+
+The Dockerfile is self-contained for a normal image build: its frontend stage installs Bun dependencies and builds `web/dist`, and the Go stage downloads modules and embeds the generated assets. It still requires network access to fetch Go and Bun modules, sufficient build resources, and a valid `VERSION` argument/fallback.
+
+```bash
+VERSION="$(cat VERSION)" docker build -t 9router-go .
+```
+
+The runtime image contains the Go binary and CA/time-zone support; it does not require a JavaScript runtime. Persistent application data must be mounted outside the container image and passed with `DATA_DIR`.
+
+## Release and CI notes
+
+CI currently builds the frontend, runs `go vet`, runs `go test ./...`, and builds the Go binary. It does not currently run a frontend test command, race detector, coverage gate, or release-time vulnerability scan. The release workflow builds cross-platform binaries and uploads `SHA256SUMS.txt`; its metadata must still be checked against `VERSION`, `version.json`, the tag, and changelog claims before publication.
+
+For a release candidate, reproduce the relevant checks in a clean environment, record toolchain versions and the exact frontend build, and verify the embedded dashboard with a running binary. Do not report a successful frontend build as proof that a Go build, migration, auth boundary, or release artifact succeeded.
