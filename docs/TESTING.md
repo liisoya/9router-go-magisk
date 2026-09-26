@@ -120,6 +120,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 新增 | PY-UNIT（11 例） | 棘轮 module 的接口级单测。**首跑即抓到迁移漏洞**：抽掉旧脚本的行形状校验后"格式错误"分支变成死代码（手抖写错的一行会静默成为永远匹配不上的基线项）→ 补回可选 `validate`，三个 scanner 各自传入形状规则 | 见本次提交 |
 | 2026-09-26 | 修改 | JS-UNIT（52 → 58 例，+9/-3 重排） | 候选 2：状态词表收成单一所有者 `KP.LIFECYCLE_STATES`（词 → 文案/严重度），app.js 三条 if/else 链只查表；键契约门禁扩成**值枚举双向对齐**（shell emit 的词 ↔ 表里的键，两侧多/少都红）。红灯自证：给 `life_state` 加 `hibernating` → 门禁精确报错并红 | 见本次提交 |
 | 2026-09-26 | 新增 | JS-UNIT（+6 例） | 候选 3：`ENGINE_UPDATE_PLAN` / `MODULE_UPDATE_PLAN` / `ORPHAN_CLEAN_PLAN` + `planSteps` 求值器，把"先门禁后动作"的顺序变成**可离线断言的数据**（任一引擎门禁未过 → install 不可达；没给 fact 的门禁默认拒绝；plan 结构断言"install 前必须有两个门禁"）。app.js 不再手写顺序判断 | 见本次提交 |
+| 2026-09-26 | 新增 | GO-TEST（+1 例） | 候选 4：`TestDashboardRouteTables_TestTableIsSubsetOfProduction` —— 把"dashboard 测试路由表 ⊆ 生产路由表"从"靠运气不漂移"变成结构断言（生产 334 / 测试 46 / 只在测试里注册 0 条）。红灯自证：往测试 seam 加 `GET /api/zz-fake-route` → 门禁精确报出该路径并红 | 见本次提交 |
 | 2026-09-26 | 新增 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（离线档） | f509e85 |
 | 2026-09-26 | 新增 | 变更映射自检 | `tools/check.sh` 末尾提醒"改了 A 没改 B"（只提醒不拦，规则见契约 §4） | f509e85 |
 

@@ -42,6 +42,10 @@
    `ENGINE_UPDATE_PLAN` / `MODULE_UPDATE_PLAN` / `ORPHAN_CLEAN_PLAN`，由 `parsers.js planSteps` 求值
    （未给 fact 的门禁 = 未通过，默认拒绝）。app.js 只按求值结果执行，顺序不变量在离线有断言
    （ADR-0007 的核心不变量由此从"只能真机验"变成"离线可验"）
+11. **dashboard 测试路由表必须 ⊆ 生产路由表**（`TestDashboardRouteTables_TestTableIsSubsetOfProduction`）：
+   测试 seam 是 `internal/handlers/dashboard/routes.go` 的 `RegisterRoutes`，生产是 `router.go` 的
+   `SetupDashboardRoutes`。往测试 seam 加一条生产没有的路径 → 测试会在**假路线**上变绿，门禁必须红。
+   结构收敛（两侧共用一份挂载清单）属上游 `internal/**`，按 ADR-0003 只加门禁、不做顺手重构
 8. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
 
 ## 3. 所有权地图（改哪里会与上游冲突）
