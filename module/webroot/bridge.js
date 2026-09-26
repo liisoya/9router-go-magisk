@@ -215,9 +215,14 @@
     curlTiming: url =>
       `curl -o /dev/null -s -m 8 -w '%{http_code} %{time_total}' ${shq(url)}`,
     fetch: (url, sec) => `curl -s -m ${sec || 15} ${shq(url)}`,
+    // -f（--fail）：HTTP ≥400 直接非零退出，不再"404 也写出正文并报成功"。
+    // 2026-09-26 事故：加速节点返回 404 正文 "Not Found"（9 字节）被当引擎装上。
     download: (url, out, sec) =>
-      `curl -sL -m ${sec || 300} -o ${shq(out)} ${shq(url)} && echo dl-ok`,
+      `curl -fsSL -m ${sec || 300} -o ${shq(out)} ${shq(url)} && echo dl-ok`,
     sha256: p => `sha256sum ${shq(p)}`,
+    // 装前门禁的两个只读探针（engineFileGate 的输入）：体积 + 前 4 字节十六进制
+    fileSize: p => `wc -c < ${shq(p)} 2>/dev/null | tr -d '[:space:]'`,
+    elfMagic: p => `head -c 4 ${shq(p)} 2>/dev/null | od -An -tx1 | tr -d '[:space:]'`,
     zipList: p => `unzip -l ${shq(p)}`,
     // SQL 结果以 INSERT 语句形式落盘（误删回滚快照）。
     // 必须**自己判成败**：sqlite3 出错时 `>` 仍会创建 0 字节文件，而 exec 层拿不到 stderr、
@@ -266,6 +271,15 @@
     const r = await sh(_cmds.sha256(path), 60000);
     return r.out.trim().split(/\s/)[0] || '';
   }
+  // 装前门禁探针：读不到就返回 0 / 空串，由纯函数 engineFileGate 判死（不在这里判）
+  async function fileSize(path) {
+    const r = await sh(_cmds.fileSize(path), 15000);
+    return parseInt(r.out.trim(), 10) || 0;
+  }
+  async function elfMagic(path) {
+    const r = await sh(_cmds.elfMagic(path), 15000);
+    return r.out.trim().toLowerCase();
+  }
   function zipList(path) { return sh(_cmds.zipList(path), 60000); }
   async function sqlSnapshot(sql, outFile) {
     // 只认命令自己吐出的 snap-ok：`!r.err` 会把"sqlite3 报错 + 0 字节文件"判成成功（见 _cmds.sqlSnapshot）
@@ -277,6 +291,7 @@
     sh, sqlFile, ops, detectMode,
     readFile, writeFile, appendLine, remove, backupOnce, restoreBackup,
     probeDns, curlTiming, fetch, download, sha256, zipList, sqlSnapshot,
+    fileSize, elfMagic,
     b64Decode,
     _cmds // 纯函数构造器，供离线测试
   };

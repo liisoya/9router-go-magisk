@@ -135,10 +135,36 @@
     return [...aliases].filter(a => a && UUID_ALIAS.test(a) && !liveSet.has(a));
   }
 
+  // ── 引擎更新：装前门禁（2026-09-26 事故）──
+  // 事故：加速节点对 release 资产返回 404，`curl`（当时没有 -f）把 9 字节正文
+  // "Not Found" 当二进制装上，engine-version 还写成了 1.9.2 —— 引擎直接起不来，
+  // 备份也被同一份垃圾覆盖。判据必须是"这像不像一个引擎"，而不是"下载命令报没报错"。
+  const ELF_MAGIC = '7f454c46';
+  const ENGINE_MIN_BYTES = 5 * 1024 * 1024; // 真实产物约 25MB；5MB 下限足以挡住文本/HTML/截断
+  function engineFileGate(size, magic) {
+    const n = Number(size);
+    if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: `引擎文件读不到或为空（size=${size}）` };
+    if (n < ENGINE_MIN_BYTES) return { ok: false, reason: `下载物只有 ${n} 字节（引擎约 25MB），不是引擎二进制` };
+    if (String(magic || '').toLowerCase() !== ELF_MAGIC) {
+      return { ok: false, reason: `文件头不是 ELF（${magic || '空'}），拒绝安装` };
+    }
+    return { ok: true, reason: '' };
+  }
+  // 校验和口：expected 取不到即拒绝（fail-closed）。
+  // 旧实现是"取不到就跳过校验继续装" —— 那正好在加速节点挂掉时放行了 404 正文。
+  function checksumGate(expected, actual) {
+    const e = String(expected || '').trim().toLowerCase();
+    const a = String(actual || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(e)) return { ok: false, reason: '未取到 SHA256SUMS（拿不到校验和就不装）' };
+    if (e !== a) return { ok: false, reason: `SHA256 不匹配（实际 ${a || '空'}，期望 ${e.slice(0, 12)}…）` };
+    return { ok: true, reason: '' };
+  }
+
   return {
     stripCr, parseProp, cmpVer,
     parseOpsStatus, parseMeminfo, parseProcRss, FAKEIP_RE,
     parseDnsProbeLine, parseDnsProbeOutput,
-    normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans
+    normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans,
+    ELF_MAGIC, ENGINE_MIN_BYTES, engineFileGate, checksumGate
   };
 });

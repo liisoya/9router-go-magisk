@@ -298,6 +298,47 @@
 - [ ] **巡检入口**：`python3 tools/check-parity.py`（需 `../9router` 参照树；**不进 build.sh** ——
   参照树不总是存在，不能让它变成构建的硬依赖）
 
+## Phase 22 · 更新引擎把 404 正文装成了引擎（用户报障，P0）✅ 2026-09-26
+
+> 用户报障：「我在手机端更新引擎最后是安装失败，没有实现真的更新引擎」。
+> 取证结论比报障更严重：**引擎与面板当时是死的**（不是"还在跑旧版、只是没换成功"）。
+
+- [x] **22.1 现场取证（真机）**
+  - `bin/9router-go` = **9 字节**，内容 `Not Found`（HTTP 404 正文）；`bin/9router-go.bak`
+    **也是 9 字节** → 第二次尝试把已损坏的当前文件备份了，**设备上再无可用引擎二进制**；
+  - `engine-version` = `1.9.2`（**谎报**：版本号在替换后立即写，从不校验引擎是否真的起来）；
+  - `ps` 无引擎进程、`curl :20128/version` 空响应；`watchdog.log` 从 16:02:38 起每 21s
+    「引擎不在 → 拉起失败」死循环（守护在正确工作，但二进制是垃圾，永远拉不起来）；
+  - 加速节点 = `https://github-proxy.memory-echoes.cn/`；GitHub API 确认 v1.9.2 **资产名没变**
+    （`9router-go-linux-arm64`，25,559,200 B）→ 404 来自加速节点，不是 URL 拼错。
+- [x] **22.2 根因链：4 层都缺校验（任一层拦住都不会出事）**
+  1. `module/webroot/bridge.js` 的 `download` 用 `curl -sL`，**没有 `-f`** → 404 退出码仍为 0，
+     正文被写出且 `echo dl-ok` → 前端判成"下载成功"；
+  2. `module/webroot/app.js` 取不到 `SHA256SUMS.txt` 时**跳过校验继续安装**（fail-open）；
+  3. `module/lib/ops.sh cmd_install_engine` 不校验源文件（体积 / ELF 魔数）就 `mv` + `chmod`；
+  4. 备份语义是"替换前 cp 当前文件" → 当前文件一旦损坏，备份即被污染。
+- [x] **22.3 修复（4 层 + 备份语义）**
+  - `bridge.js`：`download` → `curl -fsSL`（HTTP ≥400 即失败）；新增只读探针 `fileSize` / `elfMagic`；
+  - `parsers.js`：新增装前门禁纯函数 `engineFileGate(size, magic)`（≥5MB 且 `7f454c46`）与
+    `checksumGate(expected, actual)`（**取不到校验和即拒绝**）；
+  - `app.js`：下载后先过 `engineFileGate`、再过 `checksumGate`，任一不过立即中止且不碰设备；
+  - `ops.sh cmd_install_engine`：先 `engine_src_ok` 门禁（不合格 → `install-rejected-src`，
+    **不碰**现有二进制/不停服务/不写版本号）；回滚点只在当前二进制合格时留；**起来后才**写
+    `engine-version`；起不来自动回滚并报 `install-failed-rolled-back`；`.bak` 语义改为
+    "最后一次已验证可用"（ADR-0007）。
+- [x] **22.4 回归（AGENTS §5.0）**
+  - 离线 `node --test module/webroot/test/*.test.js` → **46/46**（新增 9 条：404 正文 / HTML 错误页 /
+    探针读不到必须判死；校验和缺失必须拒绝；`download` 必须带 `-f`；无 `dl-ok` 必须返回 false）；
+  - 真机 `tools/device/test-lifecycle.sh` → **14/14**，其中 T8 直接用 9 字节 `Not Found` 断言：
+    T8a 被拒（`install-rejected-src`）/ T8b 现有引擎字节数不变（25,428,128）/
+    T8c `engine-version` 不谎报（1.9.1）/ T8d 引擎仍 `up`（门禁没惊动服务）。
+- [x] **22.5 现场恢复（止血）**：从本地 `dist/9router-go-1.9.1-r2-magisk.zip` 取出合法 arm64 引擎
+  （25,428,128 B，`file` 确认 `ELF 64-bit ... ARM aarch64`，与 zip 内 sha256 一致）→
+  `ops.sh install-engine ... 1.9.1` → `engine=up` / `dns=up` / `watchdog=up`、
+  `engine-version=1.9.1`（谎报清除）、`/version` 已能应答（返回 401 说明路由在工作）。
+- [ ] **待用户验收**：面板「下载并更新引擎」重跑一次应能真正更新；把加速节点换成坏节点时应看到
+  「拒绝安装」而不是「装完引擎消失」。
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |

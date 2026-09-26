@@ -75,17 +75,55 @@ cmd_panel() {
   echo "$_s mem_total=${_mem%% *} mem_avail=${_mem##* } engine_rss=$_er dns_rss=$_dr upstreams_b64=$_ub mod_url=$_mu accel_sel=$_as"
 }
 
+ENGINE_MIN_BYTES=5242880  # 与 parsers.js ENGINE_MIN_BYTES 对齐（真实产物约 25MB）
+
+engine_src_ok() {
+  # 一个文件"像不像一个引擎"：体积下限 + ELF 魔数。
+  # 下载器（curl -f）打的是 HTTP 层，这里打的是文件本体 —— 2026-09-26 的事故正是
+  # 从这一层漏进去的：加速节点 404 正文（9 字节 "Not Found"）既没被前端拦，也没被这里拦，
+  # 于是装成了"引擎"、版本号还写成了 1.9.2，设备上再没有可用引擎。
+  [ -f "$1" ] || return 1
+  _sz="$(wc -c < "$1" 2>/dev/null | tr -d '[:space:]')"
+  case "$_sz" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_sz" -ge "$ENGINE_MIN_BYTES" ] || return 1
+  [ "$(head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d '[:space:]')" = "7f454c46" ] || return 1
+  return 0
+}
+
 cmd_install_engine() {
-  # 引擎二进制安装唯一入口：备份 → 替换 → 重启。src 为已下载到本地的临时文件；
-  # 第二参数为引擎版本（可选），写入 $DATA_DIR/engine-version 供 engine_version() 读取。
+  # 引擎二进制安装唯一入口：门禁 → 回滚点 → 替换 → 重启 → （起来后才）写版本与 .bak。
+  # src 为已下载到本地的临时文件；第二参数为引擎版本（可选），写 $DATA_DIR/engine-version。
   # 全程 hold 住守护：换文件的窗口里它去拉起旧/半份二进制会造成"text file busy"或假启动。
   [ -f "${1:-}" ] || { echo "no-src"; return 0; }
+  # 门禁必须在**动任何东西之前**：不合格的源绝不能碰现有二进制
+  if ! engine_src_ok "$1"; then
+    echo "install-rejected-src"   # 前端据此提示"下载物不是引擎"；设备保持原样
+    return 0
+  fi
   life_wd_hold 300
   life_stop_all >/dev/null
-  cp "$MODDIR/bin/9router-go" "$MODDIR/bin/9router-go.bak" 2>/dev/null
+  # 回滚点只在**当前二进制本身合格**时才留：否则会把垃圾当回滚点，把好二进制挤掉
+  # （2026-09-26 就是这样丢的：第二次尝试用 9 字节的当前文件覆盖了 .bak）
+  _prev="$DATA_DIR/engine.prev"
+  rm -f "$_prev"
+  engine_src_ok "$MODDIR/bin/9router-go" && cp "$MODDIR/bin/9router-go" "$_prev" 2>/dev/null
   if mv "$1" "$MODDIR/bin/9router-go" && chmod 0755 "$MODDIR/bin/9router-go"; then
-    [ -n "${2:-}" ] && printf '%s\n' "$2" > "$DATA_DIR/engine-version"
-    life_restart_engine
+    if [ "$(life_restart_engine)" = "engine=up" ]; then
+      # 版本号只在新引擎**真的起来**之后才写（旧实现在替换后立即写 → 谎报）
+      [ -n "${2:-}" ] && printf '%s\n' "$2" > "$DATA_DIR/engine-version"
+      # .bak 的语义从"替换前备份"改为"最后一次已验证可用"（只在这里更新）
+      cp "$MODDIR/bin/9router-go" "$MODDIR/bin/9router-go.bak" 2>/dev/null
+      echo "engine=up"
+    elif [ -f "$_prev" ]; then
+      # 起不来就回滚到启动前的二进制，并把版本号留在旧值（绝不谎报）
+      cp "$_prev" "$MODDIR/bin/9router-go" && chmod 0755 "$MODDIR/bin/9router-go"
+      life_restart_engine >/dev/null
+      echo "install-failed-rolled-back"
+    else
+      life_wd_hold_release
+      echo "install-failed"
+    fi
+    rm -f "$_prev"
   else
     life_wd_hold_release
     echo "install-failed"

@@ -187,6 +187,22 @@ else
   else no "T7 缺：$MISS"; fi
 fi
 
+# ── T8 引擎安装门禁（2026-09-26 事故：加速节点 404 正文被当引擎装上）──
+SZ_BEFORE="$(wc -c < "$MODDIR/bin/9router-go" 2>/dev/null | tr -d '[:space:]')"
+VER_BEFORE="$(cat "$DATA_DIR/engine-version" 2>/dev/null)"
+printf 'Not Found' > /data/local/tmp/9r-bogus.new
+OUT8="$("$OPS" install-engine /data/local/tmp/9r-bogus.new 9.9.9 2>&1 | tr -d '\r')"
+case "$OUT8" in
+  *install-rejected-src*) ok "T8a 9 字节 404 正文被拒（$OUT8）" ;;
+  *) no "T8a 坏源未被拒绝：$OUT8" ;;
+esac
+SZ_AFTER="$(wc -c < "$MODDIR/bin/9router-go" 2>/dev/null | tr -d '[:space:]')"
+if [ -n "$SZ_BEFORE" ] && [ "$SZ_BEFORE" = "$SZ_AFTER" ]; then ok "T8b 现有引擎未被改动（$SZ_AFTER 字节）"
+else no "T8b 现有引擎被动过：$SZ_BEFORE → $SZ_AFTER"; fi
+[ "$(cat "$DATA_DIR/engine-version" 2>/dev/null)" = "$VER_BEFORE" ] && ok "T8c engine-version 未被谎报（$VER_BEFORE）" || no "T8c engine-version 被改"
+[ "$("$OPS" panel | tr ' ' '\n' | grep '^engine=')" = "engine=up" ] && ok "T8d 引擎仍 up（门禁没有惊动服务）" || no "T8d 引擎不在跑了"
+rm -f /data/local/tmp/9r-bogus.new
+
 echo "== 结果：通过 $PASS / 失败 $FAIL =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

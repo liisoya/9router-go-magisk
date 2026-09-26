@@ -151,3 +151,37 @@ test('孤儿判定：内置别名（oc/qd/openrouter）结构性豁免', () => {
   assert.ok(!orphans.includes('qd'));
   assert.ok(!orphans.includes('openrouter'));
 });
+
+// ── 引擎更新装前门禁（2026-09-26 事故 fixture）──
+// 事故现场：加速节点对 release 资产返回 404，正文 "Not Found"（9 字节）被装成引擎，
+// 备份被同一份垃圾覆盖，设备上再没有可用引擎（引擎与面板全部停摆）。
+test('engineFileGate：9 字节 "Not Found"（404 正文）判死', () => {
+  const g = KP.engineFileGate(9, '4e6f7420'); // "Not " 的 4 字节十六进制
+  assert.strictEqual(g.ok, false);
+  assert.ok(/不是引擎二进制/.test(g.reason), g.reason);
+});
+test('engineFileGate：体积够但文件头不是 ELF（HTML 错误页）判死', () => {
+  const g = KP.engineFileGate(6 * 1024 * 1024, '3c68746d'); // "<htm"
+  assert.strictEqual(g.ok, false);
+  assert.ok(/不是 ELF/.test(g.reason), g.reason);
+});
+test('engineFileGate：探针读不到就判死，绝不默认放行', () => {
+  assert.strictEqual(KP.engineFileGate(0, '').ok, false);
+  assert.strictEqual(KP.engineFileGate(NaN, '7f454c46').ok, false);
+  assert.strictEqual(KP.engineFileGate(undefined, '7f454c46').ok, false);
+});
+test('engineFileGate：真实引擎（25428128 字节 + ELF 魔数）通过，大小写不敏感', () => {
+  assert.strictEqual(KP.engineFileGate(25428128, '7f454c46').ok, true);
+  assert.strictEqual(KP.engineFileGate(25428128, '7F454C46').ok, true);
+});
+test('checksumGate：取不到校验和即拒绝（旧实现此处放行了 404 正文）', () => {
+  const g = KP.checksumGate('', 'abc');
+  assert.strictEqual(g.ok, false);
+  assert.ok(/未取到 SHA256SUMS/.test(g.reason), g.reason);
+  assert.strictEqual(KP.checksumGate('Not Found', '').ok, false, '404 正文不算校验和');
+});
+test('checksumGate：不匹配拒绝、匹配通过（忽略大小写与空白）', () => {
+  const h = 'b9e06b6a85e5590eecac714f4356d227c706df0b9f9daacd764b0372c2ec67d6';
+  assert.strictEqual(KP.checksumGate(h, h.toUpperCase() + '\n').ok, true);
+  assert.strictEqual(KP.checksumGate(h, h.replace(/^b/, 'a')).ok, false);
+});

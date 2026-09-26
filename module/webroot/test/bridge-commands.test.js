@@ -119,3 +119,24 @@ test('promiseWrap：多行命令整体 base64 收敛为单行', () => {
   assert.ok(cmd.includes("\n} 2>/dev/null | base64 | tr -d '\n'"), 'base64 管道收敛为单行');
   assert.ok(cmd.includes("SELECT 1;"), '内部命令原样保留');
 });
+
+// ── 引擎更新：下载器必须对 HTTP 错误失败 + 装前门禁探针（2026-09-26 事故）──
+// curl 没有 -f 时，404 也写正文并 echo dl-ok → 9 字节 "Not Found" 被当引擎装上。
+test('download：必须带 -f（HTTP ≥400 即非零退出），路径与 URL 经 shq', () => {
+  const cmd = C.download('https://x/y?q=1&z=2', '/data/local/tmp/9r-eng.new', 300);
+  assert.ok(/-f/.test(cmd), '缺 -f 就会把 404 正文当成功');
+  assert.ok(cmd.includes("curl -fsSL -m 300 -o '/data/local/tmp/9r-eng.new'"), cmd);
+  assert.ok(cmd.trim().endsWith('&& echo dl-ok'), cmd);
+});
+test('download：没有 dl-ok（HTTP 失败形态）→ 运行层返回 false', async () => {
+  const orig = C.download;
+  C.download = () => 'echo nothing';
+  assert.strictEqual(await KB.download('u', 'o', 1), false);
+  C.download = orig;
+});
+test('fileSize / elfMagic：只读探针，输出收敛为单值供 engineFileGate 判', () => {
+  assert.ok(C.fileSize('/d/a b').includes("wc -c < '/d/a b'"), C.fileSize('/d/a b'));
+  const m = C.elfMagic('/d/engine');
+  assert.ok(m.includes('head -c 4'), m);
+  assert.ok(m.includes('od -An -tx1'), m);
+});

@@ -552,19 +552,25 @@ async function engUpdate() {
   out.textContent = '下载中（' + (p || '直连') + '）…';
   const base = `https://github.com/luqman-v1/9router-go/releases/download/${ver}`;
   if (!await KB.download(withAccel(base + '/9router-go-linux-arm64', p), '/data/local/tmp/9r-eng.new', 300)) {
-    out.textContent = '❌ 下载失败'; return;
+    out.textContent = '❌ 下载失败（HTTP 非 2xx 或网络中断）—— 设备上的引擎未改动';
+    return;
   }
+  // 装前门禁①：像不像一个引擎（体积 + ELF 魔数）。不合格绝不进 install-engine。
+  // 2026-09-26 事故：加速节点返回 404 正文 "Not Found"（9 字节），被当成引擎装上。
+  const size = await KB.fileSize('/data/local/tmp/9r-eng.new');
+  const magic = await KB.elfMagic('/data/local/tmp/9r-eng.new');
+  const gFile = KP.engineFileGate(size, magic);
+  if (!gFile.ok) { out.textContent = `❌ ${gFile.reason}\n已中止，设备上的引擎未改动`; return; }
+  // 装前门禁②：校验和 —— **取不到就拒绝**（旧实现"取不到跳过校验"正好放行了 404 正文）
   out.textContent += '\n校验 SHA256…';
   const sum = await KB.fetch(withAccel(base + '/SHA256SUMS.txt', p), 60);
   const sumLine = sum.out.split('\n').find(l => l.includes('9router-go-linux-arm64')) || '';
-  const expected = (sumLine.match(/^([0-9a-f]{64})/) || [])[1];
-  if (expected) {
-    const actual = await KB.sha256('/data/local/tmp/9r-eng.new');
-    if (actual !== expected) { out.textContent += `\n❌ SHA256 不匹配（${actual}），已放弃`; return; }
-    out.textContent += '✅';
-  } else out.textContent += '\n⚠️ 未取到校验和，跳过校验';
-  out.textContent += '\n替换二进制并重启…';
-  // 安装唯一入口：备份 → 替换 → 权限 → 记录版本 → 重启，全在 ops.sh seam 内
+  const expected = (sumLine.match(/^([0-9a-f]{64})/i) || [])[1];
+  const actual = await KB.sha256('/data/local/tmp/9r-eng.new');
+  const gSum = KP.checksumGate(expected, actual);
+  if (!gSum.ok) { out.textContent += `\n❌ ${gSum.reason}`; return; }
+  out.textContent += ' ✅\n替换二进制并重启…';
+  // 安装唯一入口：门禁 → 回滚点 → 替换 → 权限 → 起来后才写版本，全在 ops.sh seam 内
   const r = await KB.ops(`install-engine /data/local/tmp/9r-eng.new ${ver}`);
   if (r.out.trim() !== 'engine=up') { out.textContent += `\n❌ 安装/重启失败：${r.out.trim()}`; return; }
   await refresh();
