@@ -131,9 +131,10 @@ if [ "$OFFLINE" = 1 ]; then
       run "DEADH handler 挂载巡检（新增未挂载即红）" python3 tools/check-dead-handlers.py
     fi
     # PY-UNIT：棘轮 module 的接口级单测（三个门禁的机械结构只此一处，故测这里=测三个）
+    # -B：不写 __pycache__（.gitignore 是上游文件，不该为它改动；discovery 导入测试模块时最容易漏）
     if [ -f tools/test_ratchet.py ]; then
       run "PY-UNIT 棘轮 module 单测（unittest discover tools）" \
-        python3 -m unittest discover -s tools -p 'test_*.py'
+        python3 -B -m unittest discover -s tools -p 'test_*.py'
     fi
   fi
 fi
