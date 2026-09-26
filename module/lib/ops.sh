@@ -6,7 +6,7 @@
 #   生命周期 = lib/lifecycle.sh（进程启停、用户意图、状态文件、cgroup 脱组）。本文件只 source 它，
 #              **绝不自己读写任何 lifecycle 状态文件**（否则"状态无主"的老毛病会立刻回来）。
 # 输出约定：机器可读的 key=value 行（WebUI 解析）；部分子命令输出状态词。
-USAGE="ops.sh <status|panel|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port>"
+USAGE="ops.sh <status|panel|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port>"
 # 环境变量: DATA_DIR（默认 /data/adb/9router-go）、PORT（显式覆盖端口）
 
 MODDIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -148,6 +148,11 @@ cmd_install_module() {
     echo "install-failed"
     return 0
   fi
+  # 目录整体换 inode 会连带丢掉"不在包内"的文件 —— bin/9router-go.bak（回滚点）就是唯一一个，
+  # 先把它放进暂存的 bin/，让它跟着一起换过去，回滚能力不因整包更新而消失。
+  if [ -f "$MODDIR/bin/9router-go.bak" ] && [ -d "$_stage/bin" ]; then
+    cp "$MODDIR/bin/9router-go.bak" "$_stage/bin/9router-go.bak" 2>/dev/null
+  fi
   # 目录整体换 inode：先把新目录搬成 .new，再把旧目录挪开，最后就位
   # （直接 `mv 新目录 $MODDIR/` 且旧目录同名时，会把新目录塞进旧目录里 —— 必须绕开）
   for _d in lib bin webroot etc; do
@@ -174,7 +179,61 @@ cmd_install_module() {
     rm -f "$DATA_DIR/engine-version"   # 包里没有 → 宁可显示"未知"，也不要留旧版本的谎报
   fi
   rm -f "$1"
-  life_restart_engine
+  # 与 install-engine 同一语义：只有新引擎**真的起来**才把恢复点刷成这一份（已验证可用）
+  if [ "$(life_restart_engine)" = "engine=up" ]; then
+    cp "$MODDIR/bin/9router-go" "$MODDIR/bin/9router-go.bak" 2>/dev/null
+    echo "engine=up"
+  else
+    echo "engine=down"
+  fi
+}
+
+CLEAN_KEEP_BACKUPS="${CLEAN_KEEP_BACKUPS:-5}"   # 备份快照保留份数（新的在前）
+
+cmd_cleanup() {
+  # 清理"更新/安装/运行"留下的可安全丢弃的残留（`--dry-run` 只报告，不动手）。
+  # 绝不碰：当前引擎二进制、`.bak` 回滚点、`last-module.zip`（整包回滚用）、DB、凭据、
+  #         端口/加速节点等配置、watchdog 状态文件、最近 CLEAN_KEEP_BACKUPS 份备份快照。
+  _dry="${1:-}"
+  _freed=0
+  _del() {
+    [ -e "$1" ] || return 0
+    _sz="$(du -sk "$1" 2>/dev/null | awk '{print $1}')"; _sz="${_sz:-0}"
+    if [ "$_dry" = "--dry-run" ]; then
+      echo "  [dry] $1 （${_sz}KB）"
+    else
+      rm -rf "$1" 2>/dev/null && { _freed=$((_freed + _sz)); echo "  已删 $1 （${_sz}KB）"; }
+    fi
+  }
+  echo "== 清理残留（保留：当前二进制 / .bak 回滚点 / last-module.zip / DB / 凭据 / 最近 ${CLEAN_KEEP_BACKUPS} 份备份）=="
+  # 1) 安装/更新过程中可能遗留的半份目录与回滚中间件
+  for _d in lib bin webroot etc; do _del "$MODDIR/$_d.old"; _del "$MODDIR/$_d.new"; done
+  _del "$DATA_DIR/module-stage"
+  _del "$DATA_DIR/engine.prev"
+  # 2) 旧的安装包与临时下载（/data/local/tmp 是共享目录，只删我们自己的命名）
+  _del /data/local/tmp/9r-eng.new
+  _del /data/local/tmp/9r-mod.zip
+  _del /data/local/tmp/9r-gate.zip
+  for _z in /data/local/tmp/9router-go-*.zip; do
+    case "$_z" in *'*'*) continue ;; esac
+    _del "$_z"
+  done
+  # 3) 日志轮转产物（上限由 lib/log.sh 管；这里只收走已经轮转出去的那份）
+  for _l in "$DATA_DIR"/9router.log.1 "$DATA_DIR"/dnsfwd.log.1 "$DATA_DIR"/watchdog.log.1; do _del "$_l"; done
+  # 4) 备份快照只留最近 N 份（旧的误删回滚点没必要长期堆着）
+  if [ -d "$DATA_DIR/backups" ]; then
+    _i=0
+    for _f in $(ls -1t "$DATA_DIR/backups" 2>/dev/null); do
+      _i=$((_i + 1))
+      [ "$_i" -le "$CLEAN_KEEP_BACKUPS" ] && continue
+      _del "$DATA_DIR/backups/$_f"
+    done
+  fi
+  if [ "$_dry" = "--dry-run" ]; then
+    echo "（dry-run：未删除任何文件；数据目录当前 $(du -sk "$DATA_DIR" 2>/dev/null | awk '{print $1}')KB）"
+  else
+    echo "释放约 $((_freed / 1024))MB；数据目录现在 $(du -sk "$DATA_DIR" 2>/dev/null | awk '{print $1}')KB"
+  fi
 }
 
 cmd_seed_key() {
@@ -214,6 +273,7 @@ case "${1:-}" in
   hold)            shift; life_wd_hold "${1:-180}"; echo "held" ;;
   install-engine)  shift; cmd_install_engine "$@" ;;
   install-module)  shift; cmd_install_module "$@" ;;
+  cleanup)         shift; cmd_cleanup "$@" ;;
   start-dns)       life_ensure_dns ;;
   stop-dns)        life_disable_dns; echo "stopped" ;;
   enable-dns)      life_enable_dns ;;

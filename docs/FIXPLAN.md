@@ -418,6 +418,37 @@
 - [ ] **待决策**：真正的 SSO 登录回调（authorization code 交换 + id_token/断言签名校验 + 会话签发）
   是否要做；若不打算支持登录，建议把设置页的 OIDC/SAML 入口标注为"仅测试连接"。
 
+## Phase 25 · 收尾：清理命令、免密码功能门禁、缺口影响分析 ✅ 2026-09-26
+
+- [x] **25.1 新增 `ops.sh cleanup [--dry-run]`**（用户要求"更新完把旧数据与二进制清掉"）：
+  清安装残留（`*.old`/`*.new`/`module-stage`/`engine.prev`）、旧安装包与临时下载
+  （`/data/local/tmp/9r-*`、`9router-go-*.zip`）、轮转日志 `.1`、备份快照只留最近 5 份；
+  **保留**当前二进制、`.bak` 恢复点、`last-module.zip`（整包回滚 + T10 用）、DB、凭据、配置。
+  首次执行：设备释放 ~28MB（两个旧包），本地另清 29MB（两个旧 dist zip）。
+- [x] **25.2 修两处本轮自造的副作用**
+  - 目录整体换 inode 会连带抹掉"不在包内"的 `bin/9router-go.bak` → 更新前先把它搬进暂存、
+    更新成功后再按"已验证可用"刷一次（与 install-engine 同语义）；真机已重建（25,559,200B）；
+  - 功能门禁的 CLI token 触发点原用 `/api/auth/status`（现为公开路由，中间件不跑、文件不生成）
+    → 改用必过 `RequireDashboardAuth` 的 `/api/settings/database`。
+- [x] **25.3 功能门禁改为免密码**：`tools/device/test-dashboard-api.sh` 改用本机 CLI token
+  （machine-id + `9r-cli-auth` + cli-secret 推导）而非用户登录密码 —— 用户改密码也不会让门禁失效。
+  真机 **7/7**：A1 `/version` 公开 ✓ ｜ A2 CLI token 调 `/api/models/test` → 400（越过鉴权、
+  不依赖 apiKeys 表）✓ ｜ A3a CLI token 导出 → 200 ✓ ｜ A3b·A3c 错误与无密码 401 ✓ ｜
+  A4 对照组 `/v1/models` 401 ✓ ｜ **A5 导出载荷含密码/登录状态字段**（即"导入后按导入数据的密码登录"）。
+- [x] **25.4 缺口影响分析（回答"这些缺口不修会怎样"）**：把 UI（`web/src` + `module/webroot`）
+  实际调用的 81 条路径与 135 条基线缺口求交，得到 6 条"路径看起来会碰到"的项，逐条核对：
+  - `/api/auth/oidc/start`、`/api/auth/saml/start` —— **真的会 404**，但根因是"SSO 登录整体未实现"
+    （上游两端都没实现），不是端点漏移植；
+  - `/api/models/custom` DELETE、`/api/models/disabled` POST/DELETE、`/api/oauth/cursor/import` GET、
+    `/api/providers` POST —— UI 实际调用的是等价路径（`/custom/{key}` DELETE、`/disabled/{provider}` PUT、
+    cursor `POST`、新建走 `/api/connections`），**碰不到**。
+  → 结论：135 条缺口里用户可感知的只有 SSO 这一条线；其余是上游 Next 版的别名/扩展形状。
+- [x] **25.5 决策**：**SSO 登录不做**（模块面向个人 Android 设备，密码 + API key 已够，上游亦未实现）；
+  缺口的推进责任在**上游 Go 移植**（luqman-v1/9router-go），模块侧只保证"UI 不指向缺失端点"
+  + "不假装有" + 棘轮巡检（Phase 21）在新缺口出现时报警。
+- [x] **25.6 发布节奏**：用户明确"不频繁发版，本地测完确认再发" → 本轮不推任何 tag/远端，
+  `v1.9.2-r1` 只作为本地工作版本号（引擎/模块均已升到 1.9.2 基线）。
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |
