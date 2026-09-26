@@ -73,12 +73,16 @@
     <h2><span class="dot" id="dot-dns"></span>运行状态</h2>
     <div class="kv"><span>引擎</span><b id="st-eng">检测中…</b></div>
     <div class="kv"><span>DNS 转发器</span><b id="st-dns">检测中…</b></div>
+    <div class="kv"><span>生命周期守护</span><b id="st-wd">检测中…</b></div>
     <div class="kv"><span>引擎端口</span><b id="st-port">-</b></div>
     <div class="kv"><span>引擎版本</span><b id="st-ver">-</b></div>
     <div class="row" style="margin-top:10px">
       <button class="primary" id="btn-refresh">刷新</button>
       <button class="danger" id="btn-restart-all">重启引擎 + DNS</button>
+      <button id="btn-start-svc">启动服务</button>
+      <button class="danger" id="btn-stop-svc">停止服务</button>
     </div>
+    <div class="hint">「停止服务」是<b>用户意图</b>：守护不会把它自动拉回来（此前只有重启，想停就停不下来）。</div>
     <div id="diag" class="hint" style="display:none;white-space:pre-wrap;word-break:break-all;margin-top:8px;color:var(--warn)"></div>
   </div>
 

@@ -27,18 +27,25 @@ test('cmpVer 数值化比较（1.9 < 1.10，不能按字符串比）', () => {
 });
 
 // ── parseOpsStatus：lib/ops.sh status 输出 ──
-const OPS_STATUS = 'port=20128\r\nbind=loopback\r\nmodule_version=v1.9.1-r1\r\nengine_version=v1.9.1\r\ndns=up\r\ndns_pid=7809\r\nengine=up\r\nengine_pid=25720\r\nfactory_key=1\r\napikeys_total=2\r\n';
+const OPS_STATUS = 'port=20128\r\nbind=loopback\r\nmodule_version=v1.9.1-r1\r\nengine_version=v1.9.1\r\ndns=up\r\ndns_pid=7809\r\nengine=up\r\nengine_pid=25720\r\nwatchdog=up\r\nwatchdog_pid=25700\r\nfactory_key=1\r\napikeys_total=2\r\n';
 test('parseOpsStatus 解析全部键并剥离 CRLF', () => {
   const st = KP.parseOpsStatus(OPS_STATUS);
   assert.strictEqual(st.port, '20128');
   assert.strictEqual(st.dns, 'up');
   assert.strictEqual(st.dns_pid, '7809');
   assert.strictEqual(st.engine_version, 'v1.9.1');
+  assert.strictEqual(st.watchdog, 'up');
+  assert.strictEqual(st.watchdog_pid, '25700');
   assert.strictEqual(st.factory_key, '1');
 });
 test('parseOpsStatus 覆盖 dns=yielded（:53 被占自动让路）', () => {
   const st = KP.parseOpsStatus('dns=yielded\nengine=down\n');
   assert.strictEqual(st.dns, 'yielded');
+});
+test('parseOpsStatus 覆盖 engine=stopped（用户显式停服，与"未运行"必须可区分）', () => {
+  const st = KP.parseOpsStatus('engine=stopped engine_pid= watchdog=up watchdog_pid=2338');
+  assert.strictEqual(st.engine, 'stopped');
+  assert.strictEqual(st.watchdog, 'up');
 });
 test('parseOpsStatus 兼容单行空格分隔（promise 降级形态）', () => {
   const st = KP.parseOpsStatus('port=20128 bind=loopback module_version=v1.9.1-r1 engine_version=v1.9.1 dns=up engine=up factory_key=1 apikeys_total=2');
@@ -71,10 +78,12 @@ const PROBE_OUT = [
   '  dot 223.5.5.5:853                  dot www.baidu.com             121ms  2/2  111.45.11.5',
   // 可用率不足，应被过滤
   '  8.8.8.8                            v4  www.baidu.com               96ms  0/2  ',
+  // fake-ip（TUN 接管）：dnsfwd.c:1368 在行尾追加标记（真机实测形状），必须被重罚
+  '  1.1.1.1                            v4  www.baidu.com                3ms  2/2  198.18.0.1  ← fake-ip(TUN 接管)',
 ].join('\n');
 test('parseDnsProbeOutput 解析空格对齐输出（含 DoH upstream 空格）', () => {
   const rows = KP.parseDnsProbeOutput(PROBE_OUT);
-  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(rows.length, 4);
   // 评分 = 可用率×100 − RTT/50：明文 2ms → 99.96 最高；DoT 121ms → 97.6；DoH 455ms → 90.9
   assert.strictEqual(rows[0].upstream, '223.5.5.5');
   assert.strictEqual(rows[1].upstream, 'dot 223.5.5.5:853');
@@ -93,6 +102,16 @@ test('parseDnsProbeOutput 按评分降序（可用率权重 > 延迟）', () => 
 test('parseDnsProbeLine 坏行返回 null（不抛异常）', () => {
   assert.strictEqual(KP.parseDnsProbeLine(''), null);
   assert.strictEqual(KP.parseDnsProbeLine('garbage line'), null);
+});
+test('parseDnsProbeOutput：fake-ip 上游罚 100（index.html 的承诺曾静默缺失）', () => {
+  const rows = KP.parseDnsProbeOutput(PROBE_OUT);
+  const fake = rows.find(r => r.upstream === '1.1.1.1');
+  assert.ok(fake, 'fake-ip 行必须被解析出来');
+  assert.strictEqual(fake.fakeip, true);
+  // 2/2 可用、3ms：不罚分是 99.94，罚 100 后是 −0.06
+  assert.strictEqual(fake.score, 100 - 3 / 50 - 100);
+  assert.strictEqual(rows[0].fakeip, false, '普通行不得被误判 fake-ip');
+  assert.ok(fake.score < rows[0].score, '假 IP 上游绝不能排到前面');
 });
 
 // ── 上游行规范化 ──

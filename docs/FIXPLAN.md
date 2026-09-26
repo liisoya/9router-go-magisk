@@ -144,6 +144,125 @@
 - [x] **15.4 完整构建**：build.sh 7 步全绿（web 测试 17/17、schema 漂移断言 ✓、引擎 arm64 编译含全部补丁、MODID 注入、verify_zip ✓）→ **`dist/9router-go-1.9.1-r2-magisk.zip` (15M)**
 - [ ] **待用户发布**：① GitHub 创建 release `v1.9.1-r2` 并上传 zip；② 提交并推送 `update.json`（旧版设备靠它检测更新）；③ git 提交本次全部变更（等用户明确指示）
 
+## Phase 16 · 生命周期根治：cgroup 脱组 + 守护 + 三处"谎报成功" ✅ 2026-09-26
+
+> 用户症状：「跑一段时间后引擎未运行、Dashboard 打不开，手动重启才恢复」（两台设备同样反馈）。
+> 用户追问：「是系统杀后台，还是模块内部 BUG？会不会占用高时自己把自己杀掉？」
+
+- [x] **16.1 根因（真机取证，非推断）**：
+  - 引擎与 `dnsfwd` **同时静默消失**（无退出行、无 panic、无 OOM、设备未重启）；
+  - `dumpsys activity exit-info me.weishu.kernelsu`：`11:35:23 reason=10 USER REQUESTED / LockScreenClean`（同刻另有 2 个 App 被清）；
+  - `ksu.exec`（模块 WebUI）派生的 `sh` 是**管理器应用的子进程**，cgroup `0::/uid_10235/pid_X`（实测）；`setsid` 只换会话**不换 cgroup**（实测：把 setsid 进程放进应用 cgroup → `am force-stop` 后同死）；
+  - 旧模块**无守护** → 一死即永久停机。**排除**"内存超限自杀"：全仓非测试代码只有启动期 `log.Fatal/os.Exit` 与自更新 `RestartSelf`（先拉起新进程再退旧），面板 200/300MB 只是 UI 上色阈值。
+- [x] **16.2 修复 A（脱组）**：启动收敛到 `ops.sh start-engine`（唯一实现），起来后 `cgroup_escape`（root 写 cgroup 根 `cgroup.procs`）；`start-dns` 同办。失败不阻塞启动（守护兜底）但如实写日志。
+- [x] **16.3 修复 B（守护）**：新增 `module/lib/watchdog.sh` —— 只判"pid 在不在"（不做健康度判据）、连续两次判死才动手、`watchdog-hold` 维护窗口让路、`watchdog.req` 请求优先于 hold、只由 `service.sh` 在开机路径武装（`watchdog-armed` 是闸）；`restart-engine` 有守护时**委托守护**执行停止+启动（ADR-0004）。
+- [x] **16.4 可观测**：`ops.sh status/panel` 增 `watchdog=up|down|stale` + `watchdog_pid`；概览页新增「生命周期守护」行。
+- [x] **16.5 回归测试（AGENTS §5.0）**：`tools/device/test-lifecycle.sh` —— T1 守护在场 / T2 `kill -9` 后 40s 内自愈（新 PID + `/health` 200）/ T3 在管理器应用 cgroup 里启动仍脱组。**修复前 T2、T3 必红**；真机 **3/3 绿**（T2 新 pid cgroup=/ health=200；T3 脱组 cgroup=/）。
+- [x] **16.6 计划外真 bug（数据安全级）：`sqlSnapshot` 假成功**
+  - 现场证据：`backups/kv-before-orphan-clean-2026-09-26T03-16-05.sql` 是 **0 字节**，而界面报"删除前快照已存"；
+  - 复现（真机）：`sqlite3 db ".mode insert kv" "<坏SQL>" > out` → **rc=1 size=0**（`>` 已建出空文件）；旧实现 `sqlSnapshot()` 只判 `!r.err`（exec 层错误）→ 成功；
+  - 修复：命令自带 `[ -s ]` 判据 + `snap-ok/snap-fail` 哨兵 + 失败删空文件；JS 只认 `snap-ok`；
+  - 回归：`test/bridge-commands.test.js` 两条（差分验证：修复前 3 红 → 修复后 33/33 绿）。
+- [x] **16.7 计划外真 bug：守护把"让路"当"死亡"空转**（本次新增代码自身缺陷）
+  - `:53` 被第三方占用（yielded）时，守护每 ~16s 判死一次 → `start-dns` 回 yielded → 往 `dnsfwd.log` 追加一行，永不停止；
+  - 修复：`port53-busy=1` 视为健康；隔离差分夹具（独立 DATA_DIR + 伪造引擎 pidfile）实测 **修复前 22s 内判死 5 次 / 修复后 0 次**。
+- [x] **16.8 计划外真 bug（4 处，均带证据）**：
+  - `pgrep -f` 裸子串匹配：引擎按整条命令行锚定（`^...$`）；dnsfwd 只匹配守护形态（`-b `）—— 否则会误杀面板正在跑的 `dnsfwd -P` 探测进程；
+  - pidfile 杀进程无身份校验（PID 复用会误杀无关进程）→ 新增 `pid_is_exe`（`readlink /proc/pid/exe`，容忍 ` (deleted)`）；
+  - `uninstall.sh` 硬编码模块路径 + 只按 pidfile 停进程（卸载后可能留占 `:53` 的孤儿）→ 从 `$0` 推导 + 路径兜底；
+  - `cmd_prep_db` 无条件 `echo ok`（schema/autoUpdate 压回失败都谎报成功）→ 改 `ok|degraded` 并写日志；`restart-engine` 与守护 pidfile 落盘的竞态（会退回调用者 cgroup 启动）→ `watchdog-start` 等 pidfile 就位。
+- [x] **16.9 发布物料**：`module.prop` → `v1.9.1-r3` / `109012`；`update.json` 同步；`build.sh` verify_zip 增 `lib/watchdog.sh` 断言；`tools/deploy-device.sh` 推送 lib/{ops,watchdog}.sh + service.sh；ADR-0004 + MAGISK.md 生命周期章节。
+- [ ] **待用户发布**：① GitHub release `v1.9.1-r3` + 上传 zip；② 推送 `update.json`；③ git 提交（等用户明确指示）
+- [ ] **待真机验收**：面板概览出现「生命周期守护 运行中」；升级 r3 后长时间运行不再变"未运行"
+
+## Phase 17 · C1 生命周期收成一个 module（架构体检 C1）✅ 2026-09-26
+
+> 体检结论：守护引入了 4 个状态文件 + 优先级规则，由 3 个 module 各自读写，**没有所有者**；
+> 已经因此出过两次真 bug（撤销用户的"关守护"意图、`watchdog-start` 与 pidfile 落盘的竞态）。
+
+- [x] **17.1 新增 `module/lib/lifecycle.sh`**（可 source、零副作用）：状态文件
+  （`watchdog-armed/-hold/-req/-off`、`service-off`、三个 pidfile）全部成为它的实现细节；
+  接口按意图设计（`life_boot` / `life_stop_user` / `life_start_user` / `life_restart_engine` /
+  `life_ensure_engine|dns` / `life_wd_should_supervise` / `life_state`）。ADR-0005 登记。
+- [x] **17.2 `ops.sh` 退为配置与编排**：数据（schema/端口/密码/出厂 key）+ 状态聚合 +
+  安装编排；**对外子命令集合不变**（action.sh / WebUI / 门禁零改动），新增 `stop-user`/`start-user`。
+- [x] **17.3 `watchdog.sh` 只做轮询/去抖/记日志**：三处内联状态判断 → `life_wd_should_supervise`
+  + 两个健康谓词；`dnsfwd` 的"让路 = 正常稳态"语义只在一个谓词里。顺带修掉"固定 3s 判拉起失败"
+  的误报（改轮询到 10s，真机见过日志说失败但 2s 后 /health 200）。
+- [x] **17.4 用户意图可见可操作**：WebUI 概览新增「启动服务 / 停止服务」；`engine=stopped`
+  与 `engine=down` 分开显示（前者是用户要的，后者才要查）。
+- [x] **17.5 回归（AGENTS §5.0）**：`tools/device/test-lifecycle.sh` 扩到 **T4**（停服后 30s 内
+  不得被复活 + 显式启动恢复）与 **T5**（维护窗口内不插手 + 到期后必须自愈）。真机 **10/10 绿**。
+  红侧基线：修复前 `kill -9` 引擎后 10s 内必被拉起（即 T4 的"意图不被尊重"行为）。
+- [x] **17.6 结构副作用**：`uninstall.sh` 正常走 `life_shutdown`，仅保留被明确标注的
+  "library 不可读时"兜底（卸载是最后一道保险）；`CONTEXT.md` 新增「生命周期 / 意图」术语；
+  `service.sh` 成为纯开机时序（每个动作的语义都在 lifecycle）。
+- [x] **17.7 语法与部署链**：全部脚本 `sh -n` 通过；`deploy-device.sh` 改推 `lib/*.sh`；
+  `build.sh` verify_zip 增 `lib/{lifecycle,log}.sh` 断言。
+
+## Phase 18 · C2 键契约门禁（架构体检 C2）✅ 2026-09-26
+
+- [x] **18.1 病根**：`ops.sh status/panel` 的接口是"一行 20+ 个 key=value"，键名契约四处手抄
+  （shell emit / JS parse / JS consume / 测试 fixture），漂移是**静默**的（`st.watchdog_state`
+  这类错拼只得到 undefined，界面安静地空着）。
+- [x] **18.2 门禁（源码即契约）**：新增 `module/webroot/test/contract-keys.test.js` ——
+  从 shell 的 `cmd_status`/`cmd_panel`/`life_state` 的 **echo 模板段**抽 emit 键，
+  从 `app.js` 抽消费键（`st.<key>`），断言：① 消费 ⊆ emit；② emit 的键要么被消费、
+  要么在 `EMIT_ONLY` 里逐条写明理由（当前 3 条：`factory_key`/`apikeys_total`/`bind`）。
+- [x] **18.3 差分验证**：把 `app.js` 的 `st.watchdog` 改成 `st.watchdog_state` →
+  门禁红（"app.js 读了 shell 没输出的键：watchdog_state"）→ 恢复即绿。
+- [x] **18.4 接入构建闸门**：`build.sh` 第 3 步从"只跑 parsers"改为 `node --test module/webroot/test/*.test.js`
+  （三套：解析层 / 命令构造器 / 键契约），离线 **37/37**。
+
+## Phase 19 · C3+C4 承载性 env 与日志各自收成单一来源 ✅ 2026-09-26
+
+- [x] **19.1 C3 承载性 env**：`$DATA_DIR/runtime.env`（0600，构建器 `life_write_runtime_env`，
+  清单 `life_carrier_env_keys` = 6 键）为唯一来源；`life_ensure_engine` 改成
+  `set -a; . runtime.env` 加载，生成失败才退回内联并**写日志**。ADR-0006 登记。
+- [x] **19.2 C4 日志策略**：新增 `lib/log.sh`（路径 + 上限 + 轮转实现唯一一份）；
+  写者只有两种用法（`log_write` / `LOG_*_PATH` 流重定向）；守护每 ~60s `log_rotate_all`。
+  之前 `9router.log`（每请求一行）与 `dnsfwd.log` **无任何轮转**。
+- [x] **19.3 回归**：门禁新增 **T6**（隔离数据目录实跑轮转：440000B → 4400B）与
+  **T7**（承载性 env 键在 `runtime.env` **且真的进了引擎进程** `/proc/<pid>/environ`）。
+  真机 **T1–T7 全绿（10 条断言）**。
+- [x] **19.4 术语**：`CONTEXT.md` 新增「承载性 env」。
+
+## Phase 20 · Dashboard「Download Backup」401 Invalid password 根治（用户报障）✅ 2026-09-26
+
+> 用户报障：Settings → Download Backup 报 `Invalid password`，但"明明设了密码、也能正常登录"。
+
+- [x] **20.1 定性（不是模块 bug，也不是上游 bug —— 是本 fork 的 Svelte 仪表盘移植缺失）**
+  - 上游 spec：`GET /api/settings/database` 要求 `x-9r-password` 头
+    （`9router/src/app/api/settings/database/route.js:16`），官方 UI 是**先弹层输密码**再带头发请求
+    （`profile/page.js:663-668`，弹层 `:1673-1699`），文件名 `.json`（`:687`）；
+  - fork 的 Go handler **与上游 parity**（`internal/handlers/dashboard/settings.go:119`）→ 没有该头即
+    `401 {"error":"Invalid password"}`（用户看到的就是这一句；登录态救不了，那是 handler 的独立判据）；
+  - fork 的 Svelte 仪表盘用裸 `<a href="/api/settings/database">` 下载（`ProfileSettingsView.svelte:199-211`）
+    —— 既不带密码头、也没有输密码的弹层；
+  - **红基线**：修复前 `web/dist/assets/` 里 `x-9r-password` 命中 **0**。
+- [x] **20.2 修在正确的一层（前端；不动 Go handler → 不需要 ADR-0003 补丁、不欠上游 PR）**
+  新增 `web/src/lib/db-backup.ts`（请求形状/文件名/错误文案的纯函数唯一实现）+
+  `ProfileSettingsView.svelte` 恢复上游的密码弹层（`Modal` + `Input`，Svelte 5 runes）；
+  顺带修掉两处同源偏差：导出文件名 `.sqlite` → `.json`（内容本来就是 JSON）、
+  导入改回上游形状（JSON + password，Go 侧 multipart 分支保留为兼容超集）。
+- [x] **20.3 回归（AGENTS §5.0）**
+  - 前端 `web/src/lib/db-backup.test.ts`（bun:test）4 条：导出必须带密码头 / 导入是 JSON+password /
+    文件名 `.json` / 服务端 `{error}` 文案要透出给用户 —— 修复前必红；
+  - Go `settings_test.go` 新增 `TestHandleExportDatabase_AcceptsPasswordHeader`
+    （错密码 401 / 对密码 200 且导出体非空）✓；
+  - 构建期闸门 `build.sh`：`web/dist/assets` 必须含 `x-9r-password`（修复前红，修后绿）。
+- [x] **20.4 真机交付**：本地 arm64 交叉编译（go1.27）→ 二进制内嵌前端含密码头（`strings` 命中 2）→
+  用模块自己的 `install-engine` 入口装入真机（幂等 + 自动备份 + 重启，`engine=up`）。
+- [x] **20.5 计划外真 bug（同轮暴露）：stop→start 竞态**
+  - 现象：真机 15:34:44 守护日志写"拉起失败"，下一轮又成功 → `life_stop_all` 原先只 `sleep 1`，
+    而引擎收到 SIGTERM 要 drain SSE / 关监听才退，1s 不够 → 新实例 bind 失败；
+  - 修：`life_pid_gone`（含僵尸态判定，`kill -0` 对僵尸仍为真会拖满等待）+ `life_stop_all` 轮询等待
+    （最多 10s）；守护的 `restart`/`start` 请求补上 `life_ensure_dns`（`stop_all` 把 DNS 也停了，
+    同一处必须一起拉回来，别再靠监督分支 10s 后补救）；
+  - 验证：连做 3 次 `restart-engine` 全部 `engine=up`，`watchdog.log` 无"拉起失败"。
+- [ ] **待用户验收**：Dashboard 硬刷新（新资源带 hash，普通刷新即可）→ Settings → Download Backup →
+  弹层输当前密码 → 应下载 `9router-backup-<时间戳>.json`（修复前是 401）
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |
@@ -155,6 +274,8 @@
 | 孤儿扫描/清理 | 按钮点击 | 扫描正常，误判护栏生效 |
 | 引擎/模块更新检查 | 按钮点击 | 版本比对正确 |
 | 新设备装机 | 刷 zip | 面板秒出（chmod 兜底完整） |
+| **生命周期自愈** | `kill -9` 引擎 | 10s 内自动回来（守护拉起，cgroup=/），面板无需手动重启 |
+| **脱组** | WebUI 点重启引擎 | 新引擎 cgroup=`/`（不再随管理器应用被清理） |
 
 ## Grilling 决策记录
 

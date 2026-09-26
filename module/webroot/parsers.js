@@ -78,13 +78,22 @@
       answers: m[7] || ''
     };
   }
-  // 行数组 → 合格候选（可用率 ≥50%），按评分降序。评分 = 可用率×100 − RTT/50。
+  // 行数组 → 合格候选（可用率 ≥50%），按评分降序。
+  // 评分 = 可用率×100 − RTT/50 − fake-ip 罚 100（与 index.html 的承诺一致）。
+  // fake-ip 判据来自 dnsfwd -P 人类可读输出行尾的 `← fake-ip(TUN 接管)`（tools/dnsfwd.c:1368，
+  // 答案落在 198.18.0.0/15 = mihomo 默认 fake-ip 段时追加）：走 TUN 假 IP 的上游虽然 ping 得通，
+  // 但给不了真实解析，必须重罚，否则优选会把假 IP 的上游排到前面。
+  const FAKEIP_RE = /fake-ip/;
   function parseDnsProbeOutput(text) {
     const rows = [];
     for (const line of stripCr(text).split('\n')) {
       const p = parseDnsProbeLine(line);
       if (!p || p.okRate < 0.5) continue;
-      rows.push({ upstream: p.upstream, rtt: p.rtt, okRate: p.okRate, score: p.okRate * 100 - p.rtt / 50 });
+      const fakeip = FAKEIP_RE.test(p.answers);
+      rows.push({
+        upstream: p.upstream, rtt: p.rtt, okRate: p.okRate, fakeip,
+        score: p.okRate * 100 - p.rtt / 50 - (fakeip ? 100 : 0)
+      });
     }
     rows.sort((a, b) => b.score - a.score);
     return rows;
@@ -128,7 +137,7 @@
 
   return {
     stripCr, parseProp, cmpVer,
-    parseOpsStatus, parseMeminfo, parseProcRss,
+    parseOpsStatus, parseMeminfo, parseProcRss, FAKEIP_RE,
     parseDnsProbeLine, parseDnsProbeOutput,
     normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans
   };

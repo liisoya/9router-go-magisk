@@ -136,9 +136,18 @@ function renderPanel(st, live) {
   else { dnsDot.className = 'dot err'; dnsTxt = '未运行'; }
   document.getElementById('st-dns').textContent = dnsTxt;
   document.getElementById('dnsw-state').textContent = dnsTxt;
+  // 守护：引擎"死了能不能自己回来"必须可见（此前完全不可见，用户只知道"要手动重启"）
+  const wdEl = document.getElementById('st-wd');
+  if (wdEl) {
+    if (st.watchdog === 'up') { wdEl.textContent = '运行中 (PID ' + st.watchdog_pid + ')'; wdEl.style.color = 'var(--ok)'; }
+    else if (st.watchdog === 'stale') { wdEl.textContent = '未运行（已武装，下次重启生效）'; wdEl.style.color = 'var(--warn)'; }
+    else { wdEl.textContent = '未启用'; wdEl.style.color = 'var(--warn)'; }
+  }
   const engUp = st.engine === 'up';
-  document.getElementById('st-eng').textContent = engUp ? '运行中 (PID ' + st.engine_pid + ')' : '未运行';
-  document.getElementById('st-eng').style.color = engUp ? 'var(--ok)' : 'var(--err)';
+  const engStopped = st.engine === 'stopped';   // 用户显式停服（守护尊重该意图，不会自动拉起）
+  document.getElementById('st-eng').textContent = engUp ? '运行中 (PID ' + st.engine_pid + ')'
+    : engStopped ? '已停止（用户设置）' : '未运行';
+  document.getElementById('st-eng').style.color = engUp ? 'var(--ok)' : engStopped ? 'var(--warn)' : 'var(--err)';
   document.getElementById('st-port').textContent = st.port;
   document.getElementById('in-port').value = st.port;
   document.getElementById('st-ver').textContent = st.engine_version || '未知';
@@ -221,8 +230,26 @@ async function savePort() {
     toast('✅ 引擎已在端口 ' + p + ' 重启', 3200);
   });
 }
+async function startSvc() {
+  // 用户显式启服务：清"停止"意图 + 拉起（唯一入口在 ops.sh → lifecycle 的 life_start_user）
+  return withBusy($id('btn-start-svc'), '启动中…', async () => {
+    await KB.ops('start-user');
+    await refresh();
+    toast('✅ 服务已启动', 3200);
+  });
+}
+async function stopSvc() {
+  // 用户显式停服务：守护会尊重这个意图（不再"停了又自己回来"）
+  return withBusy($id('btn-stop-svc'), '停止中…', async () => {
+    await KB.ops('stop-user');
+    await refresh();
+    toast('已停止（守护不会自动拉起；点「启动服务」恢复）', 5200);
+  });
+}
 $id('btn-refresh').onclick = refresh;
 $id('btn-restart-all').onclick = restartAll;
+$id('btn-start-svc').onclick = startSvc;
+$id('btn-stop-svc').onclick = stopSvc;
 $id('btn-port').onclick = savePort;
 
 // ═══════════ DNS ═══════════

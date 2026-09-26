@@ -54,11 +54,11 @@ else
   echo "CLIPBOARD_PATCH=0，跳过注入"
 fi
 
-step "3/7 解析层离线回归"
+step "3/7 模块层离线回归（解析层 / 命令构造器 / 键契约）"
 if [ "${SKIP_TESTS:-0}" = "1" ]; then
   echo "SKIP_TESTS=1，跳过"
 elif command -v node >/dev/null 2>&1; then
-  node --test module/webroot/test/parsers.test.js
+  node --test module/webroot/test/*.test.js
 else
   echo "node 不可用，跳过"
 fi
@@ -106,6 +106,10 @@ verify_zip() {
   unzip -q -o "$zip_path" -d "$ex" || die "zip 解压失败"
   [ -f "$ex/module.prop" ] || die "zip 缺 module.prop"
   [ -f "$ex/lib/ops.sh" ] || die "zip 缺 lib/ops.sh"
+  [ -f "$ex/lib/lifecycle.sh" ] || die "zip 缺 lib/lifecycle.sh（生命周期唯一所有者）"
+  [ -f "$ex/lib/log.sh" ] || die "zip 缺 lib/log.sh（日志策略唯一所有者）"
+  [ -f "$ex/lib/watchdog.sh" ] || die "zip 缺 lib/watchdog.sh（生命周期守护）"
+  [ -f "$ex/service.sh" ] || die "zip 缺 service.sh"
   [ -f "$ex/webroot/index.html" ] || die "zip 缺 webroot/index.html"
   grep -q "^version=${MOD_VERSION}$" "$ex/module.prop" \
     || die "module.prop 版本与预期不符（期望 ${MOD_VERSION}）"

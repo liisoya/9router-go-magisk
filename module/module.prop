@@ -1,7 +1,7 @@
 id=ninerouter-go
 name=9Router Go AI Proxy
-version=v1.9.1-r2
-versionCode=109011
+version=v1.9.1-r4
+versionCode=109013
 author=liisoya
 description=高性能 Go 代理网关（9Router LLM 路由）的 Android Magisk/KernelSU 模块。内置官方 Dashboard 与本地 DNS 转发器（支持 DoH/DoT 与优选），模块 WebUI 提供概览、DNS 管理、一致性检查与在线更新。管理地址 http://<设备IP>:20130，初始密码 123456（登录后请修改）。
 updateJson=https://raw.githubusercontent.com/liisoya/9router-go-magisk/main/update.json

@@ -8,8 +8,9 @@
 #
 # 用法：tools/deploy-device.sh [设备序列号]
 #   设备序列号缺省取 `adb devices` 中第一台 usb 设备。
-# 推送内容：lib/ops.sh、webroot/{index.html,app.js,bridge.js,parsers.js}、etc/engine-version
-# 自检：注入后占位符计数必须为 0；远端执行 ops.sh panel 显示 engine=up。
+# 推送内容：lib/{ops.sh,watchdog.sh}、service.sh、
+#           webroot/{index.html,app.js,bridge.js,parsers.js}、etc/engine-version
+# 自检：注入后占位符计数必须为 0；远端执行 ops.sh panel 显示 engine=up 且 watchdog=up。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,7 +34,8 @@ mkdir -p "$STAGING/webroot" "$STAGING/lib" "$STAGING/etc"
 for f in webroot/index.html webroot/app.js webroot/bridge.js webroot/parsers.js; do
   sed "s/__MOD_ID__/${MOD_ID}/g" "module/$f" > "$STAGING/$f"
 done
-cp module/lib/ops.sh "$STAGING/lib/"
+cp module/lib/*.sh "$STAGING/lib/"
+cp module/service.sh "$STAGING/"
 cp module/etc/engine-version "$STAGING/etc/" 2>/dev/null || true
 if grep -rq "__MOD_ID__" "$STAGING"; then
   die "注入后仍有 __MOD_ID__ 残留"
@@ -41,19 +43,23 @@ fi
 echo "占位符注入完成（0 残留）"
 
 step "3/4 推送到设备"
-$ADB push "$STAGING/lib/ops.sh" /data/local/tmp/d-opssh >/dev/null
+$ADB push "$STAGING/lib" /data/local/tmp/d-lib >/dev/null
+$ADB push "$STAGING/service.sh" /data/local/tmp/d-service.sh >/dev/null
 $ADB push "$STAGING/webroot" /data/local/tmp/d-webroot >/dev/null
 $ADB push "$STAGING/etc" /data/local/tmp/d-etc >/dev/null
 
 step "4/4 设备侧落位 + 自检"
 $ADB shell "su -c '
 M=/data/adb/modules/$MOD_ID
-cp /data/local/tmp/d-opssh \$M/lib/ops.sh
+cp /data/local/tmp/d-lib/* \$M/lib/
+cp /data/local/tmp/d-service.sh \$M/service.sh
 cp /data/local/tmp/d-webroot/* \$M/webroot/
 [ -f /data/local/tmp/d-etc/engine-version ] && cp /data/local/tmp/d-etc/engine-version \$M/etc/engine-version
-chmod 0755 \$M/lib/ops.sh
-rm -rf /data/local/tmp/d-opssh /data/local/tmp/d-webroot /data/local/tmp/d-etc
+chmod 0755 \$M/*.sh \$M/lib/*.sh
+rm -rf /data/local/tmp/d-lib /data/local/tmp/d-service.sh /data/local/tmp/d-webroot /data/local/tmp/d-etc
 if grep -q __MOD_ID__ \$M/webroot/index.html; then echo \"FAIL: 占位符残留\"; exit 1; fi
-\$M/lib/ops.sh panel | head -c 120; echo
+[ -x \$M/lib/watchdog.sh ] || { echo \"FAIL: lib/watchdog.sh 不可执行\"; exit 1; }
+[ -x \$M/lib/lifecycle.sh ] || { echo \"FAIL: lib/lifecycle.sh 不可执行\"; exit 1; }
+\$M/lib/ops.sh panel | head -c 160; echo
 '"
 echo "✅ 部署完成：$SERIAL"

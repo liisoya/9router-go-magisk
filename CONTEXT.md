@@ -19,6 +19,23 @@
 **WebUI**
 模块级 DNS 管理页（`module/webroot/index.html`），KernelSU 内置浏览器或 WebUIX 打开。管理 dnsfwd：上游增删改、探测、热重载、绑定范围。独立于 Dashboard。
 
+**生命周期（lifecycle）**
+"服务该不该在跑"的全部事实与操作：进程启停、用户意图、状态文件、cgroup 脱组。
+唯一所有者是 `lib/lifecycle.sh`（可 source 的库）；其它文件只表达意图，不读写状态文件（ADR-0005）。
+_Avoid_: 服务管理、进程控制（会与通用含义混淆）
+
+**意图（intent）**
+用户/运维"要服务处于什么状态"的声明，与"当前实际状态"分开表示：`life_boot`（开机 = 要它跑）、
+`life_stop_user`（用户要它停，守护必须尊重）、`life_wd_hold`（维护窗口，暂时别插手）。
+状态里 `engine=stopped`（用户要的）与 `engine=down`（故障）是两件事。
+_Avoid_: 开关、标志（实现细节的词，不该出现在接口层）
+
+**承载性 env（carrier env）**
+缺了它引擎就不可用或不受管的运行环境变量（当前 6 个：`SSL_CERT_DIR` / `AUTO_UPDATE` /
+`PORT` / `DATA_DIR` / `MODDIR` / `INITIAL_PASSWORD`）。清单与产出物
+（`$DATA_DIR/runtime.env`）是唯一来源，门禁逐条断言它真的进了引擎进程（ADR-0006）。
+_Avoid_: 环境变量、配置（太泛，会漏掉"承载"这层意思）
+
 **数据目录**
 `/data/adb/9router-go/`。全新安装，不迁移旧模块（panel-9router / nine-router-go）的任何数据。
 

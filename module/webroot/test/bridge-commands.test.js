@@ -8,6 +8,14 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 
 global.window = { CFG: { MODDIR: '/data/adb/modules/ninerouter-go', DATA_DIR: '/data/adb/9router-go' } };
+// 形态缓存命中 cb3 → 不触发探测；ksu.exec 由本测试伪造（离线可测 bridge 的执行层）
+global.localStorage = { getItem: k => (k === '__kmod_exec_mode' ? 'cb3' : null), setItem() {}, removeItem() {} };
+global.ksu = {
+  exec(cmd, opts, cb) {
+    // 伪造真机行为：命令自己吐 snap-ok 才算成功；否则只有哨兵（旧实现下 sqlite 报错的形态）
+    setTimeout(() => global.window[cb](cmd.includes('snap-ok') ? 'snap-ok\n__KMOD_DONE__0' : '__KMOD_DONE__1'), 0);
+  }
+};
 const KB = require('../bridge.js');
 const C = KB._cmds;
 
@@ -81,6 +89,27 @@ test('sqlSnapshot：mkdir + .mode insert + 重定向', () => {
   assert.ok(cmd.includes("> '/data/adb/9router-go/backups/snap.sql'"));
   // SQL 整体过 shq：内含单引号被转义为 '\''
   assert.ok(cmd.includes("SELECT * FROM kv WHERE key='\\''a'\\'';"));
+});
+
+// ── sqlSnapshot 的成败判据 ──
+// 真机实证（2026-09-26）：`sqlite3 db ".mode insert kv" <坏SQL> > out` → `rc=1 size=0`，
+// 而 `>` 已经把 0 字节文件建出来了；旧实现 `return !r.err`（exec 层错误才有 err，且不看 code）
+// 判成"成功" → 界面放行删除，而 `backups/kv-before-orphan-clean-*.sql` 其实是空的（现场确有该文件）。
+test('sqlSnapshot 命令自带成败判据：非空才算成功，失败删空文件', () => {
+  const cmd = C.sqlSnapshot('SELECT * FROM kv;', '/d/backups/s.sql');
+  assert.ok(cmd.includes('&& [ -s '), '必须有"文件非空"判据');
+  assert.ok(cmd.includes('echo snap-ok') && cmd.includes('echo snap-fail'));
+  assert.ok(cmd.includes("rm -f '/d/backups/s.sql'"), '失败必须删掉 0 字节文件');
+});
+test('sqlSnapshot()：shell 报失败时返回 false（不得凭 !r.err 假成功）', async () => {
+  const orig = C.sqlSnapshot;
+  C.sqlSnapshot = () => 'echo snap-fail';
+  assert.strictEqual(await KB.sqlSnapshot('SELECT 1', '/d/s.sql'), false);
+  C.sqlSnapshot = () => 'true'; // 旧实现的失败形态：命令无任何输出
+  assert.strictEqual(await KB.sqlSnapshot('SELECT 1', '/d/s.sql'), false);
+  C.sqlSnapshot = () => 'echo snap-ok';
+  assert.strictEqual(await KB.sqlSnapshot('SELECT 1', '/d/s.sql'), true);
+  C.sqlSnapshot = orig;
 });
 
 // ── promise 降级形态包裹（Phase 4：多行安全收敛在 bridge 一层）──

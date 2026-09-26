@@ -219,11 +219,17 @@
       `curl -sL -m ${sec || 300} -o ${shq(out)} ${shq(url)} && echo dl-ok`,
     sha256: p => `sha256sum ${shq(p)}`,
     zipList: p => `unzip -l ${shq(p)}`,
-    // SQL 结果以 INSERT 语句形式落盘（误删回滚快照）
+    // SQL 结果以 INSERT 语句形式落盘（误删回滚快照）。
+    // 必须**自己判成败**：sqlite3 出错时 `>` 仍会创建 0 字节文件，而 exec 层拿不到 stderr、
+    // 退出码也不被 sentinelExec 上报（只有 code 字段）。真机实证：坏 SQL → `rc=1 size=0`，
+    // 而现场 `backups/kv-before-orphan-clean-*.sql` 就是 0 字节 —— 界面却说"快照已存"，
+    // 于是"误删可回滚"是假的（数据安全级）。故：退出码 + 文件非空双判据，失败即删空文件。
     sqlSnapshot: (sql, out) => {
       const c = cfg();
       const dir = out.slice(0, out.lastIndexOf('/'));
-      return `mkdir -p ${shq(dir)}; ${shq(c.MODDIR + '/bin/sqlite3')} ${shq(c.DATA_DIR + '/db/data.sqlite')} ".mode insert kv" ${shq(sql)} > ${shq(out)}`;
+      const dump = `${shq(c.MODDIR + '/bin/sqlite3')} ${shq(c.DATA_DIR + '/db/data.sqlite')} ".mode insert kv" ${shq(sql)}`;
+      return `mkdir -p ${shq(dir)}; `
+        + `{ ${dump} > ${shq(out)} 2>/dev/null && [ -s ${shq(out)} ] && echo snap-ok; } || { rm -f ${shq(out)}; echo snap-fail; }`;
     },
     // promise 降级形态包裹：多行输出整体 base64 收敛为单行，"只剩末行"的实现
     // 也能收回完整输出（Phase 4：该环境补偿从此只存在于 bridge 一层）
@@ -262,8 +268,9 @@
   }
   function zipList(path) { return sh(_cmds.zipList(path), 60000); }
   async function sqlSnapshot(sql, outFile) {
+    // 只认命令自己吐出的 snap-ok：`!r.err` 会把"sqlite3 报错 + 0 字节文件"判成成功（见 _cmds.sqlSnapshot）
     const r = await sh(_cmds.sqlSnapshot(sql, outFile), 60000);
-    return !r.err;
+    return !r.err && r.out.includes('snap-ok');
   }
 
   return {

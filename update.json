@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.1-r2",
-  "versionCode": 109011,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.1-r2/9router-go-1.9.1-r2-magisk.zip",
-  "changelog": "引擎修复：Dashboard 导入数据库 400（multipart 解析）、模型测试 401（/api/models/test 改为 admin 会话语义，导入备份不再影响）。模块层：面板首屏提速（形态探测缓存+快照渲染）、服务地址卡片（本机/局域网一键复制）、安装脚本 chmod 兜底补 lib/、dnsfwd 孤儿进程兜底与关闭状态如实告警、第三方 DNS 自动让路（5 秒宽限）、版本显示与更新比对修正、出厂 key 全程无感。"
+  "version": "v1.9.1-r4",
+  "versionCode": 109013,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.1-r4/9router-go-1.9.1-r4-magisk.zip",
+  "changelog": "修复「Settings → Download Backup 报 Invalid password（已登录也报）」：仪表盘移植时丢了上游的密码确认弹层，用裸 <a href> 下载、不带 x-9r-password 头，而服务端（与上游 parity）要求该头 → 必 401。本次按上游形状补回弹层与请求头（顺带修正导出文件名 .sqlite→.json、导入改回 JSON+password），并把请求形状收成可离线断言的纯函数 + 构建期闸门（web/dist 必须含 x-9r-password）。另修一处竞态：stop→start 时引擎优雅退场未完成就重启会导致 bind 失败（守护日志「拉起失败」），现在等进程真正退出（≤10s）再起，且重启请求会一并把 DNS 拉回来。"
 }
