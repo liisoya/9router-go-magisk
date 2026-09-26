@@ -42,6 +42,9 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ratchet import Ratchet  # noqa: E402  （棘轮语义的唯一实现）
+
 BASELINE_FILE = Path("tools") / "ui-parity-baseline.txt"
 IGNORE_FILE = Path("tools") / "ui-parity-ignore.txt"
 SCAN_GLOBS = ("web/src/**/*.ts", "web/src/**/*.svelte", "module/webroot/**/*.js", "module/webroot/**/*.html")
@@ -139,43 +142,9 @@ def match_registered(path: str, registered: set) -> bool:
     return False
 
 
-def load_list(path: Path, require_reason: bool):
-    entries, problems = set(), []
-    if not path.is_file():
-        return entries, problems
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        body, _, reason = line.partition("#")
-        parts = body.split()
-        if len(parts) != 1:
-            problems.append(f"{path}:{lineno} 格式错误（需要：<path>  # 理由）")
-            continue
-        if require_reason and not reason.strip():
-            problems.append(f"{path}:{lineno} 缺少理由（豁免必须说明为什么）")
-            continue
-        entries.add(norm_ui_path(parts[0]))
-    return entries, problems
-
-
-def write_baseline(gaps) -> None:
-    lines = [
-        "# UI 调用 parity 基线（棘轮）—— 由 tools/check-ui-parity.py --write-baseline 生成，勿手改",
-        "# 语义：这些是当前**已知**的\"UI 调了但后端没注册\"的路径，巡检不报警；",
-        "#       不在这里的同类路径 = 新增缺口 → 必红。烧掉一条就删一行。",
-        "",
-    ]
-    for p in sorted(gaps):
-        lines.append(f"{p}")
-    (ROOT / BASELINE_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="UI 调用 ⊆ 已注册端点（棘轮）")
-    ap.add_argument("--write-baseline", action="store_true")
-    ap.add_argument("--list-gaps", action="store_true")
-    ap.add_argument("--list-ignored", action="store_true")
+    Ratchet.add_flags(ap)
     args = ap.parse_args()
 
     try:
@@ -187,51 +156,30 @@ def main() -> int:
     registered = {p for v in registry.values() for p in v}
 
     calls = ui_calls()
-    ignored, ignore_problems = load_list(ROOT / IGNORE_FILE, require_reason=True)
-    baseline, baseline_problems = load_list(ROOT / BASELINE_FILE, require_reason=False)
-    for p in ignore_problems + baseline_problems:
-        print(f"警告：清单 {p}", file=sys.stderr)
-
-    gaps = {}
+    gaps: dict[str, str] = {}
     for path, where in calls.items():
-        if path in ignored or any(match_registered(c, registered) for c in candidates(path)):
+        if any(match_registered(c, registered) for c in candidates(path)):
             continue
-        gaps[path] = where
-    new_gaps = {p: w for p, w in gaps.items() if p not in baseline}
-    fixed = sorted(baseline - set(gaps))
+        gaps[path] = f"← {', '.join(sorted(where))}"
 
-    if args.write_baseline:
-        write_baseline(gaps.keys())
-        print(f"已写入基线 {BASELINE_FILE}：{len(gaps)} 条（UI 调用 {len(calls)} 条 / 已注册 {len(registered)} 条）")
-        return 0
-
-    print("UI 调用 parity 巡检（棘轮）")
-    print(f"  UI 调用路径 {len(calls)} 条（扫描 {', '.join(SCAN_GLOBS)}）｜ 已注册端点 {len(registered)} 条（{len(files)} 个 Go 文件）")
-    print(f"  已知缺口（基线）{len(baseline - ignored)} 条 ｜ 豁免 {len(ignored)} 条")
-
-    if new_gaps:
-        print(f"\n❌ 新增缺口 {len(new_gaps)} 条（UI 调了但后端没注册）：")
-        for p in sorted(new_gaps):
-            print(f"   {p}   ← {', '.join(sorted(new_gaps[p]))}")
-        print(f"\n要么补端点/改用已注册路径，要么写进 {IGNORE_FILE} 并给理由；确认是遗留问题才可 --write-baseline。")
-        status = 1
-    else:
-        print(f"\n✅ 无新增缺口（基线内 {len(baseline)} 条保持不变）")
-        status = 0
-
-    if fixed:
-        print(f"\n可收紧基线：{len(fixed)} 条缺口已消失（跑 --write-baseline 收紧）")
-        for p in fixed[:10]:
-            print(f"   {p}")
-    if args.list_gaps:
-        print(f"\n存量缺口 {len(gaps)} 条：")
-        for p in sorted(gaps):
-            print(f"   {p}   ← {', '.join(sorted(gaps[p]))}")
-    if args.list_ignored and ignored:
-        print("\n豁免项：")
-        for p in sorted(ignored):
-            print(f"   {p}")
-    return status
+    ratchet = Ratchet(
+        label="UI 调用 parity 巡检（棘轮）",
+        baseline=str(BASELINE_FILE), ignore=str(IGNORE_FILE),
+        entry_hint="<path>  # 理由",
+        header=[
+            "# UI 调用 parity 基线（棘轮）—— 由 tools/check-ui-parity.py --write-baseline 生成，勿手改",
+            "# 语义：这些是当前**已知**的『UI 调了但后端没注册』的路径，巡检不报警；",
+            "#       不在这里的同类路径 = 新增缺口 → 必红。烧掉一条就删一行。",
+        ],
+        normalize=norm_ui_path,
+        validate=lambda s: None if s.startswith("/") else "路径必须以 / 开头",
+        next_step=f"要么补端点/改用已注册路径，要么写进 {IGNORE_FILE} 并给理由；确认是遗留问题才可 --write-baseline。",
+    )
+    return ratchet.report(
+        gaps, args=args,
+        summary=[f"UI 调用路径 {len(calls)} 条（扫描 {', '.join(SCAN_GLOBS)}）"
+                 f"｜ 已注册端点 {len(registered)} 条（{len(files)} 个 Go 文件）"],
+    )
 
 
 if __name__ == "__main__":

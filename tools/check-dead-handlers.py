@@ -33,6 +33,11 @@ import re
 import sys
 from pathlib import Path
 
+# 棘轮语义收在 tools/ratchet.py（唯一实现）；载入时不要写 __pycache__（上游 .gitignore 不该为它改）
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ratchet import Ratchet  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE_FILE = Path("tools") / "dead-handlers-baseline.txt"
 IGNORE_FILE = Path("tools") / "dead-handlers-ignore.txt"
@@ -45,42 +50,10 @@ def go_files():
     return [f for f in files if not f.name.endswith("_test.go")], [f for f in files if f.name.endswith("_test.go")]
 
 
-def load_list(path: Path, require_reason: bool):
-    entries, problems = set(), []
-    if not path.is_file():
-        return entries, problems
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        body, _, reason = line.partition("#")
-        parts = body.split()
-        if len(parts) != 1:
-            problems.append(f"{path}:{lineno} 格式错误（需要：<HandleName>  # 理由）")
-            continue
-        if require_reason and not reason.strip():
-            problems.append(f"{path}:{lineno} 缺少理由（豁免必须说明为什么）")
-            continue
-        entries.add(parts[0])
-    return entries, problems
-
-
-def write_baseline(items) -> None:
-    lines = [
-        "# 未挂载 handler 基线（棘轮）—— tools/check-dead-handlers.py --write-baseline 生成，勿手改",
-        "# 语义：这些 handler 当前没有路由引用（多为上游历史包袱），巡检不报警；",
-        "#       不在这里的同类 handler = 新增 → 必红。",
-        "",
-    ]
-    for name, where, kind in items:
-        lines.append(f"{name}  # {kind} @ {where}")
-    (ROOT / BASELINE_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="handler 挂载巡检（棘轮）")
-    ap.add_argument("--write-baseline", action="store_true")
-    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--list", action="store_true", help="列出全部未挂载项（--list-gaps 的别名）")
+    Ratchet.add_flags(ap)
     args = ap.parse_args()
 
     non_test, tests = go_files()
@@ -94,7 +67,7 @@ def main() -> int:
             definitions.setdefault(m.group(1), f.relative_to(ROOT))
 
     # 非测试文件里的总出现次数（含定义），以及测试文件里的出现次数。
-    # **必须先剥注释**：否则函数名出现在自己的文档注释里就会被当成"被引用"（假阴性 —— 
+    # **必须先剥注释**：否则函数名出现在自己的文档注释里就会被当成"被引用"（假阴性 ——
     # 实测 dashboard.RegisterRoutes 正是这样漏过的）。
     def strip_comments(text: str) -> str:
         text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
@@ -103,51 +76,33 @@ def main() -> int:
     non_test_text = "\n".join(strip_comments(f.read_text(encoding="utf-8", errors="replace")) for f in non_test)
     test_text = "\n".join(strip_comments(f.read_text(encoding="utf-8", errors="replace")) for f in tests)
 
-    unmounted = {}
+    gaps: dict[str, str] = {}
     for name, where in definitions.items():
         if len(re.findall(rf"\b{name}\b", non_test_text)) > 1:
             continue  # 定义之外还有引用 → 视为已挂载
-        in_tests = len(re.findall(rf"\b{name}\b", test_text)) > 0
-        unmounted[name] = (str(where), "test-only（有测试、无路由）" if in_tests else "no-reference")
+        kind = "test-only（有测试、无路由）" if re.search(rf"\b{name}\b", test_text) else "no-reference"
+        gaps[name] = f"{kind}   ← {where}"
 
-    ignored, ignore_problems = load_list(ROOT / IGNORE_FILE, require_reason=True)
-    baseline, baseline_problems = load_list(ROOT / BASELINE_FILE, require_reason=False)
-    for p in ignore_problems + baseline_problems:
-        print(f"警告：清单 {p}", file=sys.stderr)
-
-    gaps = {n: v for n, v in unmounted.items() if n not in ignored}
-    new_gaps = {n: v for n, v in gaps.items() if n not in baseline}
-    fixed = sorted(baseline - set(gaps))
-
-    if args.write_baseline:
-        write_baseline(sorted((n, v[0], v[1]) for n, v in gaps.items()))
-        print(f"已写入基线 {BASELINE_FILE}：{len(gaps)} 条未挂载 handler"
-              f"（其中 test-only {sum(1 for _, v in gaps.items() if 'test-only' in v[1])} 条）")
-        return 0
-
-    print("handler 挂载巡检（棘轮）")
-    print(f"  定义 {len(definitions)} 个 Handle* ｜ 当前未挂载 {len(gaps)} 条"
-          f"（基线 {len(baseline - ignored)} 条 ｜ 豁免 {len(ignored)} 条）")
-
-    if new_gaps:
-        print(f"\n❌ 新增未挂载 handler {len(new_gaps)} 条：")
-        for n in sorted(new_gaps):
-            print(f"   {n}   {new_gaps[n][1]}   ← {new_gaps[n][0]}")
-        print(f"\n要么挂上路由，要么写进 {IGNORE_FILE} 并给理由；确认是历史包袱才可 --write-baseline。")
-        status = 1
-    else:
-        print(f"\n✅ 无新增未挂载 handler（基线内 {len(baseline)} 条保持不变）")
-        status = 0
-
-    if fixed:
-        print(f"\n可收紧基线：{len(fixed)} 条已被挂载（跑 --write-baseline 收紧）")
-        for n in fixed[:10]:
-            print(f"   {n}")
-    if args.list:
-        print(f"\n未挂载清单 {len(gaps)} 条：")
-        for n in sorted(gaps):
-            print(f"   {n}   {gaps[n][1]}   ← {gaps[n][0]}")
-    return status
+    ratchet = Ratchet(
+        label="handler 挂载巡检（棘轮）",
+        baseline=str(BASELINE_FILE), ignore=str(IGNORE_FILE),
+        entry_hint="<HandleName|RegisterName>  # 理由",
+        gap_noun="未挂载 handler",
+        fixed_note="已被挂载",
+        list_title="未挂载清单",
+        header=[
+            "# 未挂载 handler 基线（棘轮）—— 由 tools/check-dead-handlers.py --write-baseline 生成，勿手改",
+            "# 语义：这些 handler 当前没有路由引用（多为上游历史包袱），巡检不报警；",
+            "#       不在这里的同类 handler = 新增 → 必红。",
+        ],
+        next_step=f"要么挂上路由，要么写进 {IGNORE_FILE} 并给理由；确认是历史包袱才可 --write-baseline。",
+        validate=lambda s: None if s.isidentifier() else "需要标识符（HandleXxx / RegisterXxx）",
+    )
+    return ratchet.report(
+        gaps, args=args,
+        summary=[f"定义 {len(definitions)} 个 Handle* ｜ 当前未挂载 {len(gaps)} 条"],
+        list_flag="--list",
+    )
 
 
 if __name__ == "__main__":

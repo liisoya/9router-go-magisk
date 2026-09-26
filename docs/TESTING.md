@@ -40,6 +40,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | GO-TEST | Go 单元测试（排除外网/真机依赖用例） | `go test ./... -skip '<见 §4>'` | go | 引擎侧回归 |
 | TSC | Dashboard 类型检查 | `npx tsc -b` | node_modules | 类型错误（构建前提前拦） |
 | DEADH | handler / 注册函数是否真的被挂载（定义了却没人调 = 点了必 404） | `python3 tools/check-dead-handlers.py` | python3 | 新增了一条"有实现、有测试、没路由"的代码（`HandleWebFetch`/`RegisterRoutes` 同类） |
+| PY-UNIT | 棘轮 module（基线／豁免／只拦新增／收紧）的接口级单测 | `python3 -m unittest discover -s tools -p 'test_*.py'` | python3 | 三个门禁共用的棘轮语义坏了（PARITY/UIPARITY/DEADH 会一起失真） |
 
 ### 2.3 真机断言（`tools/check.sh --device`）
 
@@ -115,6 +116,8 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 新增 | DEADH | handler/注册函数挂载巡检（棘轮）。首跑即抓到 2 条真实案例并已带理由豁免：`chat.HandleHealth`（无引用）、`dashboard.RegisterRoutes`（只有测试引用、无路由） | 见本次提交 |
 | 2026-09-26 | 修改 | PARITY 侧代码 | 挂载 `/web/fetch` + `/v1/web/fetch`（ADR-0003 补丁），UIPARITY 基线 3 → 2 | bcf97e2 |
 | 2026-09-26 | 修改 | DEADH（豁免 2 → 1，定义 156 → 155） | 删除真死代码 `chat.HandleHealth`；**更正** `dashboard.RegisterRoutes` 为"测试 seam"（12 文件 33 处调用），不是死代码 —— 两侧路由表实测：生产 76 条 / 测试 46 条、「只在测试里」0 条，漂移风险已记为架构候选 | 见本次提交 |
+| 2026-09-26 | 修改 | PARITY / UIPARITY / DEADH | 三份重复的棘轮机械结构（清单解析／基线写盘／差值／打印／退出码）上收为 `tools/ratchet.py`（架构候选 1 的深化）；**行为不变**：135 / 2 / 1 豁免、退出码 0/1、红灯自证仍红 | 见本次提交 |
+| 2026-09-26 | 新增 | PY-UNIT（11 例） | 棘轮 module 的接口级单测。**首跑即抓到迁移漏洞**：抽掉旧脚本的行形状校验后"格式错误"分支变成死代码（手抖写错的一行会静默成为永远匹配不上的基线项）→ 补回可选 `validate`，三个 scanner 各自传入形状规则 | 见本次提交 |
 | 2026-09-26 | 新增 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（离线档） | f509e85 |
 | 2026-09-26 | 新增 | 变更映射自检 | `tools/check.sh` 末尾提醒"改了 A 没改 B"（只提醒不拦，规则见契约 §4） | f509e85 |
 

@@ -53,6 +53,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 棘轮语义收在 tools/ratchet.py（唯一实现）；载入时不要写 __pycache__
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ratchet import Ratchet  # noqa: E402
+
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 IGNORE_FILE = Path("tools") / "parity-ignore.txt"
 BASELINE_FILE = Path("tools") / "parity-baseline.txt"
@@ -123,25 +128,13 @@ def scan_ours(root: Path):
     return registry, files
 
 
-def load_pairs(path: Path, require_reason: bool):
-    """解析 `<METHOD> <path>  # 理由(可选/必填)` 形式的清单。"""
-    entries, problems = set(), []
-    if not path.is_file():
-        return entries, problems
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        body, _, reason = line.partition("#")
-        parts = body.split()
-        if len(parts) != 2 or parts[0].upper() not in METHODS:
-            problems.append(f"{path}:{lineno} 格式错误（需要：<METHOD> <path>  # 理由）")
-            continue
-        if require_reason and not reason.strip():
-            problems.append(f"{path}:{lineno} 缺少理由（豁免必须说明为什么）")
-            continue
-        entries.add((parts[0].upper(), canon(parts[1])))
-    return entries, problems
+def _norm_entry(s: str) -> str:
+    """清单行归一：压缩空白 + 方法大写（路径大小写敏感，不动）——棘轮按字符串比较用。"""
+    flat = " ".join(s.split())
+    head, _, rest = flat.partition(" ")
+    if rest and head.upper() in METHODS:
+        return f"{head.upper()} {rest}"
+    return flat
 
 
 def upstream_version(root: Path) -> str:
@@ -159,28 +152,12 @@ def upstream_version(root: Path) -> str:
     return tag or sha or "未知"
 
 
-def write_baseline(root: Path, gaps, version: str) -> None:
-    path = root / BASELINE_FILE
-    header = [
-        "# 上游端点 parity 基线（棘轮）—— 由 tools/check-parity.py --write-baseline 生成，勿手改",
-        f"# 上游参照：{version}",
-        f"# 生成时间：{datetime.date.today().isoformat()}",
-        "# 语义：这些是**当前已知**的端点缺口，巡检不报警；不在本文件里的缺口 = 新增缺口 → 必红。",
-        "# 烧掉一条就删一行（或直接重跑 --write-baseline 收紧）。",
-        "",
-    ]
-    lines = [f"{m:6} {p}" for m, p in sorted(gaps)]
-    path.write_text("\n".join(header + lines) + "\n", encoding="utf-8")
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="上游端点 parity 巡检（棘轮）")
     ap.add_argument("--upstream", default=os.environ.get("UPSTREAM", str(DEFAULT_UPSTREAM)),
                     help=f"上游参照树路径（默认 {DEFAULT_UPSTREAM}）")
-    ap.add_argument("--write-baseline", action="store_true", help="把当前缺口写入基线文件")
-    ap.add_argument("--list-gaps", action="store_true", help="列出全部存量缺口")
     ap.add_argument("--list-extra", action="store_true", help="列出本仓多出的端点")
-    ap.add_argument("--list-ignored", action="store_true", help="列出豁免项")
+    Ratchet.add_flags(ap)
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parent.parent
@@ -197,63 +174,42 @@ def main() -> int:
     ours, our_files = scan_ours(root)
     version = upstream_version(up_root)
 
-    ignored, ignore_problems = load_pairs(root / IGNORE_FILE, require_reason=True)
-    baseline, baseline_problems = load_pairs(root / BASELINE_FILE, require_reason=False)
-    for p in ignore_problems + baseline_problems:
-        print(f"警告：清单 {p}", file=sys.stderr)
-
-    gaps = {(m, p) for m in METHODS for p in up[m]
-            if (m, p) not in ignored and p not in ours[m]}
-    new_gaps, fixed = sorted(gaps - baseline), sorted(baseline - gaps)
-
-    if args.write_baseline:
-        write_baseline(root, gaps, version)
-        print(f"已写入基线 {BASELINE_FILE}：{len(gaps)} 条已知缺口（上游 {version}）")
-        return 0
+    ratchet = Ratchet(
+        label="上游端点 parity 巡检（棘轮）",
+        baseline=str(BASELINE_FILE), ignore=str(IGNORE_FILE),
+        entry_hint="<METHOD> <path>  # 理由",
+        gap_noun="缺口",
+        header=[
+            "# 上游端点 parity 基线（棘轮）—— 由 tools/check-parity.py --write-baseline 生成，勿手改",
+            f"# 上游参照：{version}",
+            f"# 生成时间：{datetime.date.today().isoformat()}",
+            "# 语义：这些是**当前已知**的端点缺口，巡检不报警；不在本文件里的缺口 = 新增缺口 → 必红。",
+            "# 烧掉一条就删一行（或直接重跑 --write-baseline 收紧）。",
+        ],
+        normalize=_norm_entry,
+        validate=lambda s: None if (len(s.split()) == 2 and s.split()[0].upper() in METHODS)
+                           else "需要 <METHOD> <path> 两个字段",
+        next_step=f"要么补实现，要么写进 {IGNORE_FILE} 并给理由；"
+                  f"确认是遗留问题才可 --write-baseline 收进基线。",
+    )
 
     up_total = sum(len(v) for v in up.values())
-    print("上游端点 parity 巡检（棘轮）")
-    print(f"  上游 {up_root} @ {version}")
-    print(f"  清单：上游 {up_total} 条 / 本仓 {sum(len(v) for v in ours.values())} 条注册"
-          f"（扫描 {len(our_files)} 个 Go 文件）")
-    print(f"  已知缺口（基线）{len(baseline - ignored)} 条 ｜ 豁免 {len(ignored)} 条")
-    if unresolved:
-        print(f"  注意：{len(unresolved)} 个上游 route.js 未识别到方法导出，已跳过："
-              + ", ".join(unresolved[:5]) + ("…" if len(unresolved) > 5 else ""))
+    our_total = sum(len(v) for v in ours.values())
+    gaps = {f"{m} {p}": "" for m in METHODS for p in up[m] if p not in ours[m]}
 
-    if new_gaps:
-        print(f"\n❌ 新增缺口 {len(new_gaps)} 条（不在基线内 —— 这就是『移植缺失』回归）：")
-        for m, p in new_gaps:
-            print(f"   {m:6} {p}")
-        print(f"\n要么补实现，要么写进 {IGNORE_FILE} 并给理由；"
-              f"确认是遗留问题才可 --write-baseline 收进基线。")
-        status = 1
-    else:
-        print(f"\n✅ 无新增缺口（基线内 {len(baseline)} 条存量缺口保持不变）")
-        status = 0
-
-    if fixed:
-        print(f"\n可收紧基线：{len(fixed)} 条缺口已消失（跑 --write-baseline 收紧）")
-        for m, p in fixed[:10]:
-            print(f"   {m:6} {p}")
-        if len(fixed) > 10:
-            print(f"   …另有 {len(fixed) - 10} 条")
-
-    if args.list_gaps:
-        print(f"\n存量缺口 {len(gaps)} 条：")
-        for m, p in sorted(gaps):
-            print(f"   {m:6} {p}")
-
-    if args.list_ignored and ignored:
-        print("\n豁免项：")
-        for m, p in sorted(ignored):
-            print(f"   {m:6} {p}")
+    status = ratchet.report(
+        gaps, args=args,
+        summary=[f"上游 {up_root} @ {version}",
+                 f"清单：上游 {up_total} 条 / 本仓 {our_total} 条注册（扫描 {len(our_files)} 个 Go 文件）"],
+        notes=[f"{len(unresolved)} 个上游 route.js 未识别到方法导出，已跳过："
+               + ", ".join(unresolved[:5]) + ("…" if len(unresolved) > 5 else "")] if unresolved else [],
+    )
 
     if args.list_extra:
-        extra = sorted((m, p) for m in METHODS for p in ours[m] - up[m])
+        extra = sorted(f"{m} {p}" for m in METHODS for p in ours[m] - up[m])
         print(f"\n本仓多出的端点（上游 src/app/api 里没有；引擎/代理路径属正常）：{len(extra)} 条")
-        for m, p in extra:
-            print(f"   {m:6} {p}")
+        for key in extra:
+            print(f"   {key}")
 
     return status
 
