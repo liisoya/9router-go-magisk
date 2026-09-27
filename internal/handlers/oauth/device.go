@@ -487,6 +487,11 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 	dataMap["providerSpecificData"] = psd
 	if t.expiresIn > 0 {
 		dataMap["expiresAt"] = time.Now().Add(time.Duration(t.expiresIn) * time.Second).UTC().Format(time.RFC3339)
+	} else {
+		// Upstream persists expiresAt=null when the token endpoint omits
+		// expiry; keep the same shape so readers can tell "unknown" apart
+		// from a stale timestamp.
+		dataMap["expiresAt"] = nil
 	}
 	if h.Repo != nil && h.Repo.RawDB() != nil {
 		now := currentTimestamp()

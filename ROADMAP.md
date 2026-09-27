@@ -7,7 +7,7 @@ This roadmap is for the current native Go gateway and its embedded Svelte dashbo
 - Go 1.27, Fx application lifecycle, Chi HTTP server, and SQLite are the runtime foundation.
 - The dashboard is a Svelte 5 + TypeScript + Vite SPA. Production serves its generated `web/dist` assets from the Go binary through `//go:embed`; no JavaScript runtime is needed at runtime.
 - `web/dist/` is intentionally generated and ignored. It is not guaranteed to exist in a checkout, and the Go package cannot compile without a matching embedded `dist/*` directory.
-- The Go database layer currently creates the `upstream_leases` table idempotently, but it does not implement the upstream application's full versioned schema migration. A completely fresh database is therefore not proven to be self-bootstrapping; using an existing upstream-compatible database is a different compatibility case.
+- The Go database layer bootstraps the upstream core schema additively on startup (`db.EnsureCoreSchema`): a fresh `DATA_DIR` self-boots into a working installation, legacy databases get missing columns backfilled. Not yet implemented: legacy-JSON import, destructive migrations, pre-migration backups, interrupted-migration retry.
 - Dashboard login, session cookies, API-key access, and local CLI-token access exist, but they are not a full RBAC/scope system. Management routes must be reviewed against the current middleware rather than assumed to have granular scopes.
 
 ## Near-term hardening (priority)
@@ -16,11 +16,10 @@ This roadmap is for the current native Go gateway and its embedded Svelte dashbo
 
 **Acceptance criteria**
 
-- A fresh `DATA_DIR` can start the gateway without manually copying an upstream SQLite file.
-- Startup creates or verifies every table, column, index, and invariant used by the Go handlers, including usage, settings, connections, keys, combos, proxy pools, and upstream leases.
+- ~~A fresh `DATA_DIR` can start the gateway without manually copying an upstream SQLite file.~~ Done: `EnsureCoreSchema` covers empty, current, and legacy-column-missing databases (see `internal/db/schema_test.go`); verified by live fresh-`DATA_DIR` smoke (login → settings → connections → API key).
 - An existing upstream-compatible database is upgraded in a transaction, preserves rows and JSON data, and can be retried safely after a failed upgrade.
 - Startup fails with an actionable error when the database is incompatible; it must not silently continue with missing tables or partial migrations.
-- Automated tests cover an empty database, a representative current database, a legacy database, an interrupted migration, and a retry after failure.
+- Remaining: legacy-JSON import, pre-migration backup, interrupted-migration retry test.
 
 ### 2. Auth scopes and protected operations
 

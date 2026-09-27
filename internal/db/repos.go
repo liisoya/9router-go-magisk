@@ -541,16 +541,29 @@ func (r *Repo) GetCombos() ([]*models.Combo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	settings, _ := r.GetSettings()
-
+	// Drain and close the rows BEFORE reading settings: holding an open rows set
+	// occupies one pooled connection (MaxOpenConns is 4), so a nested query
+	// here could deadlock the whole pool once four concurrent callers pile up.
 	var combos []*models.Combo
 	for rows.Next() {
 		var combo models.Combo
-		err := rows.Scan(&combo.ID, &combo.Name, &combo.Kind, &combo.Models, &combo.CreatedAt, &combo.UpdatedAt)
-		if err != nil {
+		if err := rows.Scan(&combo.ID, &combo.Name, &combo.Kind, &combo.Models, &combo.CreatedAt, &combo.UpdatedAt); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		combos = append(combos, &combo)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	settings, _ := r.GetSettings()
+
+	// Strategy resolution runs after the rows are closed so the nested settings
+	// read can never hold two pooled connections at once.
+	for _, combo := range combos {
 		combo.Strategy = "fallback"
 		if settings != nil {
 			if cs, ok := settings.ComboStrategies[combo.Name]; ok && cs.Strategy != "" {
@@ -559,12 +572,6 @@ func (r *Repo) GetCombos() ([]*models.Combo, error) {
 				combo.Strategy = settings.ComboStrategy
 			}
 		}
-		combos = append(combos, &combo)
 	}
-
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-
 	return combos, nil
 }

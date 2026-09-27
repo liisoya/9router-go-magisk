@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.2-r2",
-  "versionCode": 109021,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.2-r2/9router-go-1.9.2-r2-magisk.zip",
-  "changelog": "架构深化版（引擎仍为上游 v1.9.2，本次只动模块层与门禁）。① 端点/UI 调用/handler 挂载三个巡检共用一套棘轮语义，以后加门禁只写 scanner。② DNS 优选新增两道护栏：没有可用上游、或留不下回滚点，就不改写配置。③ 引擎更新更稳：备份函数不再恒报成功；「等就绪/等消失」收成 lib/wait.sh 并首次可离线验证。④ 登录态统一走 web/src/lib/session.ts，键不再散落在 5 个文件里（带防回潮门禁）。⑤ __MOD_ID__ 注入收成一个注入器（全树注入 + 零残留），打包与开发直推同源。⑥ 工程契约新增「模块边界速查 + 新功能默认流程」，后续更新按最新架构实现。验证：离线门禁 11 档全绿、真机门禁 22/22、前端单测 91/91。"
+  "version": "v1.9.3-r1",
+  "versionCode": 109030,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.3-r1/9router-go-1.9.3-r1-magisk.zip",
+  "changelog": "引擎基线升到上游 v1.9.3（/v1/models 改用 buildModelsList、Kiro 工具调用与端点轮换、GetCombos 连接池死锁、实时目录 singleflight、Dashboard 模型目录与上游注册表同步）。修「点下载并更新引擎必失败」：面板把 version.json 的裸版本号当 release tag 拼 URL（上游 tag 一律带 v）→ 404；同时 fetch 补 -L（release 资产是 302 跳转，缺它拿不到 SHA256SUMS）。新增 module/webroot/upstream.js 收拢上游地址契约（tag 归一/资产名/校验和/加速前缀），面板会显示最终下载地址。撤掉两个已被上游吸收的补丁（chat.HandleHealth、codebuddy 提示词清洗），保留 /web/fetch 与 /api/health 补丁。门禁：JS-UNIT 清单改 glob 全量（修掉一个从不执行的孤儿门禁）、新增真机 T13（只读更新链路）、PARITY 基线随上游收紧 135→131。验证：离线 11/11 全绿、真机 T*/A* 全绿、前端单测 91 例。"
 }

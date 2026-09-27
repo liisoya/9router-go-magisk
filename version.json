@@ -1,5 +1,5 @@
 {
   "downloadUrl": "https://github.com/luqman-v1/9router-go/releases/latest",
-  "latestVersion": "1.9.2",
-  "releaseNotes": "v1.9.2: Dashboard console errors fixed (public version API, PWA manifest/SW routes, provider icons, auth redirect, sidebar nav scroll); media providers failover audit (Antigravity/Xquik search, image/STT, Nvidia TTS); POST /api/models/test accepts dashboard session; make web-dev HMR workflow."
+  "latestVersion": "1.9.3",
+  "releaseNotes": "v1.9.3: Kiro fixes (403 bearer token from wrong credential, endpoint rotation, end-to-end tool calling); /v1/models ported to upstream Next.js buildModelsList (live catalogs, registry + media kinds, upstream alias prefixes, identical response shape); GetCombos connection-pool deadlock fixed; singleflight for live catalog; dashboard model catalog synced with upstream registry."
 }

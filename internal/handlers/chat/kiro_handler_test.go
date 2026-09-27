@@ -228,3 +228,54 @@ func TestEventStreamReader_ReadFrame(t *testing.T) {
 		t.Errorf("expected content 'test', got %q", result.Content)
 	}
 }
+
+// Kiro streams one tool call across several toolUseEvent frames: the first
+// carries only name+toolUseId, the middle ones carry slices of the JSON
+// arguments under `input`, and a `stop: true` frame closes it. Emitting per
+// frame produced `arguments: "{}"`, so clients could never run the tool.
+func TestForwardKiroRequest_ReassemblesFragmentedToolInput(t *testing.T) {
+	fragments := []map[string]any{
+		{"name": "get_weather", "toolUseId": "tooluse_abc"},
+		{"name": "get_weather", "toolUseId": "tooluse_abc", "input": `{"ci`},
+		{"name": "get_weather", "toolUseId": "tooluse_abc", "input": `ty": "Jak`},
+		{"name": "get_weather", "toolUseId": "tooluse_abc", "input": `arta", "unit": "celsius"}`},
+		{"name": "get_weather", "toolUseId": "tooluse_abc", "stop": true},
+	}
+	var stream []byte
+	for _, fragment := range fragments {
+		payload, _ := json.Marshal(fragment)
+		stream = append(stream, buildEventStreamFrame(map[string]string{
+			":event-type": "toolUseEvent",
+		}, payload)...)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(stream)
+	}))
+	defer srv.Close()
+
+	cfg := &providers.ProviderConfig{BaseURL: srv.URL}
+	rec := httptest.NewRecorder()
+	if err := executor.ForwardKiro(rec, &executor.Request{
+		Client:   srv.Client(),
+		Config:   cfg,
+		APIKey:   "key",
+		Body:     []byte(`{"model":"auto","messages":[{"role":"user","content":"weather?"}]}`),
+		IsStream: true,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Errorf("expected tool_calls finish_reason, got %s", body)
+	}
+	// The reassembled arguments must survive SSE escaping as one JSON string.
+	if !strings.Contains(body, `{\"city\": \"Jakarta\", \"unit\": \"celsius\"}`) {
+		t.Errorf("tool arguments were not reassembled from fragments, got %s", body)
+	}
+	if strings.Contains(body, `"arguments":"{}"`) {
+		t.Errorf("fragmented tool call emitted empty arguments, got %s", body)
+	}
+}

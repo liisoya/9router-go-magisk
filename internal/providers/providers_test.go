@@ -160,3 +160,29 @@ func TestNewProvidersRegistry_v059(t *testing.T) {
 	}
 }
 
+// Media models carry a `kind` upstream (image/tts/stt/embedding/video/
+// systemone); /v1/models is the LLM list and must drop them.
+func TestGetProviderModelKind(t *testing.T) {
+	tests := []struct {
+		provider string
+		model    string
+		want     string
+	}{
+		{provider: "nvidia", model: "fastpitch", want: "tts"},
+		{provider: "nvidia", model: "tacotron2", want: "tts"},
+		{provider: "nvidia", model: "nvidia/nv-embedqa-e5-v5", want: "embedding"},
+		{provider: "nvidia", model: "nvidia/parakeet-ctc-1.1b-asr", want: "stt"},
+		{provider: "nvidia", model: "minimaxai/minimax-m3", want: ""},
+		{provider: "antigravity", model: "gemini-3.1-flash-image", want: "image"},
+		{provider: "antigravity", model: "gemini-3.8-flash-high", want: ""},
+		{provider: "openrouter", model: "openai/tts-1", want: "tts"},
+		{provider: "openrouter", model: "google/veo-3.1", want: "video"},
+		{provider: "unknown-provider", model: "whatever", want: ""},
+		{provider: "nvidia", model: "not-a-model", want: ""},
+	}
+	for _, tt := range tests {
+		if got := GetProviderModelKind(tt.provider, tt.model); got != tt.want {
+			t.Errorf("GetProviderModelKind(%q, %q) = %q, want %q", tt.provider, tt.model, got, tt.want)
+		}
+	}
+}

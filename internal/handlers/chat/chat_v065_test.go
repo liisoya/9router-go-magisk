@@ -38,7 +38,12 @@ func TestHandleModelLookup_Kind(t *testing.T) {
 func TestHandleModelLookup_ProviderModel(t *testing.T) {
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
-	// Seed an alias for lookup
+	// Upstream parity: an alias target is only listed through a connected
+	// provider, so seed the claude (cc) connection it points at.
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-cc-alias', 'claude', 'apikey', 'Claude Alias', 1, 1, '{"apiKey":"sk-test-cc"}', '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`); err != nil {
+		t.Fatalf("seed claude connection: %v", err)
+	}
 	if _, err := database.Exec(`INSERT INTO kv (scope, key, value) VALUES ('modelAliases', 'cc/claude-sonnet-4-6', '"cc/claude-sonnet-4-6"')`); err != nil {
 		t.Fatalf("seed alias: %v", err)
 	}
@@ -93,7 +98,12 @@ func TestHandleModelLookup_NotFound(t *testing.T) {
 func TestHandleModels_CustomModels(t *testing.T) {
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
-	// Seed custom model with vision caps
+	// Upstream parity: customs surface under an active credentialed
+	// connection, so seed one for the cc provider first.
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-cc-test', 'claude', 'apikey', 'Claude Test', 1, 1, '{"apiKey":"sk-test-cc"}', '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`); err != nil {
+		t.Fatalf("seed claude connection: %v", err)
+	}
 	customJSON := `{"providerAlias":"cc","id":"my-custom-vision","type":"llm","name":"my-custom-vision","caps":{"vision":true,"reasoning":true}}`
 	if _, err := database.Exec(`INSERT INTO kv (scope, key, value) VALUES ('customModels', 'cc/my-custom-vision/llm', ?)`, customJSON); err != nil {
 		t.Fatalf("seed custom: %v", err)
@@ -137,6 +147,14 @@ func TestHandleModels_MapsProviderNodeRowIDToPrefix(t *testing.T) {
 	_, err = database.Exec(`INSERT INTO kv (scope, key, value) VALUES ('customModels', 'openai-compatible-chat-0489217b|glm-5.3|chat', ?)`, customJSON)
 	if err != nil {
 		t.Fatalf("seed customModels: %v", err)
+	}
+	// Upstream parity: the node row makes its connection routable — seed a
+	// matching connection so the custom surfaces under the node prefix. The
+	// connection-level prefix ("nara") wins over the node row generic type,
+	// so the custom resolves to nara/glm-5.3.
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-nara-test', 'openai-compatible-chat-0489217b', 'apikey', 'Nara ID', 1, 1, '{"apiKey":"sk-test-nara","providerSpecificData":{"prefix":"nara"}}', '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`); err != nil {
+		t.Fatalf("seed nara connection: %v", err)
 	}
 
 	repo := db.NewRepo(database)

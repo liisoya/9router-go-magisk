@@ -102,6 +102,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | `internal/handlers/media`：`TestHandleAudioVoices_elevenlabs` | 访问 `api.elevenlabs.io` 返回 EOF → 502 | 列入 `go test -skip`（名单在 `tools/check.sh` 的 `go_skip_pattern`） |
 | `internal/handlers/chat`：`TestLiveE2E_Cline_SmartCombo`、`TestIntegration_OpenCode_MuseSpark13_ChatCompletions` | 本机存在 `~/.9router` 时会真的打上游 → 失败 | 列入同一 `-skip` 名单；**已在上游 pristine 树（`../9router-go`）复跑，同样失败**（2026-09-26 证据）→ 环境依赖，非本仓回归 |
 | 其它 `*_live_*` / `*_e2e_*` 用例 | 需要真实 key 或 `$HOME/.9router/db/data.sqlite` | 多数自带 `t.Skip`（本机有库时才会真跑）；**不扩大排除范围**，出问题先在上游树复跑 |
+| `GO-BUILD` / `GO-TEST` | `dial tcp … proxy.golang.org:443: i/o timeout`（本机直连不到 Go 官方代理，尤其上游同步带来新依赖时） | **不是回归**：用国内镜像重跑 —— `GOPROXY=https://goproxy.cn,direct bash tools/check.sh --offline`（实测可用；`ALL_PROXY` 对 Go 无效，Go 只认 `HTTP(S)_PROXY`） |
 | 真机档在无设备时 | 全部 `T*`/`A*` | SKIP（退出 0）；严格模式 `--require-device` 才失败 |
 | 真机 `T13` | 需要**外网 + 设备上选中的加速节点可达**（会真的下载 ~25MB 到 `/data/local/tmp` 再删掉） | 前置不可达时如实打印 `T13 跳过：…` 并**不计入通过**；这是真机档唯一的外网依赖，别把它当成"网络抖动 = 回归" |
 
@@ -142,6 +143,8 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-27 | 新增 | JS-UNIT（+14 例：`upstream.test.js` 13 + `bridge-commands` 1） | Phase 27：上游 release 地址契约（tag 缺 v → 404）与 `fetch` 缺 `-L`（302 空正文）两条通道缺陷的回归。含**回潮扫描**（`app.js` 不许再手写 release 地址）。**红灯自证**：回退三处修复 → 7 例精确变红 | 见本次提交 |
 | 2026-09-27 | 新增 | 真机 T13（a–b） | Phase 27：引擎更新链路的只读真机门禁（清单 → SHA256SUMS → arm64 资产 → 摘要/ELF），不安装不改版本；前置不可达即 SKIP | 见本次提交 |
 | 2026-09-27 | 修改 | 真机档前置 | T13 引入真机档唯一的**外网依赖**，§4 已登记（不可达 = SKIP，不是回归） | 见本次提交 |
+| 2026-09-27 | 修改 | PARITY（基线 135 → 131） | 上游同步 v1.9.3：4 条 Kiro OAuth 路由缺口被上游补齐 → 按棘轮语义 `--write-baseline` 收紧。**附带**：基线文件被当前生成器去掉了方法名对齐空格（格式归一），所以 diff 看起来很宽 —— `git diff --ignore-all-space` 只有 1 增 5 删，可据此复核 | 见本次提交 |
+| 2026-09-27 | 修改 | GO-BUILD / GO-TEST 前置 | 上游 v1.9.3 带来新依赖 `golang.org/x/sync`，本机 `proxy.golang.org` 直连超时 → §4 登记 `GOPROXY=https://goproxy.cn,direct`（`ALL_PROXY` 对 Go 无效） | 见本次提交 |
 
 ## 6. UI parity 已知缺口（基线与理由）
 

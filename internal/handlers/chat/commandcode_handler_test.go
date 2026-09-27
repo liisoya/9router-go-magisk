@@ -337,3 +337,35 @@ func TestForwardCommandcodeRequest_ImageAndReasoningEffort(t *testing.T) {
 		t.Errorf("expected mimeType 'image/png', got %v", imgPart["mimeType"])
 	}
 }
+
+func TestBuildCommandcodeBody_DefaultsMaxTokens(t *testing.T) {
+	var capturedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &capturedBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"type":"finish","finishReason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	cfg := &providers.ProviderConfig{BaseURL: srv.URL}
+	rec := httptest.NewRecorder()
+	err := executor.ForwardCommandcode(rec, &executor.Request{
+		Client:   srv.Client(),
+		Config:   cfg,
+		APIKey:   "sk-test",
+		Body:     []byte(`{"model":"cmc/deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":1024,"stream":false}`),
+		IsStream: false,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	params, _ := capturedBody["params"].(map[string]any)
+	if params == nil {
+		t.Fatal("expected params object in payload")
+	}
+	if mt, _ := params["max_tokens"].(float64); mt != 1024 {
+		t.Errorf("expected params.max_tokens 1024 (test ping parity), got %v", params["max_tokens"])
+	}
+}

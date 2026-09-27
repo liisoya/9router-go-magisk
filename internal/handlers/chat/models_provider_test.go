@@ -117,7 +117,7 @@ func TestHandleModelLookup_CodexModel(t *testing.T) {
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
 
-	cxData := `{"prefix":"cx"}`
+	cxData := `{"prefix":"cx","apiKey":"tok-codex-test"}`
 	_, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
 		('conn-cx-1', 'codex', 'oauth', 'Codex Account', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, cxData)
 	if err != nil {
@@ -137,5 +137,72 @@ func TestHandleModelLookup_CodexModel(t *testing.T) {
 
 	if !strings.Contains(w.Body.String(), `"id":"cx/gpt-6-astra"`) {
 		t.Errorf("expected lookup result with id 'cx/gpt-6-astra', got %s", w.Body.String())
+	}
+}
+
+func TestHandleModels_ActiveConnectionPublishesCatalog(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	if _, err := database.Exec(`DELETE FROM providerConnections`); err != nil {
+		t.Fatalf("delete connections: %v", err)
+	}
+
+	// Upstream parity (src/app/api/v1/models/route.js): connections are
+	// filtered on isActive only — listing does not require credentials, so an
+	// active codex row still contributes its catalog.
+	_, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-cx-plain', 'codex', 'oauth', 'Codex Bare', 1, 1, '{"prefix":"cx"}', '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`)
+	if err != nil {
+		t.Fatalf("seed credentialless connection: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+	handler := NewChatHandler(repo)
+
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	w := httptest.NewRecorder()
+	handler.HandleModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"id":"cx/`) {
+		t.Errorf("active connection must publish its catalog, got: %s", w.Body.String())
+	}
+}
+func TestHandleModels_ExcludesDisabledModels(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	if _, err := database.Exec(`DELETE FROM providerConnections`); err != nil {
+		t.Fatalf("delete connections: %v", err)
+	}
+
+	cxData := `{"prefix":"cx","apiKey":"tok-codex-test"}`
+	_, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-cx-1', 'codex', 'oauth', 'Codex Account', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, cxData)
+	if err != nil {
+		t.Fatalf("seed codex connection: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+	if err := repo.SetKV("disabledModels", "cx", `["gpt-6-astra"]`); err != nil {
+		t.Fatalf("seed disabled models: %v", err)
+	}
+	handler := NewChatHandler(repo)
+
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	w := httptest.NewRecorder()
+	handler.HandleModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"id":"cx/gpt-6-astra"`) {
+		t.Errorf("disabled cx/gpt-6-astra must be excluded, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"id":"cx/gpt-5.6-sol"`) {
+		t.Errorf("non-disabled cx/gpt-5.6-sol must stay listed, got: %s", w.Body.String())
 	}
 }

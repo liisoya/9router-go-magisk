@@ -148,7 +148,10 @@ func (h *ChatHandler) handleAccountFallback(
 			if lockKey != model {
 				_ = h.Repo.LockConnectionModel(connObj.ID, model, cooldownSec, classification.NewBackoffLevel)
 			}
-			log.Warn("fallback", "connection locked", "conn", connObj.ID, "provider", provider, "model", model, "lockKey", lockKey, "status", ue.StatusCode, "cooldown_s", cooldownSec)
+			log.Warn("fallback", "connection locked", append([]any{
+				"conn", connObj.ID, "provider", provider, "model", model,
+				"lockKey", lockKey, "status", ue.StatusCode, "cooldown_s", cooldownSec,
+			}, connIdentityKV(connObj)...)...)
 			excludeIDs = append(excludeIDs, c.ID)
 			continue
 		}
@@ -251,7 +254,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		}
 	}
 
-	apiKey := extractAPIKey(connData)
+	apiKey := resolveProviderAuthToken(provider, connData, extractAPIKey(connData))
 	if apiKey == "" {
 		if providerCfg.DefaultAPIKey != "" {
 			apiKey = providerCfg.DefaultAPIKey
@@ -476,7 +479,10 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	} else if projectProbeCached(connectionID) {
 		log.Debug("fallback", "upstream skipped (cached no-project)", "provider", provider, "model", model, "conn", connectionID, "error", fwdErr)
 	} else {
-		log.Warn("fallback", "upstream failed", "provider", provider, "model", model, "conn", connectionID, "status", statusCode, "error", fwdErr)
+		log.Warn("fallback", "upstream failed", append([]any{
+			"provider", provider, "model", model, "conn", connectionID,
+			"status", statusCode, "error", fwdErr,
+		}, h.connIdentityKVByID(connectionID)...)...)
 	}
 	return fwdErr
 }

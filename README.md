@@ -1,110 +1,176 @@
-# 9router-go
+<div align="center">
+
+# 9router-go — FREE AI Router & Token Saver (Single Binary)
+
+**Never stop coding. Save 20-40% tokens with RTK + auto-fallback to FREE & cheap AI models.**
+
+**Connect Claude Code, Cursor, Antigravity, Codex, Gemini, OpenCode, Cline, OpenClaw... to 40+ AI providers & 100+ models — no Node.js needed at runtime.**
 
 [![CI](https://github.com/luqman-v1/9router-go/actions/workflows/ci.yml/badge.svg)](https://github.com/luqman-v1/9router-go/actions/workflows/ci.yml)
 [![Release](https://github.com/luqman-v1/9router-go/actions/workflows/release.yml/badge.svg)](https://github.com/luqman-v1/9router-go/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/luqman-v1/9router-go)](https://github.com/luqman-v1/9router-go/releases/latest)
+[![License](https://img.shields.io/github/license/luqman-v1/9router-go)](https://github.com/luqman-v1/9router-go/blob/main/LICENSE)
 
-9router-go is a single-binary AI gateway and dashboard. The Go process serves the OpenAI-, Claude-, Gemini-, and Ollama-compatible proxy APIs on the same port as a Svelte 5 dashboard. The dashboard is built with Vite, embedded in the binary, and needs no Node.js or separate web server at runtime.
+[🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [⚙️ Setup](#-setup-guide) • [🌐 Upstream](https://github.com/decolua/9router)
+
+</div>
+
+---
+
+## 🤔 Why 9router-go?
+
+Same idea as [9Router](https://github.com/decolua/9router), minus the Node.js runtime: **one Go binary** serves the proxy APIs + an embedded Svelte dashboard.
+
+**Stop wasting money, tokens and hitting limits:**
+
+- ❌ Subscription quota expires unused every month
+- ❌ Rate limits stop you mid-coding
+- ❌ Tool outputs (git diff, grep, ls...) burn tokens fast
+- ❌ Manual switching between providers
+
+**9router-go solves this:**
+
+- ✅ **RTK Token Saver** — auto-compress tool_result content, save 20-40% tokens
+- ✅ **Auto fallback** — Subscription → Cheap → Free, zero downtime
+- ✅ **Multi-account** — round-robin between accounts per provider
+- ✅ **Single binary** — Go + embedded dashboard, works with Claude Code, Codex, Cursor, Cline, any CLI tool
+
+---
+
+## 🔄 How It Works
 
 ```text
-CLI / SDK ──► 9router-go :20130 ──► provider gateways
-                    │  ├─ /v1/* and compatibility API
-Browser ───────────┘  ├─ /dashboard + Svelte SPA
-                       └─ /api/* management API
+┌─────────────┐
+│  Your CLI   │  (Claude Code, Codex, OpenClaw, Cursor, Cline...)
+│   Tool      │
+└──────┬──────┘
+       │ http://localhost:20130/v1
+       ↓
+┌─────────────────────────────────────────────┐
+│         9router-go (Smart Router)           │
+│  • RTK Token Saver (cut tool_result tokens) │
+│  • Format translation (OpenAI ↔ Claude)     │
+│  • Quota tracking                           │
+│  • Auto token refresh                       │
+└──────┬──────────────────────────────────────┘
+       │
+       ├─→ [Tier 1: SUBSCRIPTION] Claude Code, Codex, GitHub Copilot
+       │   ↓ quota exhausted
+       ├─→ [Tier 2: CHEAP] GLM ($0.6/1M), MiniMax ($0.2/1M)
+       │   ↓ budget limit
+       └─→ [Tier 3: FREE] Kiro, OpenCode Free, Vertex ($300 credits)
+
+Result: Never stop coding, minimal cost + 20-40% token savings via RTK
 ```
 
-Open `http://localhost:20130` after starting an existing, initialized 9router data directory.
+---
 
-> **Version and compatibility baseline:** the Go release is **v1.9.1** (`VERSION`, `version.json`, and `internal/updater.CurrentVersion`). The local upstream checkout and Go manifest declare [`decolua/9router` v0.5.85](https://github.com/decolua/9router) as the synchronization baseline, while published upstream npm/Docker `latest` is v0.5.86. `CHANGELOG.md` records selected v0.5.86 parity work under Go v1.9.0 and explicitly deferred work; this is not a claim of complete endpoint, provider, or feature parity.
+## ⚡ Quick Start
 
-## Features
+**1. Install (one line):**
 
-- Native Svelte 5 dashboard for providers, OAuth connections, provider nodes, combos, proxy pools, API keys, models, usage, quota, and settings
-- OpenAI Chat Completions, Claude Messages, Gemini, Ollama-compatible, Responses, embeddings, media, search, and web-tool paths
-- Combos with fallback, round-robin, sticky routing, fusion, capability-aware reordering, and account fallback
-- Per-provider executors plus OpenAI-compatible and Gemini-native defaults; OAuth refresh and reactive 401 retry
-- Bidirectional request/response translation, streamed SSE handling, usage capture, live usage/console streams, and stall detection
-- SQLite WAL persistence, proxy pools, outbound proxy support, token-saver options, self-update, MITM commands, Docker, and cross-compilation
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/luqman-v1/9router-go/main/install.sh | bash
+```
 
-Detailed routing and provider behavior is documented in [`ARCHITECTURE.md`](ARCHITECTURE.md). Schema details and compatibility notes are in [`DATABASE.md`](DATABASE.md).
+```powershell
+# Windows (PowerShell, no admin needed)
+irm https://raw.githubusercontent.com/luqman-v1/9router-go/main/install.ps1 | iex
+```
 
-## Install
+🎉 Then start it (defaults: port `20130`, data `~/.9router` — no flags needed):
+
+```bash
+9router-go
+# dashboard: http://localhost:20130
+```
+
+> Already use upstream 9Router? Point Go at the same data dir — it opens the **same `DATA_DIR/db/data.sqlite`**: providers, connections, combos, and usage carry over. Details in [`DATABASE.md`](DATABASE.md).
+
+**2. Connect a FREE provider (no signup needed):**
+
+Dashboard → Providers → Connect **Kiro AI** (~50 credits/month free) or **OpenCode Free** (no auth) → Done!
+
+**3. Use in your CLI tool:**
+
+```text
+Claude Code / Codex / OpenClaw / Cursor / Cline Settings:
+  Endpoint: http://localhost:20130/v1
+  API Key:  [Settings → API Keys in the dashboard]
+  Model:    kr/claude-sonnet-4.5
+```
+
+**That's it!** Start coding with FREE AI models.
+
+**Alternatives:**
+
+```bash
+# Docker — no build needed
+docker run -d --name 9router-go --restart unless-stopped \
+  -p 20130:20130 -v "$HOME/.9router:/data" \
+  -e PORT=20130 -e DATA_DIR=/data \
+  luqmenul/9router-go:latest
+
+# Manual download — pick your file, no command line guesswork:
+# Windows → .exe | Mac M1+ → darwin-arm64 | Mac Intel → darwin-amd64
+# Linux VPS → linux-amd64 | Raspberry Pi → linux-arm64
+```
+
+📦 [All release binaries](https://github.com/luqman-v1/9router-go/releases/latest) • 🔨 [Build from source](#-setup-guide)
+
+---
+
+## 💡 Key Features
+
+- 🖥️ Native Svelte 5 dashboard: providers, OAuth, combos, proxy pools, API keys, usage, quota, settings
+- 🔌 OpenAI Chat, Claude Messages, Gemini, Ollama-compatible, Responses, embeddings, media, search, web tools
+- 🔁 Combos with fallback, round-robin, sticky routing, fusion, capability-aware reordering
+- 👥 Per-provider executors, OAuth refresh, reactive 401 retry
+- 📡 Live usage + console-log SSE streams, stall detection
+- 💾 SQLite WAL persistence, outbound proxy support, self-update, MITM commands, Docker, cross-compilation
+
+---
+
+## ⚙️ Setup Guide
 
 ### Release binary
 
-Download the archive for your platform from [GitHub Releases](https://github.com/luqman-v1/9router-go/releases/latest), then verify it against `SHA256SUMS.txt` from that release.
-
-Release artifacts:
-
-| Platform | Architecture | Binary |
-| --- | --- | --- |
-| Linux | `amd64` | `9router-go-linux-amd64` |
-| Linux | `arm64` | `9router-go-linux-arm64` |
-| macOS | `amd64` | `9router-go-darwin-amd64` |
-| macOS | `arm64` | `9router-go-darwin-arm64` |
-| Windows | `amd64` | `9router-go-windows-amd64.exe` |
-
-### Docker Compose
-
-```bash
-docker compose up -d --build
-curl http://localhost:20130/health
-```
-
-The bundled compose file persists `/data` in the `9router-data` volume. The image also contains the embedded dashboard; JavaScript is only needed while building the image.
-
-> A new Docker volume is an empty SQLite file, not a complete schema. See [Database compatibility](#database-compatibility-and-bootstrap-limit) before first use.
+Download from [GitHub Releases](https://github.com/luqman-v1/9router-go/releases/latest), verify against `SHA256SUMS.txt`.
 
 ### Build from source
 
-Prerequisites: Go 1.27 and Bun 1.x. The Go package embeds `web/dist`, so build the dashboard before compiling the binary.
+Prerequisites: Go 1.27 and Bun 1.x (dashboard is embedded into the binary, so build web first):
 
 ```bash
 git clone https://github.com/luqman-v1/9router-go.git
 cd 9router-go
-
-make web-build       # bun install --frozen-lockfile && bun run build
-make build           # embeds VERSION into the Go binary
+make web-build   # bun install --frozen-lockfile && bun run build
+make build       # embeds VERSION into the Go binary
 ```
 
-Rebuild dashboard assets after frontend changes:
+### Run
+
+Defaults are enough for most people — plain `9router-go` listens on port `20130` with data in `~/.9router`:
 
 ```bash
-FORCE=1 make web-build
-make build
-```
-
-`go build` alone is sufficient only when a current `web/dist/index.html` already exists.
-
-## Run
-
-The server reads `.env` and environment variables. There are no `--port` or `--db-path` flags; use `PORT` and `DB_PATH`.
-
-```bash
-PORT=20130 DATA_DIR="$HOME/.9router" ./9router-go
-```
-
-Common alternatives:
-
-```bash
-# Keep the default database path but move the data directory.
-DATA_DIR=/srv/9router PORT=20130 ./9router-go
-
-# Select a SQLite file explicitly.
-DB_PATH=/srv/9router/data.sqlite PORT=20130 ./9router-go
-
-# Restrict the listener to a local reverse proxy.
-HOST=127.0.0.1 PORT=20130 ./9router-go
-
-# Check liveness and release metadata.
+9router-go
 curl http://localhost:20130/health
 ./9router-go version
 ```
 
-The supported global flags are `--rtk`, `--caveman`, `--ponytail`, `--auto-update`, and `--no-injection-guard`. `make run` and `make dev` pass the corresponding Make variables. Commands are also available for `version`, `update`, and `mitm enable|disable|status`.
+Only override when you need something different (`PORT`, `DATA_DIR`/`DB_PATH` — there are no `--port` flags):
 
-### Client setup
+```bash
+PORT=20129 ./9router-go                        # different port
+DATA_DIR=/srv/9router ./9router-go              # different data dir
+DB_PATH=/srv/9router/data.sqlite ./9router-go   # explicit SQLite file
+HOST=127.0.0.1 ./9router-go                     # localhost only, behind a reverse proxy
+```
 
-Use the gateway base URL and an active key created in **Settings → API Keys**:
+First dashboard login uses the compatibility password until you set your own (remote fresh installs must change it or set `INITIAL_PASSWORD`).
+
+### Client example
 
 ```bash
 curl http://localhost:20130/v1/chat/completions \
@@ -113,118 +179,70 @@ curl http://localhost:20130/v1/chat/completions \
   -d '{"model":"ag/gemini-3.8-flash-high","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
-For Claude Messages clients, use `ANTHROPIC_BASE_URL=http://localhost:20130/v1`. Engine routes always require an active client API key; `Authorization: Bearer` and `X-API-Key` are supported. Query-string keys are accepted only on paths ending in `/stream` for browser `EventSource` clients.
+For Claude Messages clients: `ANTHROPIC_BASE_URL=http://localhost:20130/v1`.
 
-## Environment
+<details>
+<summary><b>Advanced: environment variables, API surface, auth, database</b></summary>
+
+### Environment
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `20130` | HTTP port |
 | `HOST` / `BIND_ADDR` | all interfaces | Listener address |
-| `DATA_DIR` | `~/.9router`; `%APPDATA%/9router` on Windows | Data root |
-| `DB_PATH` | `$DATA_DIR/db/data.sqlite` | SQLite file; a directory is resolved when it contains a known database |
-| `JWT_SECRET` | generated into `$DATA_DIR/jwt-secret` | Dashboard session signing secret |
-| `INITIAL_PASSWORD` | unset; compatibility fallback is `123456` | First dashboard password before a saved hash exists |
-| `API_KEY_SECRET` | compatibility default | API-key hashing compatibility setting |
-| `MACHINE_ID_SALT` | compatibility default | Machine identity compatibility setting |
+| `DATA_DIR` | `~/.9router` (`%APPDATA%/9router` on Windows) | Data root |
+| `DB_PATH` | `$DATA_DIR/db/data.sqlite` | SQLite file |
+| `INITIAL_PASSWORD` | unset (fallback `123456` locally) | First dashboard password |
 | `RTK_ENABLED` | `true` | RTK input compression |
-| `CAVEMAN_ENABLED` | `false` | Caveman terse style |
-| `PONYTAIL_ENABLED` | `false` | Ponytail code style |
+| `CAVEMAN_ENABLED` / `PONYTAIL_ENABLED` | `false` | Style savers |
 | `AUTO_UPDATE` | `false` | Background self-update |
-| `INJECTION_GUARD_DISABLED` | `false` | Disable prompt-injection detection |
-| `LOG_FILE` | standard error | Append server logs to a file |
-| `HTTP_PROXY` / `HTTPS_PROXY` | Go proxy defaults | Optional upstream egress proxy |
-| `FX_LOGGING` | `false` | Emit Fx lifecycle events |
-| `PPROF_ENABLED` | `false` | Expose `/debug/pprof/*`; keep disabled on untrusted networks |
-| `TRUST_PROXY` / `TRUST_CLOUDFLARE` | unset | Trust forwarded client-IP headers for login limiting |
+| `HTTP_PROXY` / `HTTPS_PROXY` | Go defaults | Upstream egress proxy |
+| `PPROF_ENABLED` | `false` | Expose `/debug/pprof/*` (keep off on untrusted networks) |
+| `TRUST_PROXY` / `TRUST_CLOUDFLARE` | unset | Trust forwarded client-IP headers |
 
-`.env.example` documents the security-sensitive subset and optional OAuth client overrides.
+`.env.example` documents the security-sensitive subset and OAuth overrides.
 
-## Authentication boundaries
-
-- `GET /health`, the dashboard HTML/assets, `/login`, auth status/login/logout, and provider OAuth callback landing pages are public.
-- Proxy and compatibility routes are protected by `RequireApiKey`; this is not controlled by the dashboard's `requireLogin` setting.
-- Dashboard management APIs use `RequireDashboardAuth`. Access is allowed when dashboard login is disabled, or when the request has a valid 24-hour `auth_token` cookie, the local `x-9r-cli-token`, or an active client API key.
-- Destructive/admin operations require a valid dashboard session or local CLI token. Standard client API keys are rejected for shutdown, update, health reset, and database export/import.
-- A remote fresh-install login using the compatibility default password is refused until the password is changed or `INITIAL_PASSWORD` is set. Local access still accepts the compatibility password until a dashboard password hash is stored.
-
-## API surface
-
-The most commonly used routes are:
+### API surface
 
 ```text
 POST /v1/chat/completions       OpenAI Chat Completions
 POST /v1/messages               Claude Messages
-POST /v1/messages/count_tokens  Claude token counting
 POST /v1/responses              Responses API
-POST /v1/responses/compact      Compact Responses API
 POST /v1/embeddings             Embeddings
 POST /api/chat                  Ollama-compatible chat
 GET  /v1/models                 Model catalog
-GET  /v1/models/info            Model capabilities and limits
-GET  /v1/models/{kind}          Models filtered by kind
-
 POST /v1/images/generations     Image generation
 POST /v1/videos/generations     Video generation
 POST /v1/audio/speech           Text to speech
 POST /v1/audio/transcriptions   Speech to text
-POST /v1/search                 Provider-selected web search
-POST /v1/scrape                 Web scrape
-
+POST /v1/search                 Web search
 GET  /api/usage/stream          Live usage SSE
-GET  /api/usage/stats           Current usage statistics
-GET  /translator/console-logs/stream
-                               Live console log SSE
 GET  /health                    Liveness
-GET  /api/version               Version and update metadata
+GET  /api/version               Version metadata
 ```
 
-The request middleware repeatedly removes leading `/v1/` segments before routing, so `/v1/chat/completions` and `/chat/completions` reach the same canonical handler. Some model and dashboard compatibility aliases are also registered explicitly.
+### Authentication
 
-## Database compatibility and bootstrap limit
+- Public: `/health`, dashboard HTML/assets, `/login`, OAuth callbacks.
+- Proxy routes need an active client API key (`Authorization: Bearer` / `X-API-Key`).
+- Dashboard APIs need a session cookie, CLI token, or API key; destructive ops (shutdown, update, DB import) need a session or CLI token.
+- The API server defaults to all interfaces — bind localhost or protect the port outside trusted machines.
 
-The Go runtime opens the configured SQLite database in WAL mode with a five-second busy timeout and enforces private file permissions. It reads and writes the upstream 9router table/JSON shapes and adds the Go-only `upstream_leases` table for cross-process Freebuff session coordination.
+### Database compatibility
 
-**Current limitation:** `internal/db.OpenDatabase` creates directories and the SQLite file, but it does not create the upstream schema, seed API keys/settings, import legacy JSON, or run migrations. Only `upstream_leases` is created idempotently. Therefore, a truly fresh DB is not a supported standalone bootstrap path. Start with an existing schema-compatible 9router database; opening an empty file is not equivalent to a successful migration.
+Go reads/writes the upstream 9router table/JSON shapes and bootstraps the core schema on startup (creates the 11 tables when absent, backfills missing columns, seeds an empty settings row) — a fresh `DATA_DIR` just works, no upstream install needed. Existing databases are never modified beyond additive backfills. Full contract in [`DATABASE.md`](DATABASE.md), routing internals in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-The `DB_PATH` resolver recognizes a directory containing `db/data.sqlite`, `data.sqlite`, or `9router.db`, which is useful for common upstream layouts. Back up the database before sharing it between processes or deployments. Provider secrets are stored in the database and files/directories are chmodded private where supported.
+</details>
 
-## Verify
+---
 
-The CI workflow is the release contract for pushes and pull requests:
+## 📚 Docs
 
-```bash
-make web-build   # Bun 1.4.2, frozen lockfile
-go vet ./...
-go test ./... -v
-go build -ldflags='-s -w' -o /tmp/9router-go ./cmd/9router-go/
-```
-
-For local development of the dashboard:
-
-```bash
-cd web
-bun install --frozen-lockfile
-bun run dev       # Vite dev server; run the Go server on :20130 separately
-bun run lint
-```
-
-The web package currently has no frontend unit/component test script. Validate dashboard changes against a running Go server and the affected browser route. `make test-short` runs `go test ./...`; `make vet` runs `go vet ./...`; `make cross` builds release binaries and checksums.
-
-## Operational caveats
-
-- Compatibility with upstream means selected data shapes, routes, and behaviors are ported; it is not a blanket 100% parity guarantee.
-- A clean database requires bootstrap by a schema-capable upstream/runtime path; Go currently does not perform that bootstrap.
-- The production dashboard is fully embedded, but building it still requires Bun and the committed lockfile.
-- The API server defaults to all interfaces. Bind to localhost or protect the port when exposing it outside a trusted machine.
-- `PPROF_ENABLED` exposes sensitive profiling endpoints and is disabled by default.
-- Release binaries and the self-updater are unsigned. Verify release checksums; Windows may require an explicit allow action.
-- Provider availability, account limits, vendor anti-abuse controls, and account-sharing policy remain upstream concerns; client cloaking does not guarantee account safety.
-
-## Roadmap
-
-See [`ROADMAP.md`](ROADMAP.md) for proposals only. Items there are not current behavior.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — routing, providers, runtime layout
+- [`DATABASE.md`](DATABASE.md) — SQLite schema & operator contract
+- [`ROADMAP.md`](ROADMAP.md) — proposals only, not current behavior
+- [`CHANGELOG.md`](CHANGELOG.md) — release history (Go **v1.9.2**, upstream baseline `decolua/9router` v0.5.85)
 
 ## Credits
 
-- [9Router](https://github.com/decolua/9router) — original Next.js/React gateway and dashboard from which this Go implementation and Svelte port preserve selected compatibility contracts
+- [9Router](https://github.com/decolua/9router) — original Next.js gateway & dashboard this Go port preserves compatibility with

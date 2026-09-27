@@ -728,6 +728,30 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider, device_code: deviceCode, session }),
     }),
+  kiroImport: (refreshToken: string) =>
+    request<{ success: boolean; id?: string; error?: string }>('/api/oauth/kiro/import', {
+      method: 'POST',
+      body: JSON.stringify({ refreshToken }),
+    }),
+  kiroImportCliProxy: (jsonPayload: string) =>
+    request<{ success: boolean; id?: string; error?: string }>('/api/oauth/kiro/import-cli-proxy', {
+      method: 'POST',
+      body: JSON.stringify({ json: jsonPayload }),
+    }),
+  kiroAutoImport: () =>
+    request<{ found: boolean; refreshToken?: string; error?: string }>('/api/oauth/kiro/auto-import'),
+  kiroApiKey: (apiKey: string, region?: string) =>
+    request<{ success: boolean; id?: string; error?: string }>('/api/oauth/kiro/api-key', {
+      method: 'POST',
+      body: JSON.stringify({ apiKey, region }),
+    }),
+  kiroSocialAuthorize: (provider: 'google' | 'github') =>
+    request<{ authUrl: string; url: string; state: string }>(`/api/oauth/kiro/social-authorize?provider=${provider}`),
+  kiroSocialExchange: (code: string) =>
+    request<{ success: boolean; id?: string; error?: string }>('/api/oauth/kiro/social-exchange', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
   cursorImport: (accessToken: string, machineId: string) =>
     request<{ success: boolean; id: string; error?: string }>('/api/oauth/cursor/import', {
       method: 'POST',

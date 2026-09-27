@@ -292,6 +292,30 @@ func extractAPIKey(connData *ConnectionData) string {
 	return connData.AccessToken
 }
 
+// resolveProviderAuthToken picks which credential a provider must actually send.
+// Kiro is the only provider where both fields can be present and the right one
+// is not the API key: upstream (open-sse/executors/kiro.js buildHeaders) uses the
+// apiKey solely for `authMethod: "api_key"` connections and the OAuth
+// accessToken everywhere else. Sending the wrong one makes CodeWhisperer answer
+// 403 "The bearer token included in the request is invalid." even though the
+// access token is perfectly valid.
+func resolveProviderAuthToken(provider string, connData *ConnectionData, current string) string {
+	if connData == nil || provider != "kiro" {
+		return current
+	}
+	authMethod, _ := connData.ProviderSpecificData["authMethod"].(string)
+	if authMethod == "api_key" && connData.APIKey != "" {
+		return connData.APIKey
+	}
+	if connData.AccessToken != "" {
+		return connData.AccessToken
+	}
+	if connData.APIKey != "" {
+		return connData.APIKey
+	}
+	return current
+}
+
 // NormalizeProviderToken normalizes credentials for providers with specific token requirements.
 // Only Cline OAuth tokens — WorkOS JWTs (base64url "eyJ…" with a dot) — take
 // the "workos:" prefix; ClinePass API keys (e.g. "clp_…") ride plain Bearer

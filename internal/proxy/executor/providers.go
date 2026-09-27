@@ -146,17 +146,81 @@ func ForwardKimchi(w http.ResponseWriter, req *Request) error {
 
 // ForwardKiro forwards to kiro with AWS EventStream response handling.
 // Uses EventStream binary parsing instead of standard SSE.
+//
+// The kiro.dev gateway only accepts a conversationState envelope and answers
+// 400 "Improperly formed request." for anything else, so the OpenAI body is
+// translated first (internal/translator.OpenAIToKiro). Bodies that already
+// carry a conversationState (MITM passthrough) are forwarded untouched.
 func ForwardKiro(w http.ResponseWriter, req *Request) error {
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardKiro(ctx, req.Client, req.Config, req.APIKey, req.Body, req.IsStream)
+
+	body, err := kiroUpstreamBody(req)
+	if err != nil {
+		return err
+	}
+
+	resp, err := proxy.ForwardKiro(ctx, req.Client, req.Config, req.APIKey, body, req.IsStream, req.ConnData)
 	if err != nil {
 		return fmt.Errorf("ForwardKiro: %w", err)
 	}
 	defer resp.Body.Close()
 	return handleKiroStream(w, req, resp.Body)
+}
+
+// kiroUpstreamBody translates an OpenAI chat body into the Kiro envelope,
+// passing through bodies that already use conversationState.
+func kiroUpstreamBody(req *Request) ([]byte, error) {
+	var probe map[string]any
+	if err := json.Unmarshal(req.Body, &probe); err != nil {
+		return nil, fmt.Errorf("ForwardKiro: parse request body: %w", err)
+	}
+	if _, ok := probe["conversationState"]; ok {
+		// Already a Kiro envelope (MITM passthrough) — only clean it.
+		return req.Body, nil
+	}
+
+	model := req.ModelName
+	if model == "" {
+		var oreq struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(req.Body, &oreq); err == nil {
+			model = oreq.Model
+		}
+	}
+	// Drop the provider prefix the client sent (kr/claude-sonnet-4.5).
+	if _, after, ok := strings.Cut(model, "/"); ok {
+		model = after
+	}
+	// -thinking / -agentic are 9router fictions, stripped before upstream.
+	model = strings.TrimSuffix(model, "-thinking")
+	model = strings.TrimSuffix(model, "-agentic")
+	if idx := strings.IndexByte(model, '('); idx > 0 {
+		model = model[:idx]
+	}
+
+	profileArn := ""
+	if req.ConnData != nil {
+		if s, ok := req.ConnData["profileArn"].(string); ok {
+			profileArn = strings.TrimSpace(s)
+		}
+	}
+
+	out, err := translator.OpenAIToKiro(req.Body, translator.KiroTranslateOptions{
+		Model:      model,
+		ProfileArn: profileArn,
+	})
+	if err != nil {
+		log.Error("executor", "kiro translation failed", "model", model, "error", err)
+		return nil, &proxy.UpstreamError{
+			StatusCode: http.StatusBadRequest,
+			Body:       []byte(fmt.Sprintf(`{"error":{"message":"kiro request could not be built: %v","type":"invalid_request_error","code":400}}`, err)),
+		}
+	}
+	return out, nil
 }
 
 // ForwardAzure forwards to Azure OpenAI with dynamic URL from env vars.
@@ -284,7 +348,6 @@ func toCommandcodeImageBlock(part map[string]any) map[string]any {
 	return nil
 }
 
-
 // buildCommandcodeBody transforms OpenAI request payload into CommandCode schema
 // {threadId, memory, config, params} matching upstream openaiToCommandCodeRequest.
 func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
@@ -325,6 +388,15 @@ func buildCommandcodeBody(body []byte, model string) ([]byte, error) {
 		params["model"] = model
 	}
 	params["stream"] = true
+	// Upstream caps generation via params.max_tokens (openaiToCommandCodeRequest
+	// parity: body.max_tokens ?? body.max_output_tokens ?? DEFAULT_MAX_TOKENS).
+	// Without it a "hi" ping can burn the budget on chain-of-thought and the
+	// gateway answers with a bare error event instead of text.
+	if _, ok := params["max_tokens"]; !ok {
+		if _, ok := params["max_output_tokens"]; !ok {
+			params["max_tokens"] = 1024
+		}
+	}
 
 	// CommandCode messages require content as array of blocks (never raw string)
 	if rawMsgs, ok := m["messages"].([]any); ok {

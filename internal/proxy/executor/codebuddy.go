@@ -6,71 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/proxy"
 )
-
-// Tencent's content filter flags CLI agent system prompts ("You are Claude
-// Code, Anthropic's official CLI...") as prompt injection / sensitive content
-// and rejects the whole request (HTTP 400, code 11128 "Illegal API invocation
-// from an unapproved channel"). Detect agent system prompts and replace them
-// with a neutral one, leaving legitimate user system prompts untouched —
-// ported from the JS version's CodeBuddyExecutor.transformRequest.
-const codebuddyNeutralPrompt = "You are a helpful AI assistant that helps with software engineering tasks."
-
-var codebuddyAgentPattern = regexp.MustCompile(`(?i)you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>`)
-
-// codebuddyFlattenContent flattens message content to plain text. content may
-// be a string or typed blocks ([{type:"text",text}]) depending on the
-// incoming client format.
-func codebuddyFlattenContent(content any) string {
-	switch v := content.(type) {
-	case string:
-		return v
-	case []any:
-		parts := make([]string, 0, len(v))
-		for _, b := range v {
-			if m, ok := b.(map[string]any); ok {
-				if t, ok := m["text"].(string); ok {
-					parts = append(parts, t)
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return ""
-}
-
-// sanitizeCodebuddySystemPrompts replaces agent-flavoured system prompts with
-// a neutral one so Tencent's channel/content check lets the request through.
-func sanitizeCodebuddySystemPrompts(reqMap map[string]any) {
-	msgs, ok := reqMap["messages"].([]any)
-	if !ok {
-		return
-	}
-	for i, mAny := range msgs {
-		m, ok := mAny.(map[string]any)
-		if !ok || m["role"] != "system" {
-			continue
-		}
-		text := codebuddyFlattenContent(m["content"])
-		if text == "" {
-			continue
-		}
-		if len(text) > 2000 || codebuddyAgentPattern.MatchString(text) {
-			if _, isStr := m["content"].(string); isStr {
-				m["content"] = codebuddyNeutralPrompt
-			} else {
-				m["content"] = []any{map[string]any{"type": "text", "text": codebuddyNeutralPrompt}}
-			}
-			msgs[i] = m
-		}
-	}
-}
 
 // ForwardCodebuddyCN forwards to Tencent CodeBuddy with force-stream
 // and reasoning_summary injection.
@@ -118,18 +59,52 @@ func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
 }
 
 // transformCodebuddyBody forces stream=true and handles reasoning params.
+//
+// 注：此处曾有一段「agent 系统提示词清洗」（应对 Tencent 内容过滤的 11128），
+// 2026-09-27 随上游 v1.9.3 同步撤除 —— 下面上游带来的 shaping 会**丢弃全部
+// system/developer 消息**并前置固定的 "You are CodeBuddy Code."，清洗在其之前执行
+// 因而恒为 no-op（留着只会让人以为它在起作用）。若 11128 复发，正确修法是把清洗
+// 放到 shaping **之后**。裁决记录：AGENT-CONVENTIONS §10.2 / docs/adr/0003。
 func transformCodebuddyBody(body []byte) ([]byte, error) {
 	var reqMap map[string]any
 	if err := json.Unmarshal(body, &reqMap); err != nil {
 		return nil, fmt.Errorf("parse body: %w", err)
 	}
 
-	// Neutralize agent system prompts — Tencent's content filter rejects
-	// requests carrying CLI agent identity markers (HTTP 400, code 11128).
-	sanitizeCodebuddySystemPrompts(reqMap)
-
 	// Force stream — CodeBuddy rejects non-stream (HTTP 400, code 11101)
 	reqMap["stream"] = true
+
+	// CodeBuddy rejects plain OpenAI shape (11101 invalid request): needs a
+	// leading system prompt + user content as typed blocks, not a bare string
+	// (upstream codebuddy-intl.js transformRequest parity).
+	var msgs []any
+	if arr, ok := reqMap["messages"].([]any); ok {
+		msgs = arr
+	}
+	shaped := []any{map[string]any{"role": "system", "content": "You are CodeBuddy Code."}}
+	for _, raw := range msgs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		if role == "system" || role == "developer" {
+			continue
+		}
+		if role == "user" {
+			if s, ok := m["content"].(string); ok {
+				cp := map[string]any{}
+				for k, v := range m {
+					cp[k] = v
+				}
+				cp["content"] = []any{map[string]any{"type": "text", "text": s}}
+				shaped = append(shaped, cp)
+				continue
+			}
+		}
+		shaped = append(shaped, m)
+	}
+	reqMap["messages"] = shaped
 
 	// Handle reasoning_effort / reasoning_summary
 	if eff, ok := reqMap["reasoning_effort"].(string); ok {

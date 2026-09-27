@@ -2,12 +2,98 @@
 
 ## [Unreleased]
 
+## [v1.9.3] - 2026-09-26
+
+### 🐛 Kiro tool calling tidak pernah sampai ke client (`arguments: {}` / tanpa `tool_calls`)
+
+- Gejala: `POST /v1/chat/completions` dengan `tools` di Kiro tidak pernah mengembalikan `tool_calls`. Model menulis pseudo-panggilan tool sebagai teks (`<invoke name="browser">…`) atau, setelah katalog dikirim, membalas kosong dengan `reasoning_content: "..."`. Provider lain (grok-cli, antigravity) tidak terpengaruh.
+- Akar 1 — **request**: Kiro tidak punya array `tools` OpenAI. Katalog tool harus ditempel di turn user terakhir sebagai `userInputMessage.userInputMessageContext.tools` (`{toolSpecification:{name,description,inputSchema:{json:…}}}`, upstream `normalizeKiroToolSpecs`). Translator Go hanya mengirim `toolResults`, sehingga model tidak pernah tahu tool apa yang ada.
+- Akar 2 — **response**: Kiro memecah satu tool call jadi beberapa frame `toolUseEvent` — frame pertama hanya `name`+`toolUseId`, frame berikutnya potongan JSON di `input` (`"{\"ci"`, `"ty\": \"Jak"`, …), ditutup frame `stop: true`. Kode lama membaca field `content` (yang tidak pernah dikirim) dan peduli `arguments: "{}"` setiap frame.
+- Perbaikan:
+  - `internal/translator/kiro_tools.go` (baru) — port `normalizeKiroToolSpecs` upstream: normalisasi tool OpenAI/Claude, sanitasi nama (`[^a-zA-Z0-9_-]` → `_`, dedup suffiks, batas 64 char), `inputSchema.json` dipaksa `type: object`, `additionalProperties` dibuang, `required` difilter ke properti yang ada.
+  - `internal/translator/kiro.go` — katalog tool ditempel ke `userInputMessageContext.tools` pada turn terakhir; `toolResults` tetap ikut.
+  - `internal/proxy/executor/stream.go` — `kiroToolCall` meny-buffer argumen per `toolUseId` (menerima `input` berupa string fragmen maupun objek, `content` lama jadi fallback), dan `tool_calls` baru dipancarkan setelah stream selesai dengan argumen utuh.
+- Verifikasi live e2e (tool `get_weather`, "weather in Jakarta"): `kr/auto` → `{"city":"Jakarta","unit":"celsius"}`, `kr/claude-sonnet-4.5` → `{"city":"Jakarta"}`, `gcli/grok-4.5` dan `ag/gemini-3.8-flash-high` tetap PASS. Bandingkan upstream (`:20128`, akun Kiro sama) menghasilkan `tool_calls` yang sama.
+- Tests: `TestOpenAIToKiro_AttachesToolSpecsToLastUserTurn`, `TestOpenAIToKiro_ToolResultsStillTravel`, `TestOpenAIToKiro_NoToolsNoContext`, `TestKiroNormalizeRootSchema`, `TestKiroUniqueToolName`, `TestForwardKiroRequest_ReassemblesFragmentedToolInput`. Suite: 1473 pass.
+
+### 🐛 Kiro `403 The bearer token included in the request is invalid`
+
+- Gejala: `POST /api/models/test` / chat Kiro gagal 403 sementara token-nya sebenarnya valid — `GET ListAvailableModels` dengan token yang sama balas 200.
+- Akar: `extractAPIKey` selalu memprioritaskan `apiKey`, dan koneksi Kiro hasil *import* menyimpan **dua** kredensial (`apiKey` + `accessToken`). Kita mengirim `apiKey` itu sebagai `Authorization: Bearer` **dan** `x-amz-sso-bearer`, padahal upstream (`open-sse/executors/kiro.js` `buildHeaders`) memakai `apiKey` hanya untuk `authMethod: "api_key"`; sisanya memakai `accessToken`. CodeWhisperer menolak token itu dengan pesan "bearer token invalid" meski `accessToken`-nya sehat.
+- Perbaikan:
+  - `internal/handlers/chat/connections.go` — `resolveProviderAuthToken` menerapkan aturan upstream itu di jalur forward (hanya Kiro; provider lain tidak berubah).
+  - `internal/proxy/grokcli.go` — `ForwardKiro` sekarang mengirim `TokenType: API_KEY|EXTERNAL_IDP` sesuai `authMethod` dan `x-amzn-codewhisperer-profile-arn`, lalu **rotasi endpoint** seperti upstream: `q.<region>` → `codewhisperer.<region>` → `runtime.us-east-1.kiro.dev`, dengan fallback pada 401/403/404 (`KIRO_ENDPOINT_FALLBACK_STATUSES`); 400 tetap terminal. Host AWS di-regionalisasi dari `providerSpecificData.region`.
+- Verifikasi: `POST /v1/chat/completions {"model":"kr/claude-sonnet-4.5"}` → **200** (`"ok"`), sebelumnya 403; ketiga permukaan Kiro juga balas 200 saat diprobe langsung dengan `accessToken` yang sama.
+- Tests: `TestResolveProviderAuthToken_Kiro` (7 kasus: imported/builder-id/api_key/access-only/key-only/kosong/provider lain), `TestKiroEndpointsOrdering` (3), `TestKiroTokenType` (5), `TestKiroEndpointFallbackStatus` (401/403/404 fallback, 400/429/5xx terminal). Suite: 1466 pass.
+
+### ✨ `GET /v1/models` — live catalog + bentuk respons identik upstream
+
+- `internal/handlers/chat/live_catalog.go` (baru): port `LIVE_MODEL_RESOLVERS` upstream — **kiro** (`GET https://q.<region>.amazonaws.com/ListAvailableModels` + fingerprint UA Kiro IDE, tiap model dipecah jadi varian `-thinking`/`-agentic`/`-thinking-agentic`, `auto` tanpa varian agentic), **grok-cli** (`GET <base>/v1/models` dengan header `x-grok-cli`), dan **node custom** (`fetchCompatibleModelIds`: `GET <baseUrl>/models`). Cache proses 5 menit per kredensial; 401/403 memicu refresh token sekali lalu retry; kegagalan jatuh ke katalog statis, tidak pernah mengosongkan provider.
+- Resolver hanya dipakai kalau `enabledModels` tidak dikunci di connection, sama seperti upstream; katalog live menggantikan statis, custom model & alias tetap digabung.
+- Bentuk respons disamakan upstream: `capabilities` untuk kiro memakai blok live `{thinking, agentic}` apa adanya; combo memakai bentuk `ComboCapabilities` terpisah (tanpa `thinkingEffortSupported`, `tools` = AND antar daun, `contextWindow` = daun tersempit, `maxOutput` = daun terlebar — aturan `aggregateComboCapabilities`); `context_length`/`max_completion_tokens` pada combo dihilang (dan `omitzero` dipakai karena `encoding/json/v2` tidak membuang angka nol dengan `omitempty`); kualifier `outputAlias/` hanya dibuang dari id registry/alias, bukan dari id custom (itulah sebabnya `openrouter/openrouter/free` tetap dobel di upstream).
+- `internal/providers/catalog_sync.go`: file katalog models.dev yang ditulis upstream kini bisa dibaca (format `v2`, `etag`, `syncedAt` epoch-milidetik), dan `GetCatalogLimits` dipakai lebih dulu sebelum tebakan substring — batas token ikut katalog, bukan tebakan.
+- Verifikasi silang vs instance upstream (:20128, DB sama): **714 model upstream vs 713 9router-go, 713 id identik, 0 selisih key entry maupun key `capabilities`**. Breakdown: `clinepass` 469/469, `kr` 34/34, `ag` 20/20, `cbai` 15/15, `openrouter` 7/7, `nvidia` 4/4, `Id` 3/3, `gcli` 1/1, `tr` 153/154, combo 7/7.
+- Sisa: (a) `tr/typesafe/jev-1.13` hanya ada di sisi upstream — `GET <baseUrl>/models` node tokenrouter sekarang mengembalikan kosong, jadi itu sisa cache upstream; (b) **nilai** `context_length`/`max_completion_tokens` masih beda pada 627 id karena tabel `MODEL_CAPABILITIES`/`PATTERN_CAPABILITIES` upstream belum di-port (katalog models.dev hanya mencakup 23 provider) — daftar model dan bentuk respons sudah identik, angkanya belum.
+- Tests: `live_catalog_test.go` (expand varian kiro, `kiroDisplayName`, parser katalog grok-cli 5 kasus, region dari profileArn) + `live_catalog_handler_test.go` (live kiro menggantikan statis, `enabledModels` melewati live fetch, kegagalan jatuh ke statis, live grok-cli + header).
+
+### 🐛 `GET /v1/models` — port penuh `buildModelsList` upstream Next.js (fix issue #1)
+
+- Gejala: `/v1/models` membanjiri katalog — `ghost customs` di `kv.customModels` untuk provider yang tak terhubung ikut terkirim, alias key dipublikasikan sebagai model sendiri, `enabledModels` diabaikan, dan model media/embedding ikut muncul. Di DB asli user: 640 model, `clinepass/` dobel dengan `cp/`, 4 node mati tetap menampakkan 21 model.
+- Sumber kebenaran: `~/htdocs/9router/src/app/api/v1/models/route.js` (`buildModelsList`, `KIND_SLUG_MAP`, `MODEL_TYPE_TO_KIND`, `inferKindFromUnknownModelId`, `aggregateComboCapabilities`).
+- `internal/handlers/chat/models_list.go` (baru, builder dipindah keluar dari `chat.go` — `chat.go` 1331 → 897 baris):
+  - urutan upstream: **combos dulu** (`owned_by: "combo"`, caps agregat dari seluruh daun combo via `MergeCapabilitiesDetail`), baru model per koneksi.
+  - `isActive !== false` **saja** — upstream tidak mensyaratkan credential untuk listing, jadi gate credential dari 9router-go sengaja dibalik (`TestHandleModels_SkipsCredentiallessConnections` diganti `TestHandleModels_ActiveConnectionPublishesCatalog`).
+  - per koneksi: `staticAlias` = alias katalog, `outputAlias` = `providerSpecificData.prefix`; `enabledModels` (psd atau top-level) **menggantikan** katalog statis; lalu digabung custom model yang `providerAlias ∈ {staticAlias, outputAlias, providerId}` (hanya bertipe llm) dan target `modelAliases` yang prefix-nya cocok; `isDisabled(outputAlias|staticAlias, id)` ditegakkan; prefix `outputAlias/`, `staticAlias/`, `providerId/` pada id dibersihkan.
+  - alias key **tidak lagi** jadi model id sendiri (upstream hanya memakai target-nya), dan custom model tak bertipe kini ikut disaring `isLLMModelID` (heuristik `embed|tts|speech|audio|voice|image|imagen|dall-e|flux|sdxl|sd-|stable-diffusion`, sama dengan `inferKindFromUnknownModelId` upstream).
+  - static dump hanya bila tabel `providerConnections` benar-benar kosong (upstream `connections.length === 0`).
+  - combo non-LLM (`webSearch`/`webFetch`) tidak masuk daftar ini — endpoint ini `kindFilter ["llm"]` (upstream `comboMatchesKinds`); entry combo hanya membawa `capabilities`, tanpa `context_length`/`max_completion_tokens`.
+- `internal/providers/registry_aliases.go` (baru): 61 alias provider di-port dari `open-sse/providers/registry` (`uiAlias || alias`), dan `GetProviderAlias` sekarang memakai tabel itu — provider tanpa alias upstream terbit apa adanya (`clinepass`, `nvidia`, `openrouter`, `openai`), bukan alias pendek karangan kita. Prefix lama (`cp`, `or`, `nv`, `gb`) hilang dari daftar; `ProviderAliasMap` (alias → id) tetap dipakai untuk **resolusi** request, jadi `cp/...` tetap merutekan ke clinepass. `ProviderToAliasMap` yang jadi dead code dihapus.
+- Bentuk entry disamakan upstream: `ModelInfoObject` hanya punya `id`, `object`, `owned_by`, `capabilities`, `context_length`, `max_completion_tokens` (field `created` dan `context_window` yang tidak ada di upstream dibuang), dan `CapabilitiesDetail` kini memuat `search`, `tools`, `reasoning`, `thinkingFormat`, `contextWindow`, `maxOutput` (sebelumnya `contextWindows` dobel).
+- `internal/providers/registry_models.go` di-regenerate penuh dari `open-sse/providers/registry` (89 provider, 1550 entri id/alias) plus tabel baru `ProviderModelKinds` (191 model media bertipe `image`/`tts`/`stt`/`embedding`/`video`/`systemone`) dan accessor `GetProviderModelKind`. Resolusi kind di `/v1/models` kini meniru upstream: `type` custom → `kind` registry → heuristik id, jadi model media tidak lagi bocor ke daftar LLM dan katalog statis ikut sinkron dengan upstream (mis. `openrouter` 10 → 18 entri, `ag` 21 model).
+- Perbaikan turunan: provider dengan 1 baris aktif + 1 baris nonaktif tidak lagi dianggap disabled total (sebelumnya `tr/*` 153 model hilang).
+- Verifikasi silang vs instance upstream yang sedang jalan (port 20128, DB yang sama): **714 model upstream vs 726 9router-go, 687 id identik**; prefix, key set entry, dan key set `capabilities` sama persis. Breakdown: `clinepass` 469/469, `tr` 154/153, `kr` 34/44, `ag` 20/20, `cbai` 15/15, `openrouter` 7/6, `nvidia` 4/4, `Id` 3/3, `gcli` 1/5, combo 7/7.
+- Sisa selisih 39 id: (a) upstream memakai **live catalog** untuk kiro/grok-cli (`kr/auto`, `kr/minimax-m2.1`, `gcli/grok-4.7`) sedangkan 9router-go memakai katalog statis — itu PR berikutnya; (b) `openrouter/free` ada di upstream saja; (c) quirk upstream: id berawalan vendor (`nvidia/parakeet-ctc-1.1b-asr`) kehilangan kualifiernya sebelum lookup kind, jadi lolos di kedua sisi.
+- Tests: `TestIsLLMModelID` (9 kasus), `TestGetProviderModelKind` (11 kasus), `TestHandleModels_MediaKindModelsExcluded`, `TestHandleModels_EnabledModelsOverrideCatalog`, `TestHandleModels_AliasTargetMergedIntoProvider`, `TestHandleModels_ComboOwnedByCombo`, plus test filtering dari commit sebelumnya; test legacy `TestHandleModelLookup_ProviderModel` / `TestHandleModels_IncludesTokenLimits` di-seed ulang sesuai semantik upstream (alias butuh provider terhubung, dan batas token dicek di `context_length`/`max_completion_tokens`/`capabilities.contextWindow`). Suite penuh: 1433 pass.
+
+### 🐛 Log fallback tidak menyebut akun/project yang gagal (Antigravity 403 `VALIDATION_REQUIRED`)
+
+- Gejala: `WRN [fallback] upstream failed provider=antigravity ... status=403 error=... "Verify your account to continue."` hanya menampilkan `conn=<uuid>`, sehingga tidak jelas project ID / email mana yang harus diverifikasi di `accounts.google.com`.
+- `internal/handlers/chat/conn_identity.go` (baru): `connIdentityKV` (name, email, projectId dari `data.projectId` atau `data.providerSpecificData.projectId`, field kosong dilewati) + `connIdentityKVByID` (lookup via `Repo.GetProviderConnectionByID`, hanya di jalur failure).
+- `internal/handlers/chat/fallback.go`: log `upstream failed` dan `connection locked` kini menambah `connName=`, `email=`, `projectId=`. Contoh: `... status=403 cooldown_s=120 connName=AG Verify email=luqmangeminipro@gmail.com projectId=mega-rainfall-szp2g`.
+- Tests: `TestConnIdentityKV` (6 kasus: kedua bentuk projectId, field kosong, JSON rusak, nil conn) + `TestConnIdentityKVByID_MissingConnection` (handler tanpa Repo tidak panic). Smoke: upstream mock 403 `VALIDATION_REQUIRED` → kedua baris log membawa email + projectId.
+
+### 🗄️ Fresh `.9router` self-bootstraps — no upstream install needed
+
+- `internal/db/schema.go` (`EnsureCoreSchema`, wired in `ProvideDatabase`): startup creates the 11 upstream core tables/indexes when absent (verbatim `schema.js` `TABLES`), backfills missing columns on legacy databases (same strip-`PRIMARY KEY`/`UNIQUE` guard as upstream `syncSchemaFromTables`), backfills Go-only `providerConnections.lastUsedAt`/`consecutiveUseCount`, and seeds `_meta.schemaVersion='1'` + empty settings row — all idempotent, existing data untouched.
+- Fresh-`DATA_DIR` live smoke: login (`123456`) → `GET /api/settings` → `PUT /api/settings` → connections `[]` → API key created; all previously `no such table`, now working.
+- Tests: `TestEnsureCoreSchema` (tables+indexes, seeds, fresh-install flow, idempotency, legacy backfill). Docs: `DATABASE.md`, `ARCHITECTURE.md`, `README.md` updated; `ROADMAP.md` §1 criterion 1 done; `TECHNICAL_DEBT.md` DB-01/DB-04 resolved.
+
+### 📦 One-line installer (macOS/Linux/Windows) + simpler README
+
+- `install.sh` (new): detects OS/arch, downloads the latest release binary from GitHub, installs to `/usr/local/bin` (sudo/`~/.local/bin` fallback). Usage: `curl -fsSL https://raw.githubusercontent.com/luqman-v1/9router-go/main/install.sh | bash`, then just `9router-go` (defaults: port `20130`, data `~/.9router` — no flags needed).
+- `install.ps1` (new): Windows PowerShell equivalent — installs `9router-go.exe` to `%LOCALAPPDATA%\9router-go` without admin, adds it to the user PATH, refuses on non-AMD64 or while the binary is running (Windows file lock). Usage: `irm https://raw.githubusercontent.com/luqman-v1/9router-go/main/install.ps1 | iex`.
+- README rewritten in upstream style (Why → How It Works → 3-step Quick Start); technical details (env table, API surface, auth, database) folded into an "Advanced" `<details>` block. Release table now has direct per-binary download links plus a "which file do I pick?" guide; Docker section split into ready-made image (`docker run luqmenul/9router-go:latest`, incl. mounting an existing `~/.9router`) vs compose-from-source.
+- Non-breaking: installer/docs only, no runtime behavior change; `VERSION`/`version.json` untouched at `1.9.2`, no tag moved.
+
 ### 🐛 `POST /api/models/test` 401 meski sudah login
 
 - Route dipindah dari grup `RequireApiKey` (hanya menerima Bearer/`X-API-Key`) ke `RequireDashboardAuth` — parity upstream `dashboardGuard` (`src/app/api/models/test/route.js`). Sebelumnya dashboard yang login via cookie session mendapat `401 invalid_api_key`; kini cookie session, CLI token, dan API key valid sama-sama diterima, sama seperti `/api/models/custom|disabled|alias`.
 - Regression test: `TestSetupServerRouter_ModelTestDashboardSession` (anonim → 401, session valid → lolos).
 
-### 🛠️ Frontend Dev Workflow — HMR tanpa rebuild binary
+### 🐛 Kiro `400 Improperly formed request` — request OpenAI diteruskan mentah ke gateway
+
+- Akar: tidak ada translator OpenAI→Kiro di Go. `ForwardKiro` meneruskan body OpenAI apa adanya; gateway kiro.dev hanya menerima envelope `conversationState` dan menjawab `400 {"message":"Improperly formed request."}`. Upstream punya `openai-to-kiro.js`/`claude-to-kiro.js` yang belum di-port.
+- `internal/translator/kiro.go` (baru): port `openaiToKiroRequest` — bangun `conversationState` (chatTriggerType/conversationId/currentMessage/history), system+time-context disisipkan ke content user turn (gateway menolak `systemPrompt` top-level), tool_use/tool_result, image base64 → blok Kiro, `profileArn` dari `providerSpecificData`, `inferenceConfig`, history backfill `modelId`, merge user-turn berurutan. Session replay/thinking budget upstream belum diport.
+- `ForwardKiro` memakai translator untuk body OpenAI, pass-through untuk body yang sudah `conversationState` (MITM); strip prefix `kr/` dan suffix `-thinking`/`-agentic` sebelum `modelId`.
+- Tests: `TestOpenAIToKiro_*` (7) + `TestKiroUpstreamBody_*` mock-upstream (3).
+
+### 🐛 Modal Connect Kiro tidak terbuka + tombol OAuth/API Key tertimpa
+
+- Akar 1: `devicePollTimer` tidak pernah dideklarasikan → `stopDevicePoll()` melempar `ReferenceError` di dalam `openKiroOAuth()`, sehingga `showOAuthModal = true` tidak pernah tereksekusi (tanpa error di console karena async).
+- Akar 2: `isNoAuth` disimpulkan dari `category === 'free'`; kiro/gemini-cli punya `noAuth: false` tetapi tetap diperlakukan no-auth sehingga kartu Connections (tombolnya) tersembunyi. Parity upstream: hanya flag `noAuth` eksplisit. Diperbaiki juga di `combos/pickerData.ts`.
+- Akar 3: cabang `{:else if providerId === 'kiro'}` di baris tombol bawah menelan isi `{:else if hasDualAuthModes}` (tombol OAuth/API Key). Banner "Waiting…" + blok "MANUAL TOKEN IMPORT" disembunyikan saat daftar metode kiro tampil.
+- Tests: verifikasi browser (klik → 7 metode tampil, tanpa sisa markup generik).
+
 
 - `web/vite.config.ts` — dev proxy kini mencakup `/admin`; sebelumnya `resetHealth()` (`/admin/health/reset`) jatuh ke SPA fallback di mode dev karena tidak di-proxy ke Go.
 - `Makefile` — target baru `web-dev` (Vite dev server :5173 + HMR). Workflow dua terminal: `make dev` (Go :20130) + `make web-dev` → perubahan FE hot-reload tanpa rebuild/restart binary.

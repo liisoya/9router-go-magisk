@@ -697,8 +697,32 @@ func writeSSEFinish(w http.ResponseWriter, flusher http.Flusher, req *Request, s
 
 // ---- Kiro EventStream → OpenAI SSE ----
 
+// kiroToolCall accumulates one toolUseEvent. Kiro streams the arguments as
+// several frames — each carrying a slice of the JSON text under `input` — and
+// closes the tool with a `stop: true` frame, so arguments are only complete at
+// the end of the stream.
+type kiroToolCall struct {
+	id      string
+	name    string
+	inputs  strings.Builder
+	emitted bool
+}
+
 type kiroStreamState struct {
 	toolCallIndex int
+	tools         []*kiroToolCall
+}
+
+// tool returns the buffer for id, creating it on first sight.
+func (s *kiroStreamState) tool(id, name string) *kiroToolCall {
+	for _, existing := range s.tools {
+		if existing.id == id {
+			return existing
+		}
+	}
+	call := &kiroToolCall{id: id, name: name}
+	s.tools = append(s.tools, call)
+	return call
 }
 
 func writeSSE(w io.Writer, data any) error {
@@ -797,43 +821,80 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 			}
 
 		case "toolUseEvent":
-			var payload struct {
-				ToolUseID string `json:"toolUseId"`
-				Content   string `json:"content"`
-				Name      string `json:"name"`
-			}
-			if err := json.Unmarshal(frame.Payload, &payload); err != nil {
+			// Kiro fragments one tool call across frames: the first carries only
+			// name+toolUseId, the middle frames carry slices of the JSON
+			// arguments under `input`, and a final `stop: true` frame closes it.
+			// Emitting per frame is what produced `arguments: "{}"`.
+			var raw any
+			if err := json.Unmarshal(frame.Payload, &raw); err != nil {
 				continue
 			}
-
-			if payload.Content != "" {
-				chunk := map[string]any{
-					"id":      responseID,
-					"object":  "chat.completion.chunk",
-					"created": created,
-					"choices": []map[string]any{{
-						"index": 0,
-						"delta": map[string]any{
-							"tool_calls": []map[string]any{{
-								"index": state.toolCallIndex,
-								"id":    payload.ToolUseID,
-								"type":  "function",
-								"function": map[string]any{
-									"name":      payload.Name,
-									"arguments": payload.Content,
-								},
-							}},
-						},
-					}},
+			values := []any{raw}
+			if list, ok := raw.([]any); ok {
+				values = list
+			}
+			for _, item := range values {
+				value, ok := item.(map[string]any)
+				if !ok {
+					continue
 				}
-				state.toolCallIndex++
-				if err := writeSSE(w, chunk); err != nil {
-					return err
+				name, _ := value["name"].(string)
+				name = strings.TrimSpace(name)
+				if name == "" {
+					continue
 				}
-				if flusher != nil {
-					flusher.Flush()
+				toolUseID, _ := value["toolUseId"].(string)
+				if strings.TrimSpace(toolUseID) == "" {
+					toolUseID = fmt.Sprintf("call_%d_%d", created, len(state.tools)+1)
+				}
+				call := state.tool(toolUseID, name)
+				switch input := value["input"].(type) {
+				case string:
+					call.inputs.WriteString(input)
+				case map[string]any:
+					if encoded, err := json.Marshal(input); err == nil {
+						call.inputs.Write(encoded)
+					}
 				}
 			}
+		}
+	}
+	// Tool calls are only complete once the stream ends, so emit them here with
+	// the fully reassembled arguments.
+	for _, call := range state.tools {
+		if call.emitted {
+			continue
+		}
+		arguments := strings.TrimSpace(call.inputs.String())
+		if arguments == "" {
+			arguments = "{}"
+		}
+		chunk := map[string]any{
+			"id":      responseID,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"choices": []map[string]any{{
+				"index": 0,
+				"delta": map[string]any{
+					"tool_calls": []map[string]any{{
+						"index": state.toolCallIndex,
+						"id":    call.id,
+						"type":  "function",
+						"function": map[string]any{
+							"name":      call.name,
+							"arguments": arguments,
+						},
+					}},
+				},
+			}},
+		}
+		call.emitted = true
+		state.toolCallIndex++
+		if err := writeSSE(w, chunk); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
 		}
 	}
 

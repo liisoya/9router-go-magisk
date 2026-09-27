@@ -91,24 +91,127 @@ func ForwardKimchi(ctx context.Context, client *http.Client, cfg *providers.Prov
 
 // ForwardKiro forwards to kiro with AWS EventStream headers.
 // The caller must handle the EventStream binary response.
-func ForwardKiro(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool) (*http.Response, error) {
-	invocationID := fmt.Sprintf("%d-%d", time.Now().UnixMilli(), time.Now().UnixNano())
-	headers := map[string]string{
-		"X-Amz-Target":                     "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-		"Amz-Sdk-Request":                  "attempt=1; max=3",
-		"Amz-Sdk-Invocation-Id":            invocationID,
-		"Accept":                           "application/vnd.amazon.eventstream",
-		"User-Agent":                       "AWS-SDK-JS/3.0.0 kiro-ide/1.0.0",
-		"X-Amz-User-Agent":                 "aws-sdk-js/3.0.0 kiro-ide/1.0.0",
-		"x-amzn-kiro-agent-mode":           "spec",
-		"x-amzn-codewhisperer-machine-id": "kiro-desktop",
-	}
-	if apiKey != "" {
-		headers["x-amz-sso-bearer"] = apiKey
-	}
-	setAuth(headers, cfg, apiKey)
+//
+// Ported from open-sse/executors/kiro.js: the Amazon surfaces (q.*, then
+// codewhisperer.*) are tried before the Kiro IDE gateway, regionalized from the
+// profile, and a 401/403/404 moves on to the next surface — one dead gateway
+// must not look like a dead account. authMethod decides the TokenType header
+// and the profile ARN travels in `x-amzn-codewhisperer-profile-arn`.
+func ForwardKiro(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool, psd map[string]any) (*http.Response, error) {
 	clean := cleanKiroBody(body)
-	return DoRequest(ctx, client, "POST", cfg.BaseURL, headers, clean)
+	endpoints := kiroEndpoints(cfg, psd)
+
+	var lastErr error
+	for idx, endpoint := range endpoints {
+		last := idx == len(endpoints)-1
+		invocationID := fmt.Sprintf("%d-%d", time.Now().UnixMilli(), time.Now().UnixNano())
+		headers := map[string]string{
+			"X-Amz-Target":                    "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+			"Amz-Sdk-Request":                 "attempt=1; max=3",
+			"Amz-Sdk-Invocation-Id":           invocationID,
+			"Accept":                          "application/vnd.amazon.eventstream",
+			"User-Agent":                      "AWS-SDK-JS/3.0.0 kiro-ide/1.0.0",
+			"X-Amz-User-Agent":                "aws-sdk-js/3.0.0 kiro-ide/1.0.0",
+			"x-amzn-kiro-agent-mode":          "spec",
+			"x-amzn-codewhisperer-machine-id": "kiro-desktop",
+		}
+		if apiKey != "" {
+			headers["x-amz-sso-bearer"] = apiKey
+		}
+		if profileArn, ok := psd["profileArn"].(string); ok && profileArn != "" {
+			headers["x-amzn-codewhisperer-profile-arn"] = profileArn
+		}
+		if tokenType := kiroTokenType(psd); tokenType != "" {
+			headers["TokenType"] = tokenType
+		}
+		setAuth(headers, cfg, apiKey)
+
+		resp, err := DoRequest(ctx, client, "POST", endpoint, headers, clean)
+		if err != nil {
+			lastErr = err
+			if last {
+				return nil, err
+			}
+			continue
+		}
+		if last || !kiroEndpointFallbackStatus(resp.StatusCode) {
+			return resp, nil
+		}
+		// Surface rejected the credential or retired the path: drain and try the
+		// next gateway rather than reporting a dead account.
+		resp.Body.Close()
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("kiro: no endpoint available")
+	}
+	return nil, lastErr
+}
+
+// kiroTokenType mirrors upstream buildHeaders: API-key connections announce
+// TokenType=API_KEY, enterprise IdP tokens EXTERNAL_IDP, everything else sends
+// no TokenType at all.
+func kiroTokenType(psd map[string]any) string {
+	switch authMethod, _ := psd["authMethod"].(string); authMethod {
+	case "api_key":
+		return "API_KEY"
+	case "external_idp":
+		return "EXTERNAL_IDP"
+	default:
+		return ""
+	}
+}
+
+// kiroEndpointFallbackStatus is upstream KIRO_ENDPOINT_FALLBACK_STATUSES: an
+// expired token, a foreign token or a retired path is a surface problem, not a
+// payload problem, so the next gateway gets a turn. 400 stays terminal.
+func kiroEndpointFallbackStatus(status int) bool {
+	return status == http.StatusUnauthorized ||
+		status == http.StatusForbidden ||
+		status == http.StatusNotFound
+}
+
+// kiroEndpoints returns the ordered gateway list: Amazon surfaces first (q.*
+// before the legacy codewhisperer host), then the Kiro IDE gateway, with the
+// AWS hosts regionalized to the account's own region.
+func kiroEndpoints(cfg *providers.ProviderConfig, psd map[string]any) []string {
+	region, _ := psd["region"].(string)
+	region = strings.TrimSpace(region)
+	if region == "" {
+		region = "us-east-1"
+	}
+	regionalize := func(endpoint string) string {
+		if region == "us-east-1" || !strings.Contains(endpoint, "amazonaws.com") {
+			return endpoint
+		}
+		parts := strings.SplitN(endpoint, "://", 2)
+		if len(parts) != 2 {
+			return endpoint
+		}
+		host := strings.SplitN(parts[1], "/", 2)
+		service := strings.SplitN(host[0], ".", 2)
+		if len(service) != 2 {
+			return endpoint
+		}
+		localized := service[0] + "." + region + ".amazonaws.com"
+		if len(host) == 2 {
+			return parts[0] + "://" + localized + "/" + host[1]
+		}
+		return parts[0] + "://" + localized
+	}
+
+	q := "https://q." + region + ".amazonaws.com/generateAssistantResponse"
+	codewhisperer := regionalize("https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse")
+	kiroGateway := "https://runtime.us-east-1.kiro.dev/generateAssistantResponse"
+
+	ordered := []string{q, codewhisperer}
+	if override := strings.TrimSpace(cfg.BaseURL); override != "" && !strings.Contains(override, "amazonaws.com") {
+		// A configured non-Amazon base URL (self-hosted mirror) is the only one.
+		return []string{override}
+	}
+	if override := strings.TrimSpace(cfg.BaseURL); override != "" {
+		ordered = []string{regionalize(override), codewhisperer}
+	}
+	return append(ordered, kiroGateway)
 }
 
 const (
@@ -186,11 +289,11 @@ func ForwardAzure(ctx context.Context, client *http.Client, cfg *providers.Provi
 // Body transformation (force stream=true) is done by the caller.
 func ForwardCommandcode(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte) (*http.Response, error) {
 	headers := map[string]string{
-		"Content-Type":          "application/json",
-		"Authorization":         "Bearer " + apiKey,
+		"Content-Type":           "application/json",
+		"Authorization":          "Bearer " + apiKey,
 		"x-command-code-version": "0.25.7",
-		"x-cli-environment":     "cli",
-		"Accept":                "text/event-stream",
+		"x-cli-environment":      "cli",
+		"Accept":                 "text/event-stream",
 	}
 	return DoRequest(ctx, client, "POST", cfg.BaseURL, headers, body)
 }

@@ -37,10 +37,39 @@ type SyncedModelLimits struct {
 }
 
 // SyncedCatalog represents the processed catalog file written to disk / kept in memory.
+// The file is shared with upstream, whose writer emits `syncedAt` as epoch
+// milliseconds and adds `v`/`etag` fields — so SyncedAt is decoded leniently.
 type SyncedCatalog struct {
-	SyncedAt  string                                  `json:"syncedAt"`
+	Version   int                                     `json:"v,omitempty"`
+	ETag      string                                  `json:"etag,omitempty"`
+	SyncedAt  string                                  `json:"-"`
 	Models    map[string]SyncedModelModalities        `json:"models"`
 	Providers map[string]map[string]SyncedModelLimits `json:"providers"`
+}
+
+// UnmarshalJSON accepts syncedAt as either an ISO string or epoch milliseconds.
+func (c *SyncedCatalog) UnmarshalJSON(data []byte) error {
+	type alias SyncedCatalog
+	aux := struct {
+		SyncedAt []byte `json:"syncedAt"`
+		*alias
+	}{alias: (*alias)(c)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(aux.SyncedAt) == 0 || string(aux.SyncedAt) == "null" {
+		c.SyncedAt = ""
+		return nil
+	}
+	if err := json.Unmarshal(aux.SyncedAt, &c.SyncedAt); err == nil {
+		return nil
+	}
+	var epochMS float64
+	if err := json.Unmarshal(aux.SyncedAt, &epochMS); err != nil {
+		return fmt.Errorf("catalog syncedAt: %w", err)
+	}
+	c.SyncedAt = time.UnixMilli(int64(epochMS)).UTC().Format(time.RFC3339)
+	return nil
 }
 
 type CatalogSyncState struct {
@@ -103,6 +132,45 @@ func GetCatalogModalities(model string) *SyncedModelModalities {
 		return &m
 	}
 	return nil
+}
+
+// GetCatalogLimits looks up the models.dev-synced token limits for a
+// provider/model pair. Provider ids are mapped through ProviderAliases first
+// (our `claude` is models.dev `anthropic`, and so on), and the bare model id is
+// accepted as a fallback key. This is the same per-provider+model source
+// upstream getCapabilitiesForModel consults, so token limits stay in sync with
+// the catalog instead of relying on substring heuristics.
+func GetCatalogLimits(provider, model string) (contextWindow, maxOutput int) {
+	if model == "" {
+		return 0, 0
+	}
+	base := strings.ToLower(model)
+	if idx := strings.Index(base, "/"); idx != -1 {
+		base = base[idx+1:]
+	}
+	if idx := strings.Index(base, ":"); idx != -1 {
+		base = base[:idx]
+	}
+
+	catalogMu.RLock()
+	defer catalogMu.RUnlock()
+	if globalCatalog == nil || globalCatalog.Providers == nil {
+		return 0, 0
+	}
+	keys := []string{strings.ToLower(provider)}
+	if mapped, ok := ProviderAliases[strings.ToLower(provider)]; ok {
+		keys = append(keys, mapped)
+	}
+	for _, key := range keys {
+		byModel, ok := globalCatalog.Providers[key]
+		if !ok {
+			continue
+		}
+		if limits, ok := byModel[base]; ok {
+			return limits.ContextWindow, limits.MaxOutput
+		}
+	}
+	return 0, 0
 }
 
 // LoadCatalogFromFile loads cached catalog from disk if it exists.

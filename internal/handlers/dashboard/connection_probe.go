@@ -827,10 +827,11 @@ func (h *DashboardHandler) refreshConnectionToken(ctx context.Context, provider 
 		client = &http.Client{Timeout: connectionProbeTimeout}
 	}
 	result, err := oauth.Refresh(ctx, &oauth.Params{
-		Client:       client,
-		Provider:     providers.ResolveAlias(provider),
-		RefreshToken: data.RefreshToken,
-		AccessToken:  data.AccessToken,
+		Client:               client,
+		Provider:             providers.ResolveAlias(provider),
+		RefreshToken:         data.RefreshToken,
+		AccessToken:          data.AccessToken,
+		ProviderSpecificData: oauth.StringMap(data.ProviderSpecificData),
 	})
 	if err != nil || result == nil || result.AccessToken == "" {
 		return nil

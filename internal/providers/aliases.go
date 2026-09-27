@@ -102,20 +102,16 @@ func ResolveAlias(alias string) string {
 	return alias
 }
 
-// ProviderToAliasMap maps canonical provider IDs to their primary short alias.
-var ProviderToAliasMap = map[string]string{}
-
-func init() {
-	for alias, provider := range ProviderAliasMap {
-		if _, exists := ProviderToAliasMap[provider]; !exists {
-			ProviderToAliasMap[provider] = alias
-		}
-	}
-}
-
-// GetProviderAlias returns the primary short alias for a canonical provider ID, or providerID itself.
+// GetProviderAlias returns the alias upstream publishes a provider under, ported
+// from the registry's uiAlias/alias. Providers without a registry alias are
+// published under their id (clinepass, nvidia, openrouter, openai) — exactly
+// like upstream getProviderAlias: AI_PROVIDERS[id]?.alias || id.
+//
+// ProviderAliasMap stays the alias -> canonical id table used when RESOLVING
+// incoming model ids (cp/* still routes to clinepass), so removing the old
+// first-wins inverse here only changes the published prefix.
 func GetProviderAlias(providerID string) string {
-	if alias, ok := ProviderToAliasMap[providerID]; ok && alias != "" {
+	if alias, ok := RegistryAliases[providerID]; ok && alias != "" {
 		return alias
 	}
 	return providerID

@@ -28,5 +28,23 @@ bug**——例如 codebuddy-cn 执行器缺少 Node 版的 agent 系统提示词
 | 2026-09-25 | `internal/proxy/executor/codebuddy.go` | 缺少 agent 系统提示词清洗 → codebuddy-cn 全部请求被腾讯 11128 拦截 | `tools/patches/codebuddy-cn-agent-prompt-sanitizer.patch` | 待提交 |
 | 2026-09-25 | `internal/handlers/dashboard/settings.go` | 内嵌 Svelte 前端以 multipart/form-data 上传备份（`file` 字段、无密码、凭 admin 会话），后端却按 Node 时代的 JSON+password 解析 → Dashboard 导入数据库必然 400 "Invalid database payload"（新设备首装导入被阻断）。修复：multipart 分支解析 `file` 字段；admin 会话/CLI token/密码三选一授权（该路径中间件本就强制 admin 会话）。Node JSON 流保持不变 | **已撤回**（Phase 20 把前端改回上游 JSON+password 形状后该分支已无调用方；Phase 23 随 marge 一并撤掉） | 无需（与上游一致） |
 | 2026-09-26 | `internal/handlers/router.go` | `/api/models/test`（仪表盘模型测试）被挂在 RequireApiKey 组内——Node 原版它是 dashboard 内部端点（admin 会话语义，`pingModelByKind`）。备份导入清空 apiKeys 表后，仪表盘所有模型测试在引擎门口 401 "Invalid API key."（请求未达上游）。修复：移入 RequireDashboardAuth 组（admin 会话 / CLI token / API key 三选一），仪表盘从此不依赖 apiKeys 表 | **已由上游吸收**（v1.9.2 `1865f78`，本地补丁已撤） | 已完成 |
-| 2026-09-26 | `internal/handlers/router.go` | `media.HandleWebFetch`（网页抓取）**已实现但从未挂载** → 内嵌 Dashboard 的媒体面板按 `/v1/web/fetch` 调用时必 404（UI 调用 parity 巡检抓到；真机 `GET /v1/web/fetch` 由 404 → 405 验证已挂载）。修复：显式双注册 `/web/fetch` + `/v1/web/fetch`（与 `/v1/models` 同形，1 行 + 1 行） | `tools/patches/media-web-fetch-route.patch` | 待提交 |
-| 2026-09-26 | `internal/handlers/chat/chat.go` | `ChatHandler.HandleHealth`（3 行健康检查）**从未被任何代码引用** —— 引擎的 `/health` 实际由 `router.go` 的内联 `healthHandler`（带 CORS 头）提供；留着会让人误以为 `/health` 由它提供。删除（DEADH 巡检抓到） | `tools/patches/remove-dead-handlehealth.patch` | 待提交 |
+| 2026-09-26 | `internal/handlers/router.go` | `media.HandleWebFetch`（网页抓取）**已实现但从未挂载** → 内嵌 Dashboard 的媒体面板按 `/v1/web/fetch` 调用时必 404（UI 调用 parity 巡检抓到；真机 `GET /v1/web/fetch` 由 404 → 405 验证已挂载）。修复：显式双注册 `/web/fetch` + `/v1/web/fetch`（与 `/v1/models` 同形，1 行 + 1 行） | `tools/patches/media-web-fetch-route.patch` | 待提交（**v1.9.3 复核：上游仍未挂载 → 保留**） |
+| 2026-09-26 | `internal/handlers/chat/chat.go` | `ChatHandler.HandleHealth`（3 行健康检查）**从未被任何代码引用** —— 引擎的 `/health` 实际由 `router.go` 的内联 `healthHandler`（带 CORS 头）提供；留着会让人误以为 `/health` 由它提供。删除（DEADH 巡检抓到） | **已撤（2026-09-27）**：上游 v1.9.3 自己删掉了该函数（`chat.go` 搬 models 目录时一并消失）→ 已吸收，补丁存档删除 | 已完成 |
+| 2026-09-26 | `internal/handlers/router.go` + `internal/handlers/sso/sso.go` | ① 内嵌 Dashboard 的浏览器侧可达性探测 `GET /api/health`：上游 Node 版公开且带 `Access-Control-Allow-Origin: *`，Go 版只有**没有 CORS 头**的 `/health` → 跨域探测永远失败；② SSO 登录回调 `/api/auth/oidc/callback`、`/api/auth/saml/acs` **从未注册** → IdP 跳回打到 404，被误判成"配置写错了"。修复：抽出 `healthHandler` 双注册 + 两个回调端点诚实返回 501 | 无独立补丁存档（改动落在 `router.go` 公开路由区与 `sso.go`，见 `AGENT-CONVENTIONS §10.2`） | 待提交（v1.9.3 复核：上游仍无 `/api/health` 注册 → 保留） |
+
+## 同步裁决记录
+
+**2026-09-27 · v1.9.2 → v1.9.3**
+
+- 上游本版规模：67 文件 / +8278 −809；我们改过的文件里**只有 4 个双方都动过**
+  （`chat.go`、`router.go`、`codebuddy.go`、`web/src/api/client.ts`），合并**零文本冲突**。
+- **撤**：`codebuddy-cn-agent-prompt-sanitizer`（上游 shaping 丢弃全部 `system`/`developer` 并前置固定
+  prompt，且插在清洗**之后**执行 → 清洗恒为 no-op；留着是死代码）；`remove-dead-handlehealth`
+  （上游已删该函数）。
+- **留**：`media-web-fetch-route`（上游仍未挂载 `HandleWebFetch`）、`/api/health` + SSO 501。
+- **上游本版行为变化（非我们的补丁，但影响模块假设）**：Go 侧新增 `db.EnsureCoreSchema`
+  （`internal/db/schema.go`，由 `internal/app/database.go` 接线）**在启动时幂等补齐 11 张核心表与缺列、并
+  seed `_meta`/`settings`** —— 空白 `DATA_DIR` 从此是受支持的启动路径。模块的
+  `module/etc/schema.sql` 仍是安装期的建库来源，两者不冲突（SCHEMA 门禁继续绿）。
+- 端点 parity 棘轮随本版**收紧 135 → 131**（上游补上的 4 条 Kiro 路由缺口消失）。
+

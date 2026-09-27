@@ -531,8 +531,33 @@
 - [x] **27.7 真机 T13（只读链路门禁，新增）**：在设备上用**设备自己选中的加速节点**走一遍
   「版本清单 → `SHA256SUMS.txt` → arm64 资产 → 比对 sha256 与体积/ELF」；**不执行 install-engine、
   不改引擎版本**（所以"引擎已是最新"时同样能跑）；前置不可达即如实 SKIP，绝不假绿；§4 登记外网依赖。
-- [ ] **待用户验收（下一个上游版本）**：1.9.4 发布后点一次「下载并更新引擎」做端到端确认。
-  本次按用户决定**不做直推 webroot 的临时验证**，按正式包发布（见下「Grilling 决策」）。
+- [x] **27.8 上游同步 v1.9.2 → v1.9.3（本 Phase 的第二个提交）**
+  - 规模：67 文件 / +8278 −809；我们改过的文件里**只有 4 个双方都动过**（`chat.go`、`router.go`、
+    `codebuddy.go`、`web/src/api/client.ts`），`git merge` **零文本冲突**。
+  - 裁决（详见 `docs/adr/0003` 的「同步裁决记录」）：**撤** codebuddy 提示词清洗（上游 shaping 在清洗
+    **之后**执行 → 恒为 no-op）与 `HandleHealth`（上游已自己删掉）；**留** `/web/fetch` 双注册、
+    `/api/health`(带 CORS)、SSO 回调 501。
+  - 上游本版**行为变化**（不是我们的补丁）：Go 侧新增 `db.EnsureCoreSchema`，启动时幂等补齐 11 张核心表
+    与缺列并 seed `_meta`/`settings` → 空白 `DATA_DIR` 从"不受支持"变成"受支持的启动路径"；模块
+    `etc/schema.sql` 仍是安装期建库来源（SCHEMA 门禁继续绿，**无需重生成**）。
+  - 端点 parity 棘轮随本版**收紧 135 → 131**（上游补上的 4 条 Kiro 路由缺口消失，按棘轮语义收紧；
+    基线文件同时被当前生成器去掉了方法名对齐空格，属格式归一）。
+  - 上游带来的新依赖 `golang.org/x/sync` 在本机拉不动（`proxy.golang.org` 直连超时）→ 用
+    `GOPROXY=https://goproxy.cn,direct`；已登记进 `docs/TESTING.md §4`（环境性，不是回归）。
+- [x] **27.9 产物与验证**
+  - `FORCE=1 bash build.sh`（必须先重建前端：上游改了 4 个 `web/src/**` 文件）→ 七步绿 →
+    `dist/9router-go-1.9.3-r1-magisk.zip`（15MB，`verify_zip` 通过，包内含 `webroot/upstream.js`、
+    `etc/engine-version=1.9.3`、引擎 25,755,808B）。
+  - 真机（MI 6X / 192.168.10.7，用**模块自己的入口** `ops.sh install-module` 装上）：
+    `tools/check.sh --all` = 离线 **11/11**、真机 **T\* 30/30**、**A\* 7/7**、PARITY/UIPARITY 无新增缺口，
+    汇总 **15 通过 / 0 失败 / 0 跳过**。
+  - **T13 在真机上真的走通了修好的链路**：用设备自己选中的加速节点取 `v1.9.3/SHA256SUMS.txt` 与 arm64
+    资产 → 摘要一致（25,821,344B）、ELF 魔数正确（**不安装、不改版本**）。这是本次修复最硬的证据。
+  - 设备终态：`module=v1.9.3-r1 / 109030`、`engine_version=1.9.3`（`src=runtime`）、
+    engine / dns / watchdog 全 up、apiKeys 数据未动。
+- [ ] **待用户验收（下一个上游版本）**：1.9.4 发布后点一次「下载并更新引擎」做端到端按钮确认。
+  本次按用户决定**不做直推 webroot 的临时验证**（见下「Grilling 决策」）；链路本身已由 T13 在真机上验过，
+  唯一没被覆盖的是"app.js 是否真的调用了正确的构造函数"——那一条由离线回潮扫描兜住。
 
 ### Grilling 决策（2026-09-27 · 三轮）
 - 「这是不是又一桩 404 正文事故」→ 是同一个 9 字节正文，只是这次 `curl` 有 `-f` 才显式失败

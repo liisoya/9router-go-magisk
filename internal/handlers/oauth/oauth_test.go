@@ -138,6 +138,86 @@ func TestHandleOAuthKiroSocialExchange_missingCode(t *testing.T) {
 	}
 }
 
+func TestHandleKiroAutoImport_MissingCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	handler := NewOAuthHandler(nil)
+	req := httptest.NewRequest("GET", "/api/oauth/kiro/auto-import", nil)
+	rec := httptest.NewRecorder()
+	handler.HandleKiroAutoImport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["found"] != false {
+		t.Errorf("expected found=false with empty HOME cache, got %v", resp)
+	}
+}
+
+func TestHandleKiroAPIKey_MissingKey(t *testing.T) {
+	handler := NewOAuthHandler(nil)
+	req := httptest.NewRequest("POST", "/api/oauth/kiro/api-key", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.HandleKiroAPIKey(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleKiroImport_MissingToken(t *testing.T) {
+	handler := NewOAuthHandler(nil)
+	req := httptest.NewRequest("POST", "/api/oauth/kiro/import", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.HandleKiroImport(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleKiroImportCliProxy_InvalidJSON(t *testing.T) {
+	handler := NewOAuthHandler(nil)
+	req := httptest.NewRequest("POST", "/api/oauth/kiro/import-cli-proxy", strings.NewReader(`{"json":"not-json"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.HandleKiroImportCliProxy(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNormalizeKiroExternalIDPAuth_Valid(t *testing.T) {
+	got, err := normalizeKiroExternalIDPAuth(map[string]any{
+		"access_token":   "at",
+		"refresh_token":  "rt",
+		"client_id":      "cid",
+		"token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+		"profile_arn":    "arn:aws:codewhisperer:eu-west-1:123:profile/p",
+		"scope":          "openid profile",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ProviderSpecificData["authMethod"] != "external_idp" {
+		t.Errorf("expected external_idp authMethod, got %v", got.ProviderSpecificData)
+	}
+}
+
+func TestNormalizeKiroExternalIDPAuth_RejectsNonHTTPS(t *testing.T) {
+	_, err := normalizeKiroExternalIDPAuth(map[string]any{
+		"access_token":   "at",
+		"refresh_token":  "rt",
+		"client_id":      "cid",
+		"token_endpoint": "http://evil.example.com/token",
+		"profile_arn":    "arn",
+		"scope":          "openid",
+	})
+	if err == nil {
+		t.Error("expected endpoint validation error")
+	}
+}
+
 func TestHandleOAuthCodexBulkImport(t *testing.T) {
 	database, cleanup := setupOAuthTestDB(t)
 	defer cleanup()

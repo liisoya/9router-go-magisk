@@ -193,11 +193,16 @@ func (h *ChatHandler) refreshOAuthTokenIfExpired(connectionID, currentToken stri
 	// Try per-provider OAuth refresher first
 	if refresher := oauth.Get(provider); refresher != nil {
 		log.Info("oauth", "token expired, custom refresh", "provider", provider, "project", projectID)
+		var connPSD map[string]any
+		if raw, ok := connMap["providerSpecificData"].(map[string]any); ok {
+			connPSD = raw
+		}
 		result, err := refresher(context.Background(), &oauth.Params{
-			Client:       h.Client,
-			Provider:     provider,
-			RefreshToken: oauthData.RefreshToken,
-			AccessToken:  currentToken,
+			Client:               h.Client,
+			Provider:             provider,
+			RefreshToken:         oauthData.RefreshToken,
+			AccessToken:          currentToken,
+			ProviderSpecificData: oauth.StringMap(connPSD),
 		})
 		if err != nil {
 			return currentToken, projectID, fmt.Errorf("OAuth refresh for %s: %w", provider, err)
@@ -289,10 +294,15 @@ func (h *ChatHandler) forceRefreshOAuthToken(connectionID string) (string, strin
 	// Try per-provider OAuth refresher first
 	if refresher := oauth.Get(provider); refresher != nil {
 		log.Info("oauth", "force refresh", "provider", provider)
+		var forcePSD map[string]any
+		if raw, ok := connMap["providerSpecificData"].(map[string]any); ok {
+			forcePSD = raw
+		}
 		result, err := refresher(context.Background(), &oauth.Params{
-			Client:       h.Client,
-			Provider:     provider,
-			RefreshToken: oauthData.RefreshToken,
+			Client:               h.Client,
+			Provider:             provider,
+			RefreshToken:         oauthData.RefreshToken,
+			ProviderSpecificData: oauth.StringMap(forcePSD),
 		})
 		if err == nil && result != nil {
 			var existing map[string]any

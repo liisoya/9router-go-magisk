@@ -214,14 +214,13 @@ Retryable upstream errors are classified from status and text. Capacity/rate-lim
 - chmods the directory and database to user-only permissions where supported; and
 - shares compatible rows/JSON payloads with upstream 9router.
 
-`ProvideDatabase` creates only the Go-specific `upstream_leases` table with `CREATE TABLE IF NOT EXISTS`. Go does **not** create the full upstream schema, seed API keys/settings, import legacy JSON, or execute `_meta`-driven migrations. It is not safe to interpret an automatically created empty SQLite file as an initialized dashboard database.
+`ProvideDatabase` bootstraps the upstream core schema additively via `db.EnsureCoreSchema` (`internal/db/schema.go`): creates the 11 upstream tables/indexes when absent, backfills missing columns, seeds `_meta.schemaVersion='1'` and an empty settings row, then creates the Go-only `upstream_leases` table. All statements are idempotent — a fresh `DATA_DIR` boots into a working installation. Go does **not** import legacy JSON files, run destructive migrations, or take pre-migration backups.
 
 Consequences:
 
-- An existing upstream-compatible database is the supported starting point.
-- A fresh Go volume or empty file is not a complete bootstrap path and can yield SQL errors on the first protected request.
+- A fresh empty file is now a supported bootstrap path; existing databases are untouched (columns backfilled, rows preserved).
 - `DB_PATH` may point to a file. If it points to a directory, resolution recognizes `db/data.sqlite`, `data.sqlite`, or `9router.db` when present, otherwise it selects `db/data.sqlite`.
-- There is no Go-side migration/backup transaction equivalent to upstream's schema migrator.
+- There is no Go-side legacy-JSON import or backup transaction equivalent to upstream's schema migrator.
 - Provider credentials are stored in the database; protect the file and volume as secrets.
 
 `DATABASE.md` contains the schema inventory and known drift. Its Next.js labels are compatibility history, not a statement that Next.js is deployed with this binary.
@@ -263,7 +262,7 @@ The web package has no frontend unit/component test script. Dashboard verificati
 
 ## Current operational caveats
 
-- **Fresh database:** Go does not bootstrap or migrate the full schema; initialize with a compatible database first.
+- **Fresh database:** Go bootstraps the upstream core schema additively on startup (no legacy-JSON import or pre-migration backups — those still need upstream once).
 - **Compatibility:** selected upstream contracts are ported, but v0.5.86 items in the changelog are partial and the declared baseline remains v0.5.85.
 - **Network exposure:** the default listener is all interfaces. Set `HOST=127.0.0.1` behind a trusted reverse proxy or otherwise protect the port.
 - **Dashboard security:** login is required by default when settings are missing/unreadable, but compatibility still accepts the well-known password locally until rotated. Set `INITIAL_PASSWORD` explicitly.

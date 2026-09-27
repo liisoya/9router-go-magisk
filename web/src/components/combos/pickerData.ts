@@ -65,7 +65,9 @@ export function resolveModelPickerGroups(
     }
     const isConnected =
       connectedProviderIds.has(catItem.id) || (catItem.alias && connectedProviderIds.has(catItem.alias))
-    const isNoAuth = catItem.noAuth === true || catItem.category === 'free'
+    // Only the explicit noAuth flag (upstream registry semantics): category
+    // "free" providers like kiro/gemini-cli still require a connection.
+    const isNoAuth = catItem.noAuth === true
     if (!isConnected && !isNoAuth) {
       continue
     }

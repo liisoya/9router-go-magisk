@@ -1,6 +1,11 @@
 package chat
 
 import (
+	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/log"
+	"9router/proxy/internal/providers"
+	"9router/proxy/internal/translator"
+	"9router/proxy/internal/updater"
 	"bytes"
 	"context"
 	json "encoding/json/v2"
@@ -11,15 +16,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
-
-	"9router/proxy/internal/handlerutil"
-	"9router/proxy/internal/log"
-	"9router/proxy/internal/models"
-	"9router/proxy/internal/providers"
-	"9router/proxy/internal/translator"
-	"9router/proxy/internal/updater"
 )
 
 // HandleChatCompletions handles POST /v1/chat/completions (OpenAI format requests).
@@ -83,6 +82,7 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	h.handleSingleModel(ctx, w, body, modelInfo, reqBody.Stream, false)
 }
+
 // handleSingleModel resolves a single ModelInfo and forwards the request upstream.
 func (h *ChatHandler) handleSingleModel(ctx context.Context, w http.ResponseWriter, body []byte, modelInfo *ModelInfo, isStream bool, translateResponse bool) {
 	cw := newCommittedResponseWriter(w)
@@ -210,6 +210,7 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 	h.handleMessagesSingleModel(ctx, w, workingBody, modelInfo, reqBody.Stream, translateResponse)
 }
+
 // handleMessagesSingleModel forwards a translated Claude request for a single model.
 func (h *ChatHandler) handleMessagesSingleModel(ctx context.Context, w http.ResponseWriter, translatedReq map[string]any, modelInfo *ModelInfo, isStream bool, translateResponse bool) {
 	cw := newCommittedResponseWriter(w)
@@ -359,277 +360,9 @@ func (h *ChatHandler) HandleTriggerUpdate(w http.ResponseWriter, r *http.Request
 	}()
 }
 
-// ModelInfoObject represents a model entry in the /v1/models response.
-type ModelInfoObject struct {
-	ID                  string                        `json:"id"`
-	Object              string                        `json:"object"`
-	Created             int64                         `json:"created"`
-	OwnedBy             string                        `json:"owned_by"`
-	Capabilities        *providers.CapabilitiesDetail `json:"capabilities,omitempty"`
-	ContextLength       int                           `json:"context_length,omitempty"`
-	ContextWindow       int                           `json:"context_window,omitempty"`
-	MaxCompletionTokens int                           `json:"max_completion_tokens,omitempty"`
-}
-
-func (h *ChatHandler) buildModelsList() []ModelInfoObject {
-	var data []ModelInfoObject
-	seen := make(map[string]bool)
-	now := time.Now().Unix()
-
-	// 1. Active provider connections (or static registry if no connections)
-	var activeConnections []*models.ProviderConnection
-	if h.Repo != nil {
-		activeConnections, _ = h.Repo.GetProviderConnections("", true)
-	}
-
-	activeAliases := make(map[string]bool)
-	disabledProviders := make(map[string]bool)
-	if h.Repo != nil {
-		if allConns, err := h.Repo.GetProviderConnections("", false); err == nil {
-			for _, c := range allConns {
-				if c.Provider != "" && c.IsActive == 0 {
-					disabledProviders[c.Provider] = true
-					if alias := providers.GetProviderAlias(c.Provider); alias != "" {
-						disabledProviders[alias] = true
-					}
-				}
-			}
-		}
-	}
-
-	if len(activeConnections) > 0 {
-		activeProviders := make(map[string]*models.ProviderConnection)
-		for _, conn := range activeConnections {
-			if conn.Provider != "" && activeProviders[conn.Provider] == nil {
-				activeProviders[conn.Provider] = conn
-			}
-		}
-		for provID, conn := range activeProviders {
-			outputAlias := provID
-			var connData struct {
-				Prefix               string   `json:"prefix"`
-				EnabledModels        []string `json:"enabledModels"`
-				ProviderSpecificData struct {
-					Prefix        string   `json:"prefix"`
-					EnabledModels []string `json:"enabledModels"`
-				} `json:"providerSpecificData"`
-			}
-			if conn.Data != "" {
-				_ = json.Unmarshal([]byte(conn.Data), &connData)
-			}
-			if connData.ProviderSpecificData.Prefix != "" {
-				outputAlias = connData.ProviderSpecificData.Prefix
-			} else if connData.Prefix != "" {
-				outputAlias = connData.Prefix
-			} else if alias := providers.GetProviderAlias(provID); alias != "" {
-				outputAlias = alias
-			}
-
-			activeAliases[provID] = true
-			activeAliases[outputAlias] = true
-			if canon := providers.ResolveAlias(outputAlias); canon != "" {
-				activeAliases[canon] = true
-			}
-
-			modelList := connData.ProviderSpecificData.EnabledModels
-			if len(modelList) == 0 {
-				modelList = connData.EnabledModels
-			}
-			if len(modelList) == 0 && !strings.HasPrefix(provID, "openai-compatible-") && !strings.HasPrefix(provID, "anthropic-compatible-") {
-				modelList = providers.GetProviderModels(outputAlias)
-				if len(modelList) == 0 {
-					modelList = providers.GetProviderModels(provID)
-				}
-			}
-			for _, mID := range modelList {
-				fullID := outputAlias + "/" + mID
-				if seen[fullID] {
-					continue
-				}
-				seen[fullID] = true
-
-				ctxLen, maxOut := providers.GetModelTokenLimits(mID)
-				if ctxLen == 0 && maxOut == 0 {
-					ctxLen, maxOut = providers.GetModelTokenLimits(fullID)
-				}
-				caps := providers.GetCapabilitiesDetailForModel(provID, mID)
-				if caps.ContextWindows > 0 && ctxLen == 0 {
-					ctxLen = caps.ContextWindows
-				}
-
-				data = append(data, ModelInfoObject{
-					ID:                  fullID,
-					Object:              "model",
-					Created:             now,
-					OwnedBy:             outputAlias,
-					Capabilities:        &caps,
-					ContextLength:       ctxLen,
-					ContextWindow:       ctxLen,
-					MaxCompletionTokens: maxOut,
-				})
-			}
-		}
-	} else if h.Repo == nil || len(activeConnections) == 0 {
-		// Fallback when DB has no connections or repo is nil: list static models
-		for alias, models := range providers.ProviderModels {
-			if canon := providers.ResolveAlias(alias); canon != alias && providers.GetProviderAlias(canon) != alias {
-				continue
-			}
-			for _, mID := range models {
-				fullID := alias + "/" + mID
-				if seen[fullID] {
-					continue
-				}
-				seen[fullID] = true
-
-				ctxLen, maxOut := providers.GetModelTokenLimits(mID)
-				caps := providers.GetCapabilitiesDetailForModel(alias, mID)
-				if caps.ContextWindows > 0 && ctxLen == 0 {
-					ctxLen = caps.ContextWindows
-				}
-				data = append(data, ModelInfoObject{
-					ID:                  fullID,
-					Object:              "model",
-					Created:             now,
-					OwnedBy:             alias,
-					Capabilities:        &caps,
-					ContextLength:       ctxLen,
-					ContextWindow:       ctxLen,
-					MaxCompletionTokens: maxOut,
-				})
-			}
-		}
-	}
-
-	// 2. Model Aliases
-	if h.Repo != nil {
-		if aliases, err := h.Repo.GetModelAliases(); err == nil {
-			for alias := range aliases {
-				if seen[alias] {
-					continue
-				}
-				seen[alias] = true
-				ctxLen, maxOut := providers.GetModelTokenLimits(alias)
-				caps := providers.GetCapabilitiesDetailForModel("", alias)
-				if caps.ContextWindows > 0 && ctxLen == 0 {
-					ctxLen = caps.ContextWindows
-				}
-				data = append(data, ModelInfoObject{
-					ID:                  alias,
-					Object:              "model",
-					Created:             now,
-					OwnedBy:             "system",
-					Capabilities:        &caps,
-					ContextLength:       ctxLen,
-					ContextWindow:       ctxLen,
-					MaxCompletionTokens: maxOut,
-				})
-			}
-		}
-	}
-
-	// 3. Combos
-	if h.Repo != nil {
-		if combos, err := h.Repo.GetCombos(); err == nil {
-			for _, c := range combos {
-				if seen[c.Name] {
-					continue
-				}
-				seen[c.Name] = true
-				ctxLen, maxOut := providers.GetModelTokenLimits(c.Name)
-				caps := providers.GetCapabilitiesDetailForModel("combo", c.Name)
-				if caps.ContextWindows > 0 && ctxLen == 0 {
-					ctxLen = caps.ContextWindows
-				}
-				data = append(data, ModelInfoObject{
-					ID:                  c.Name,
-					Object:              "model",
-					Created:             now,
-					OwnedBy:             "system",
-					Capabilities:        &caps,
-					ContextLength:       ctxLen,
-					ContextWindow:       ctxLen,
-					MaxCompletionTokens: maxOut,
-				})
-			}
-		}
-	}
-
-	// 4. Custom Models
-	if h.Repo != nil {
-		prefixMap, _ := h.Repo.GetProviderNodePrefixMap()
-		if customs, err := h.Repo.GetCustomModels(); err == nil {
-			for _, cm := range customs {
-				prefix := cm.ProviderAlias
-				if mapped, ok := prefixMap[cm.ProviderAlias]; ok && mapped != "" {
-					prefix = mapped
-				}
-				// Skip custom models belonging to explicitly deactivated provider connections
-				if disabledProviders[cm.ProviderAlias] || disabledProviders[prefix] {
-					continue
-				}
-				fullModel := prefix + "/" + cm.ID
-				if seen[fullModel] {
-					continue
-				}
-				seen[fullModel] = true
-
-				ctxLen, maxOut := providers.GetModelTokenLimits(fullModel)
-				if ctxLen == 0 && maxOut == 0 {
-					ctxLen, maxOut = providers.GetModelTokenLimits(cm.ID)
-				}
-				if len(cm.Caps) > 0 {
-					var caps providers.Capabilities
-					if cm.Caps["vision"] {
-						caps.Vision = true
-					}
-					if cm.Caps["reasoning"] {
-						caps.Reasoning = true
-					}
-					if cm.Caps["search"] {
-						caps.Search = true
-					}
-					if cm.Caps["tools"] {
-						caps.Tools = true
-					}
-					if cm.Caps["image"] || cm.Caps["imageOutput"] {
-						caps.ImageOutput = true
-					}
-					if cm.Caps["audio"] {
-						caps.AudioInput = true
-					}
-					providers.SetCustomModelCaps(prefix, cm.ID, caps)
-					if prefix != cm.ProviderAlias {
-						providers.SetCustomModelCaps(cm.ProviderAlias, cm.ID, caps)
-					}
-				}
-				caps := providers.GetCapabilitiesDetailForModel(prefix, cm.ID)
-				if caps.ContextWindows > 0 && ctxLen == 0 {
-					ctxLen = caps.ContextWindows
-				}
-				data = append(data, ModelInfoObject{
-					ID:                  fullModel,
-					Object:              "model",
-					Created:             now,
-					OwnedBy:             prefix,
-					Capabilities:        &caps,
-					ContextLength:       ctxLen,
-					ContextWindow:       ctxLen,
-					MaxCompletionTokens: maxOut,
-				})
-			}
-		}
-	}
-
-	if data == nil {
-		data = []ModelInfoObject{}
-	}
-	return data
-}
-
 // HandleModels responds with the list of available model identifiers.
 func (h *ChatHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
-	data := h.buildModelsList()
+	data := h.buildModelsList(r.Context())
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data":   data,
@@ -808,7 +541,7 @@ func (h *ChatHandler) HandleModelLookup(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Otherwise treat as provider/model ID lookup
-	data := h.buildModelsList()
+	data := h.buildModelsList(r.Context())
 	for _, m := range data {
 		if m.ID == suffix {
 			handlerutil.WriteJSON(w, http.StatusOK, m)
@@ -1126,7 +859,17 @@ func (h *ChatHandler) HandleTestModel(w http.ResponseWriter, r *http.Request) {
 			} `json:"error"`
 			Message string `json:"message"`
 		}
-		if json.Unmarshal([]byte(errMsg), &errObj) == nil {
+		trimmed := errMsg
+		if len(trimmed) > 500 {
+			head, tail := trimmed[:200], trimmed[len(trimmed)-200:]
+			trimmed = head + "\n...[truncated " + strconv.Itoa(len(errMsg)-400) + " bytes]...\n" + tail
+		}
+		// Non-JSON upstream bodies (proxied error pages, empty SSE) otherwise
+		// surface as a bare "response bukan JSON" with no diagnostic tail.
+		var probe any
+		if json.Unmarshal([]byte(errMsg), &probe) != nil {
+			errMsg = trimmed
+		} else if json.Unmarshal([]byte(errMsg), &errObj) == nil {
 			if errObj.Error.Message != "" {
 				errMsg = errObj.Error.Message
 			} else if errObj.Message != "" {

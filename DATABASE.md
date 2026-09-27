@@ -27,17 +27,17 @@ SQLite is opened through `modernc.org/sqlite` with WAL, `synchronous=NORMAL`, fo
 
 ### Current Go behavior
 
-Production startup does **not** create or migrate the core application schema. `internal/app/database.go` only:
+Production startup bootstraps the upstream core schema additively via `db.EnsureCoreSchema` (`internal/db/schema.go`, wired in `internal/app/database.go`):
 
 1. opens and configures the SQLite file;
-2. creates `upstream_leases` with `CREATE TABLE IF NOT EXISTS`; and
-3. exposes the connection to repositories and handlers.
+2. creates the 11 upstream core tables/indexes from `schema.js` `TABLES` when absent (`settings`, `_meta`, `providerConnections`, `providerNodes`, `proxyPools`, `apiKeys`, `combos`, `kv`, `usageHistory`, `usageDaily`, `requestDetails`);
+3. backfills columns declared upstream but missing on legacy databases (same strip-`PRIMARY KEY`/`UNIQUE` guard as upstream `syncSchemaFromTables`), plus Go-only `providerConnections.lastUsedAt` / `consecutiveUseCount` (upstream ignores them);
+4. seeds `_meta.schemaVersion = '1'` and an empty `settings` row (`id=1, data='{}'`), both `INSERT OR IGNORE`; and
+5. creates Go-only `upstream_leases` with `CREATE TABLE IF NOT EXISTS`.
 
-A new empty database therefore opens successfully but is not a working fresh installation. Depending on the operation, a missing table may surface later as an empty settings view, an authentication/DB error, or a failed write. The core tables are not implicitly bootstrapped.
+Every statement is idempotent, so existing user data is never touched — a fresh `DATA_DIR` now boots into a working installation (login with the compatibility password, then add providers/keys from the dashboard). Go still does not import legacy JSON files, run destructive migrations, or take pre-migration backups; for those, start the upstream application once as before.
 
-`internal/dbtest.SchemaStatements()` creates tables for Go tests only. It is not a production migrator and must not be presented as the deployed schema.
-
-Go has no `_meta` schema-version check, migration runner, compatibility validation, or automatic repair. It does not alter upstream tables at startup.
+`internal/dbtest.SchemaStatements()` creates tables for Go tests only. It is not the production path and must not be presented as the deployed schema.
 
 ### Upstream behavior
 
@@ -257,8 +257,8 @@ Upstream uses it for backup/migration/app metadata. Go neither creates nor reads
 |------|------------------|-------------------------|
 | Default path | Go and upstream v0.5.85 both use `DATA_DIR/db/data.sqlite` | Compatible in the common configuration |
 | Core columns | Most Go reads/inserts follow the upstream v0.5.85 schema | Compatible only for paths exercised against that exact schema |
-| Go connection metadata | Go writes optional `lastUsedAt` / `consecutiveUseCount` columns without migration | Upstream DB needs an operator-managed compatible addition, or those metadata updates fail |
-| Schema creation/migration | Upstream owns bootstrap/migrations; Go creates only `upstream_leases` | Do not start a blank DB directly for production |
+| Go connection metadata | Go backfills `lastUsedAt` / `consecutiveUseCount` additively on startup | Safe on both runtimes; upstream ignores the extra columns |
+| Schema creation/migration | Go creates the 11 core tables + backfills columns + seeds `_meta`/`settings`; no legacy-JSON import, no destructive migrations, no pre-migration backups | Fresh DB is a supported bootstrap; for legacy-JSON import or schema repair, start upstream once |
 | Extra table | Upstream ignores `upstream_leases` | Generally harmless; back up separately if lease continuity matters |
 | JSON payloads | `providerConnections.data` and `kv` are shared conventions | Shape compatibility is field-by-field, not guaranteed by a version check |
 | Write coordination | SQLite serializes writes; only lease admission is explicitly cross-process | Use one active 9router-go writer unless the workload is tested |
