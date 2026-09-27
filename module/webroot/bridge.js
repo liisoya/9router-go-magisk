@@ -218,7 +218,12 @@
       `${cfg().MODDIR}/bin/dnsfwd -f ${shq(configFile)} -P -j 8 2>&1`,
     curlTiming: url =>
       `curl -o /dev/null -s -m 8 -w '%{http_code} %{time_total}' ${shq(url)}`,
-    fetch: (url, sec) => `curl -s -m ${sec || 15} ${shq(url)}`,
+    // -L（--location）不能省：GitHub release 资产的地址是 302 跳到 objects.githubusercontent.com，
+    // 不跟随重定向时 curl 拿到的是 302 的空正文。真机实测（2026-09-27，直连 GitHub）：
+    //   SHA256SUMS 无 -L → 302 size=0   ／ 有 -L → 200 size=453
+    // 少了它，面板永远"取不到校验和"→ 按 fail-closed 直接拒绝更新（tag 修好了也白修）。
+    // 同时**不加 -f**：这里要的是"把正文拿回来"，404 正文留给调用方展示（诊断信息）。
+    fetch: (url, sec) => `curl -sL -m ${sec || 15} ${shq(url)}`,
     // -f（--fail）：HTTP ≥400 直接非零退出，不再"404 也写出正文并报成功"。
     // 2026-09-26 事故：加速节点返回 404 正文 "Not Found"（9 字节）被当引擎装上。
     download: (url, out, sec) =>

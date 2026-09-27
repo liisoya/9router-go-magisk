@@ -87,9 +87,11 @@ if [ "$OFFLINE" = 1 ]; then
   fi
 
   # JS-UNIT：模块 WebUI 纯函数（node）
+  # 清单**由 glob 展开**，不手写文件名：此前手写了 3 个文件，候选 5 加的
+  # engine-spec-contract.test.js 就此成了"存在、能被跑、但唯一入口从不跑它"的门禁孤儿
+  # （台账里还写着过期例数）。清单本身正是会漂移的东西 —— 同 tools/inject-mod-id.sh 的理由。
   if need_bin node "JS-UNIT" 0; then
-    run "JS-UNIT 模块 WebUI 纯函数（node --test）" node --test module/webroot/test/parsers.test.js \
-        module/webroot/test/bridge-commands.test.js module/webroot/test/contract-keys.test.js
+    run "JS-UNIT 模块 WebUI 纯函数（node --test，glob 全量）" node --test module/webroot/test/*.test.js
   fi
 
   # BUN-UNIT：引擎 Dashboard 纯函数（bun；无 bun 但有 npx 时用 `npx --yes bun` 兜底）

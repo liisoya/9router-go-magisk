@@ -31,7 +31,10 @@ step "2/4 注入占位符 → 暂存"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 mkdir -p "$STAGING/webroot" "$STAGING/lib" "$STAGING/etc"
-cp module/webroot/index.html module/webroot/app.js module/webroot/bridge.js module/webroot/parsers.js "$STAGING/webroot/"
+# webroot 全量推送（glob，不维护文件清单）：手写的清单会在新增文件时漏推
+# —— 2026-09-27 加 upstream.js 时就正好会踩一次（漏推的表现是 window.KUpstream undefined）。
+# test/ 是离线用例、不随模块分发，这里也不推。
+cp module/webroot/*.js module/webroot/*.html "$STAGING/webroot/"
 cp module/lib/*.sh "$STAGING/lib/"
 cp module/service.sh "$STAGING/"
 cp module/etc/engine-version "$STAGING/etc/" 2>/dev/null || true

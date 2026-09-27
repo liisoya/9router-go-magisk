@@ -34,7 +34,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | ID | 断言 | 命令 | 前置 | 失败意味着 |
 |---|---|---|---|---|
 | JS-SYNTAX | 全部 shell 脚本语法正确 | `sh -n module/**/*.sh tools/**/*.sh` | sh | 设备上脚本直接不可执行（**mksh 与 dash 有差异，真机断言仍是最终判据**） |
-| JS-UNIT | 模块 WebUI 纯函数回归 **46 例** | `node --test module/webroot/test/*.test.js` | node | 解析层/命令构造器/键契约回归 |
+| JS-UNIT | 模块 WebUI 纯函数回归（当前 **83 例 / 5 文件**；清单由 **glob 全量**展开，不手写文件名） | `node --test module/webroot/test/*.test.js` | node | 解析层/命令构造器/键契约/上游地址契约回归。**为什么必须 glob**：此前手写 3 个文件，候选 5 新增的 `engine-spec-contract.test.js` 因此成了「存在、能被跑、但唯一入口从不跑它」的门禁孤儿（2026-09-27 修正） |
 | BUN-UNIT | 引擎 Dashboard 纯函数回归 **82 例**（10 文件） | `bun test web/src` | bun | Dashboard 逻辑回归（请求形状、供应商解析、导入导出等） |
 | GO-BUILD | 引擎可编译 | `go build ./...` | go | 引擎源码编译失败 |
 | GO-TEST | Go 单元测试（排除外网/真机依赖用例） | `go test ./... -skip '<见 §4>'` | go | 引擎侧回归 |
@@ -46,7 +46,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 
 ### 2.3 真机断言（`tools/check.sh --device`）
 
-`tools/device/test-lifecycle.sh` —— 生命周期与安装（修复前 T2/T3/T8/T9/T10 会红）：
+`tools/device/test-lifecycle.sh` —— 生命周期与安装（修复前 T2/T3/T8/T9/T10/T13 会红）：
 
 | ID | 断言 | 失败意味着 |
 |---|---|---|
@@ -62,6 +62,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | T10a–b | 整包安装跑完无 `syntax error`，装完 `engine=up` | 安装会覆写正在执行的自己而夭折 |
 | T11a–c | 「等就绪/等消失」原语本身（`wait_for` 真/假两判、次数非法即拒绝、`wait_gone` 真消失且不谎报） | 轮询语义坏了 → 会谎报"拉起成功"或白等满超时 |
 | T12a–e | 运行期引擎版本自愈 + 来源自检：整包更新后（记录落后）自愈 / 自检字段如实（来源=包内·刚自愈）/ 稳态不重复自愈（来源=运行期记录）/ 同版本重装（靠 mtime）自愈 / 运行期更新不被包内旧值覆盖 / 文件缺失从包内补齐 | 面板谎报旧版本 → 用户看到「假更新」（引擎其实已是新的）；或自检字段说谎 |
+| T13a–b | 引擎更新链路（**只读**）：用设备自己的加速节点走「版本清单 → `SHA256SUMS.txt` → arm64 资产」，断言 sha256 与 `SHA256SUMS` 一致、且过 `engine_src_ok` 的体积+ELF 判据。**不执行 install-engine、不改引擎版本**（引擎已是最新时同样能跑） | 地址契约坏了（tag 缺 v → 404；`fetch` 缺 `-L` → 302 空正文）→ 面板点下载必失败（2026-09-27 用户实测） |
 
 `tools/device/test-dashboard-api.sh` —— 仪表盘 API 功能（撤补丁后的"功能确实可用"证明）：
 
@@ -86,10 +87,12 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 
 | 位置 | 规模 | 覆盖 |
 |---|---|---|
-| `module/webroot/test/parsers.test.js` | 25 | 解析层：`status/panel` 输出、meminfo/RSS、DNS 探测与评分、上游行归一、孤儿判定、**装前门禁**（404 正文/HTML/探针失败/真品） |
-| `module/webroot/test/bridge-commands.test.js` | 18 | 命令构造器：引号转义、base64 写文件、备份/恢复、`download` 必带 `-f`、`sqlSnapshot` 成败判据、`promiseWrap`、`fileSize`/`elfMagic` |
-| `module/webroot/test/contract-keys.test.js` | 3 | 键契约：shell `emit` 键集合 ↔ `app.js` 消费键 |
-| `web/src/**/*.test.ts`（10 文件） | 82 | Dashboard：请求形状（`db-backup`）、供应商/路由解析、批量添加、代理导入、OAuth 交接、analytics 类型等 |
+| `module/webroot/test/parsers.test.js` | 40 | 解析层：`status/panel` 输出、meminfo/RSS、DNS 探测与评分、上游行归一、孤儿判定、**装前门禁**（404 正文/HTML/探针失败/真品）、「先门禁后动作」计划求值 |
+| `module/webroot/test/bridge-commands.test.js` | 19 | 命令构造器：引号转义、base64 写文件、备份/恢复、`download` 必带 `-f`、`fetch` 必带 `-L`、`sqlSnapshot` 成败判据、`promiseWrap`、`fileSize`/`elfMagic` |
+| `module/webroot/test/contract-keys.test.js` | 6 | 键契约：shell `emit` 键集合 ↔ `app.js` 消费键；状态词值枚举双向对齐 |
+| `module/webroot/test/engine-spec-contract.test.js` | 5 | 「什么算一个引擎」两侧缝死（常量/魔数字面量/检查项存在性/边界语义） |
+| `module/webroot/test/upstream.test.js` | 13 | 上游 release 地址契约：tag 缺 v 必须补（原故障复现）、资产与校验和同 tag、加速前缀只加 GitHub 域、`SHA256SUMS` 整词解析、与 `checksumGate` 的 fail-closed 联动、**`app.js` 回潮扫描**（不许再手写 release 地址） |
+| `web/src/**/*.test.ts`（10 文件） | 91 | Dashboard：请求形状（`db-backup`）、供应商/路由解析、批量添加、代理导入、OAuth 交接、登录态收敛、analytics 类型等 |
 | Go `./...`（约 28 包） | — | 引擎侧；外网/真机依赖用例见 §4 |
 
 ## 4. 已知不绿灯（环境性必红，避免误判为回归）
@@ -100,6 +103,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | `internal/handlers/chat`：`TestLiveE2E_Cline_SmartCombo`、`TestIntegration_OpenCode_MuseSpark13_ChatCompletions` | 本机存在 `~/.9router` 时会真的打上游 → 失败 | 列入同一 `-skip` 名单；**已在上游 pristine 树（`../9router-go`）复跑，同样失败**（2026-09-26 证据）→ 环境依赖，非本仓回归 |
 | 其它 `*_live_*` / `*_e2e_*` 用例 | 需要真实 key 或 `$HOME/.9router/db/data.sqlite` | 多数自带 `t.Skip`（本机有库时才会真跑）；**不扩大排除范围**，出问题先在上游树复跑 |
 | 真机档在无设备时 | 全部 `T*`/`A*` | SKIP（退出 0）；严格模式 `--require-device` 才失败 |
+| 真机 `T13` | 需要**外网 + 设备上选中的加速节点可达**（会真的下载 ~25MB 到 `/data/local/tmp` 再删掉） | 前置不可达时如实打印 `T13 跳过：…` 并**不计入通过**；这是真机档唯一的外网依赖，别把它当成"网络抖动 = 回归" |
 
 ## 5. 变更记录
 
@@ -134,6 +138,10 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 新增 | BUN-UNIT（83 → 91 例） | 候选 8：`web/src/lib/session.ts` 收成登录态唯一所有者（存储注入 → 纯函数；两种"登出"有意区分：`clearAuthed` 只清标记 / `clearAll` 连 key 一起清）。7 处调用点收敛（client.ts ×4、LoginView、App.svelte、EndpointView、AnalyticsView、client.test.ts）。含**防回潮门禁**：全树扫描 `'9router_auth'` / `'9router_key'` 字面量，只允许出现在 `lib/session*` | 见本次提交 |
 | 2026-09-26 | 新增 | JS-SYNTAX / GO-BUILD / GO-TEST / TSC / BUN-UNIT | 由 `tools/check.sh` 统一编排（离线档） | f509e85 |
 | 2026-09-26 | 新增 | 变更映射自检 | `tools/check.sh` 末尾提醒"改了 A 没改 B"（只提醒不拦，规则见契约 §4） | f509e85 |
+| 2026-09-27 | 修改 | JS-UNIT（清单 → glob 全量，46 → 83 例） | 用户报障「更新引擎点下载必失败」定位时发现：`engine-spec-contract.test.js`（候选 5 的门禁）**从未被唯一入口执行过** —— 清单手写必然漏，改为 glob 展开；台账例数与 §3 目录同步为实测值 | 见本次提交 |
+| 2026-09-27 | 新增 | JS-UNIT（+14 例：`upstream.test.js` 13 + `bridge-commands` 1） | Phase 27：上游 release 地址契约（tag 缺 v → 404）与 `fetch` 缺 `-L`（302 空正文）两条通道缺陷的回归。含**回潮扫描**（`app.js` 不许再手写 release 地址）。**红灯自证**：回退三处修复 → 7 例精确变红 | 见本次提交 |
+| 2026-09-27 | 新增 | 真机 T13（a–b） | Phase 27：引擎更新链路的只读真机门禁（清单 → SHA256SUMS → arm64 资产 → 摘要/ELF），不安装不改版本；前置不可达即 SKIP | 见本次提交 |
+| 2026-09-27 | 修改 | 真机档前置 | T13 引入真机档唯一的**外网依赖**，§4 已登记（不可达 = SKIP，不是回归） | 见本次提交 |
 
 ## 6. UI parity 已知缺口（基线与理由）
 

@@ -10,6 +10,8 @@
 #   T2 自愈：kill -9 引擎 → 40s 内出现新 PID 且 /health 200（守护只判进程存在，不做健康度判据）
 #   T3 逃逸：在"管理器应用 cgroup"里启动引擎 → 引擎最终 cgroup 必须是 `/`（不是应用 cgroup）
 #           —— 复刻 WebUI ksu.exec 的上下文；修复前它落在 uid_<app>/pid_<app>，随应用清理被连坐
+#   T13 引擎更新链路（只读）：版本清单 → SHA256SUMS → arm64 资产，摘要与 ELF 必须对得上
+#           —— 不安装、不改引擎版本；前置不可达即如实 SKIP，绝不假绿
 #
 # 用法（设备侧）：
 #   adb push tools/device/test-lifecycle.sh /data/local/tmp/
@@ -209,6 +211,49 @@ if [ -n "$SELF" ]; then
 else
   info "T9 跳过：/version 未公开（v1.9.2 之前的引擎）或不可达"
 fi
+
+# ── T13 引擎更新链路的「下载 + 校验」只读门禁（2026-09-27 用户实测：点下载必失败）──
+# 原缺陷不在安装，而在**地址契约**：面板拿 version.json 的 latestVersion（"1.9.3"，裸版本号）
+# 当 tag 拼 release URL，而上游 tag 是 "v1.9.3" → 404（9 字节 "Not Found"，与 2026-09-26
+# 「404 正文被当引擎装上」是同一个东西）；同时 KB.fetch 少 -L，302 的资产地址只剩空正文。
+# 这里在真机上把**修好之后**的链路走一遍：清单 → SHA256SUMS → arm64 资产 → 比对摘要与 ELF。
+# 只读：不执行 install-engine、不改引擎版本；引擎已是该版本时同样能跑（验链路，不验"有更新"）。
+ACCEL13="$(cat "$DATA_DIR/github-accel" 2>/dev/null | tr -d '[:space:]')"
+TMP13="${TMPDIR:-/data/local/tmp}/9r-t13"
+if ! curl -sL -m 20 "${ACCEL13}https://raw.githubusercontent.com/luqman-v1/9router-go/main/version.json" -o "$TMP13.json" 2>/dev/null \
+   || [ ! -s "$TMP13.json" ]; then
+  info "T13 跳过：上游版本清单取不到（加速节点「$ACCEL13」/ 外网不可达）"
+else
+  LATEST="$(tr ',' '\n' < "$TMP13.json" | sed -n 's/.*"latestVersion"[^"]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [ -z "$LATEST" ]; then
+    no "T13 清单解析不出 latestVersion（上游格式变了？）"
+  else
+    case "$LATEST" in v*|V*) TAG="$LATEST" ;; *) TAG="v$LATEST" ;; esac
+    BASE="${ACCEL13}https://github.com/luqman-v1/9router-go/releases/download/$TAG"
+    SUMS=""
+    if curl -sL -m 30 "$BASE/SHA256SUMS.txt" -o "$TMP13.sums" 2>/dev/null && [ -s "$TMP13.sums" ]; then
+      SUMS="$(awk '$2=="9router-go-linux-arm64"||$2=="*9router-go-linux-arm64"{print $1}' "$TMP13.sums" | head -n 1)"
+    fi
+    if [ -z "$SUMS" ]; then
+      no "T13 取不到 SHA256SUMS 里的 arm64 摘要（$TAG；加速节点「$ACCEL13」）→ 面板会按 fail-closed 拒绝更新"
+    elif curl -fsSL -m 180 "$BASE/9router-go-linux-arm64" -o "$TMP13.bin" 2>/dev/null; then
+      GOT="$(sha256sum "$TMP13.bin" 2>/dev/null | cut -d' ' -f1)"
+      MAGIC="$(head -c 4 "$TMP13.bin" 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
+      SZ13="$(wc -c < "$TMP13.bin" 2>/dev/null | tr -d '[:space:]')"
+      [ "$GOT" = "$SUMS" ] && ok "T13a $TAG 的 arm64 摘要与 SHA256SUMS 一致（${SZ13}B）" \
+                           || no "T13a 摘要不一致：实际 $GOT / 期望 $SUMS"
+      if [ -n "$SZ13" ] && [ "$SZ13" -ge 5242880 ] && [ "$MAGIC" = "7f454c46" ]; then
+        ok "T13b 下载物过 engine_src_ok 的两个判据（体积 ${SZ13}B / 魔数 $MAGIC）"
+      else
+        no "T13b 下载物不像引擎（体积 ${SZ13:-?} / 魔数 ${MAGIC:-?}）"
+      fi
+      info "T13 只读校验完成（未安装；设备引擎 $("$OPS" panel | tr ' ' '\n' | sed -n 's/^engine_version=//p')，上游最新 $LATEST）"
+    else
+      no "T13 arm64 资产下载失败（$TAG；加速节点「$ACCEL13」）"
+    fi
+  fi
+fi
+rm -f "$TMP13.json" "$TMP13.sums" "$TMP13.bin"
 
 # ── T11 「等就绪 / 等消失」原语本身（唯一实现 lib/wait.sh）──
 # 门禁自己用同一实现跑一遍：语义坏了（比如假谓词也报成功）会在这里先红，

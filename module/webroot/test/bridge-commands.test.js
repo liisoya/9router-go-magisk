@@ -76,8 +76,17 @@ test('download：dl-ok 哨兵与超时透传', () => {
   const cmd = C.download('https://gh/x', '/data/local/tmp/f.new', 300);
   assert.ok(cmd.includes("-m 300 -o '/data/local/tmp/f.new' 'https://gh/x' && echo dl-ok"));
 });
+// fetch 必须带 -L：GitHub release 资产地址是 302 跳转（真机实测：无 -L → 302 size=0），
+// 不跟随重定向就拿不到 SHA256SUMS → 面板永远"取不到校验和"直接拒绝更新（2026-09-27）。
+// 与 download 的取舍相反：这里**不加 -f**，404 正文要留给调用方展示。
+test('fetch：必须带 -L（跟随重定向），且不带 -f（保留 404 正文供诊断）', () => {
+  const cmd = C.fetch('https://x', 20);
+  assert.ok(cmd.startsWith('curl -sL '), '缺 -L（--location）会在 302 的 release 资产地址上只拿到空正文');
+  assert.strictEqual(cmd, "curl -sL -m 20 'https://x'");
+  assert.ok(!/-f/.test(cmd), 'fetch 不该带 -f：404 正文是诊断信息，由调用方判断');
+});
 test('fetch / sha256 / zipList：命令形状', () => {
-  assert.strictEqual(C.fetch('https://x', 20), "curl -s -m 20 'https://x'");
+  assert.strictEqual(C.fetch('https://x'), "curl -sL -m 15 'https://x'");
   assert.strictEqual(C.sha256('/tmp/f'), "sha256sum '/tmp/f'");
   assert.strictEqual(C.zipList('/tmp/m.zip'), "unzip -l '/tmp/m.zip'");
 });

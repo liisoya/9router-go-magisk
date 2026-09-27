@@ -5,14 +5,16 @@
 const CFG = window.CFG;
 const KB = window.KBridge;
 const KP = window.KParsers;
+const KU = window.KUpstream;   // 上游/模块 release 地址契约（唯一所有者，见 upstream.js）
 
 const UPSTREAMS = CFG.DATA_DIR + '/dns-upstreams.conf';
 const PORT_FILE = CFG.DATA_DIR + '/port';
 const ACCEL_SEL = CFG.DATA_DIR + '/github-accel';
 const ACCEL_LIST = CFG.DATA_DIR + '/accel-list.conf';
 const MOD_UPDATE_URL_FILE = CFG.DATA_DIR + '/module-update-url';
-const DEFAULT_MOD_UPDATE_URL = 'https://raw.githubusercontent.com/liisoya/9router-go-magisk/main/update.json';
-const ENGINE_VERSION_URL = 'https://raw.githubusercontent.com/luqman-v1/9router-go/main/version.json';
+// 两条更新通道的地址（清单 URL / release 资产 URL / 加速前缀拼接）一律经 KUpstream。
+// 这里曾手写 release URL 且直接用 version.json 的裸版本号当 tag → 每次「下载并更新引擎」
+// 都 404（2026-09-27 用户实测）。地址契约不再由装配层持有。
 // 候选池：旧版实测可达清单（国内明文 + 国内 DoH/DoT）
 const DNS_CANDIDATES = [
   { v: 'nameserver 119.29.29.29',    note: '腾讯明文（旧版实测最快）' },
@@ -40,11 +42,9 @@ function toast(msg, ms) {
   clearTimeout(t._tm); t._tm = setTimeout(() => t.classList.remove('show'), ms || 2400);
 }
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const withAccel = (url, prefix) => prefix ? prefix + url : url;
-
 // ── 跨函数状态收敛点（Phase 3：替代裸 window._modUrl/_modUpdate/_engLatest 与 orphanAliases）──
 const state = {
-  modUrl: DEFAULT_MOD_UPDATE_URL, // 模块更新源
+  modUrl: KU.DEFAULT_MOD_UPDATE_URL, // 模块更新源
   modUpdate: null,                // 远端 update.json 内容（modCheck → modUpdate）
   engLatest: '',                  // 引擎上游最新版本（engCheck → engUpdate）
   engineVersion: '',              // 引擎真实版本（panel → 概览/引擎更新比对）
@@ -511,7 +511,7 @@ async function speedTest() {
   return withBusy($id('btn-speed'), '测速中…', async () => {
     const custom = (await KB.readFile(ACCEL_LIST)).out.split('\n').map(s => s.trim()).filter(Boolean);
     const all = [...new Set([...BUILTIN_ACCEL, ...custom])];
-    const target = 'https://raw.githubusercontent.com/luqman-v1/9router-go/main/VERSION';
+    const target = KU.ENGINE_VERSION_FILE_URL;
     const results = [];
     for (const node of all) {
       const r = await KB.curlTiming(node + target);
@@ -550,7 +550,7 @@ async function engCheck() {
     const out = $id('eng-out');
     out.style.display = 'block'; out.textContent = '检查中…';
     const p = (await KB.readFile(ACCEL_SEL)).out.trim();
-    const r = await KB.fetch(withAccel(ENGINE_VERSION_URL, p), 15);
+    const r = await KB.fetch(KU.withAccel(KU.ENGINE_VERSION_URL, p), 15);
     let latest = '';
     try { latest = JSON.parse(r.out).latestVersion || ''; } catch {}
     if (!latest) { out.textContent = '❌ 无法获取上游版本（可先测速选择加速节点）'; return; }
@@ -567,10 +567,13 @@ async function engUpdate() {
   const ver = state.engLatest; if (!ver) return;
   const out = document.getElementById('eng-out');
   const p = (await KB.readFile(ACCEL_SEL)).out.trim();
-  out.textContent = '下载中（' + (p || '直连') + '）…';
-  const base = `https://github.com/luqman-v1/9router-go/releases/download/${ver}`;
-  if (!await KB.download(withAccel(base + '/9router-go-linux-arm64', p), '/data/local/tmp/9r-eng.new', 300)) {
-    out.textContent = '❌ 下载失败（HTTP 非 2xx 或网络中断）—— 设备上的引擎未改动';
+  // 地址由 KUpstream 出（tag 形态的唯一所有者），并把**最终下载地址**显示出来：
+  // 这次定位最痛的一点就是面板只说"下载失败"、不说"下的是哪个地址"（2026-09-27）
+  const dlUrl = KU.withAccel(KU.engineAssetUrl(ver), p);
+  const sumsUrl = KU.withAccel(KU.engineSumsUrl(ver), p);
+  out.textContent = (p ? `加速 ${p}\n` : '直连 GitHub\n') + `下载地址 ${dlUrl}\n下载中…`;
+  if (!await KB.download(dlUrl, '/data/local/tmp/9r-eng.new', 300)) {
+    out.textContent = `❌ 下载失败（HTTP 非 2xx 或网络中断）—— 设备上的引擎未改动\n下载地址 ${dlUrl}`;
     return;
   }
   // 装前门禁①：像不像一个引擎（体积 + ELF 魔数）。不合格绝不进 install-engine。
@@ -579,19 +582,19 @@ async function engUpdate() {
   const magic = await KB.elfMagic('/data/local/tmp/9r-eng.new');
   const gFile = KP.engineFileGate(size, magic);
   if (KP.planSteps(KP.ENGINE_UPDATE_PLAN, { 'file-gate': gFile }).blockedBy) {
-    out.textContent = `❌ ${gFile.reason}\n已中止，设备上的引擎未改动`; return;
+    out.textContent += `\n❌ ${gFile.reason}\n已中止，设备上的引擎未改动`; return;
   }
   // 装前门禁②：校验和 —— **取不到就拒绝**（旧实现"取不到跳过校验"正好放行了 404 正文）
   out.textContent += '\n校验 SHA256…';
-  const sum = await KB.fetch(withAccel(base + '/SHA256SUMS.txt', p), 60);
-  const sumLine = sum.out.split('\n').find(l => l.includes('9router-go-linux-arm64')) || '';
-  const expected = (sumLine.match(/^([0-9a-f]{64})/i) || [])[1];
+  // KB.fetch 带 -L：release 资产地址是 302 跳转，不跟随就只剩空正文（真机实测 302 size=0）
+  const sum = await KB.fetch(sumsUrl, 60);
+  const expected = KU.parseSumFor(sum.out, KU.ENGINE_ASSET);
   const actual = await KB.sha256('/data/local/tmp/9r-eng.new');
   const gSum = KP.checksumGate(expected, actual);
   // 两个门禁都过才允许 install —— 由计划求值决定（顺序不变量在 KP.ENGINE_UPDATE_PLAN，
   // 离线断言"任一不过则 install 不可达"；这里不再手写顺序判断）
   if (KP.planSteps(KP.ENGINE_UPDATE_PLAN, { 'file-gate': gFile, 'sum-gate': gSum }).blockedBy) {
-    out.textContent += `\n❌ ${gSum.reason}`; return;
+    out.textContent += `\n❌ ${gSum.reason}\n校验和地址 ${sumsUrl}`; return;
   }
   out.textContent += ' ✅\n替换二进制并重启…';
   // 安装唯一入口：门禁 → 回滚点 → 替换 → 权限 → 起来后才写版本，全在 ops.sh seam 内
@@ -604,9 +607,9 @@ async function modCheck() {
   return withBusy($id('btn-mod-check'), '检查中…', async () => {
     const out = $id('mod-out');
     out.style.display = 'block'; out.textContent = '检查中…';
-    const url = state.modUrl || DEFAULT_MOD_UPDATE_URL;
+    const url = state.modUrl || KU.DEFAULT_MOD_UPDATE_URL;
     const p = (await KB.readFile(ACCEL_SEL)).out.trim();
-    const target = url.includes('github.com') || url.includes('raw.githubusercontent.com') ? withAccel(url, p) : url;
+    const target = KU.withAccelIfGithub(url, p);
     const r = await KB.fetch(target, 20);
     let j; try { j = JSON.parse(r.out); } catch { out.textContent = '❌ 更新源不可达或格式错误\n' + r.out.slice(0, 200); return; }
     document.getElementById('mod-latest').textContent = (j.version || '?') + ' (code ' + j.versionCode + ')';
@@ -623,7 +626,7 @@ async function modUpdate() {
   const j = state.modUpdate; if (!j) return;
   const out = document.getElementById('mod-out');
   const p = (await KB.readFile(ACCEL_SEL)).out.trim();
-  const dlUrl = /https?:\/\/(github\.com|raw\.githubusercontent\.com|objects\.githubusercontent\.com)\//.test(j.zipUrl) ? withAccel(j.zipUrl, p) : j.zipUrl;
+  const dlUrl = KU.withAccelIfGithub(j.zipUrl, p);
   out.textContent = '下载模块 zip…';
   if (!await KB.download(dlUrl, '/data/local/tmp/mod-update.zip', 600)) { out.textContent = '❌ 下载失败'; return; }
   const chk = await KB.zipList('/data/local/tmp/mod-update.zip');
@@ -640,7 +643,7 @@ async function modUpdate() {
   toast('✅ 模块更新完成', 3200); out.textContent += '\n✅ 完成';
 }
 async function setModUrl() {
-  const u = prompt('模块更新源 URL（指向 update.json）：', state.modUrl || DEFAULT_MOD_UPDATE_URL);
+  const u = prompt('模块更新源 URL（指向 update.json）：', state.modUrl || KU.DEFAULT_MOD_UPDATE_URL);
   if (!u) return;
   await KB.writeFile(MOD_UPDATE_URL_FILE, u + '\n');
   state.modUrl = u; toast('已保存');
