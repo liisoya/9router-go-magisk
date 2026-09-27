@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.3-r1",
-  "versionCode": 109030,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.3-r1/9router-go-1.9.3-r1-magisk.zip",
-  "changelog": "引擎基线升到上游 v1.9.3（/v1/models 改用 buildModelsList、Kiro 工具调用与端点轮换、GetCombos 连接池死锁、实时目录 singleflight、Dashboard 模型目录与上游注册表同步）。修「点下载并更新引擎必失败」：面板把 version.json 的裸版本号当 release tag 拼 URL（上游 tag 一律带 v）→ 404；同时 fetch 补 -L（release 资产是 302 跳转，缺它拿不到 SHA256SUMS）。新增 module/webroot/upstream.js 收拢上游地址契约（tag 归一/资产名/校验和/加速前缀），面板会显示最终下载地址。撤掉两个已被上游吸收的补丁（chat.HandleHealth、codebuddy 提示词清洗），保留 /web/fetch 与 /api/health 补丁。门禁：JS-UNIT 清单改 glob 全量（修掉一个从不执行的孤儿门禁）、新增真机 T13（只读更新链路）、PARITY 基线随上游收紧 135→131。验证：离线 11/11 全绿、真机 T*/A* 全绿、前端单测 91 例。"
+  "version": "v1.9.4-r1",
+  "versionCode": 109040,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.4-r1/9router-go-1.9.4-r1-magisk.zip",
+  "changelog": "引擎基线升到上游 v1.9.4（Dashboard issue #24：连接重排改为服务端单事务原子化、轮询按连接持久化并跨重启保留、固定连接尊重禁用/模型锁、代理弹窗可滚动；另有 Gemini Live 实时语音转写、Claude session-id 与限速头 parity、完整上游定价表、Codex OAuth 回环修复、上游 v0.5.86–v0.5.91 同步）。修「面板概览读不出来」：上一版把 URL 常量收编进 upstream.js 时漏改一处裸引用，导致面板显示旧快照、服务地址与资源占用空白、点重启报 DEFAULT_MOD_UPDATE_URL is not defined —— 装了 v1.9.3-r1 的用户会遇到，本版已修。门禁：新增装配层冒烟（在桩 DOM 里跑真实 app.js）与 upstream.js 名字必须带 KU. 前缀的扫描，红灯自证两条都变红。保留两处引擎定点补丁（Dashboard 网页抓取端点、/api/health 与 SSO 回调）。验证：离线 11/11、真机 T*/A* 全绿、PARITY/UIPARITY 无新增缺口。"
 }

@@ -656,6 +656,18 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				}
 			}
 
+			// Realtime STT: dispatched on the model's transport marker, never on a
+			// hardcoded id, so a new streaming provider extends through data.
+			if isTranscriptionEndpoint(endpoint) &&
+				providers.ResolveModelTransport(subInfo.Provider, subInfo.Model) == providers.TransportGeminiLive {
+				if err := h.handleGeminiLiveSTT(w, r, body, subInfo); err == nil {
+					return
+				} else {
+					lastErr = err.Error()
+					continue
+				}
+			}
+
 			conn, connData, err := h.ChatH.GetBestConnection(subInfo.Provider, subInfo.ConnectionID, nil, subInfo.Model)
 			if err != nil || conn == nil {
 				lastErr = fmt.Sprintf("no connection for %s", subInfo.Provider)
@@ -766,6 +778,16 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	if (endpoint == "/v1/audio/transcriptions" || endpoint == "/audio/transcriptions") && (modelInfo.Provider == "antigravity" || modelInfo.Provider == "ag") {
 		if err := h.handleAntigravitySTT(w, r, body, modelInfo); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
+
+	// Realtime STT: dispatched on the model's transport marker, never on a
+	// hardcoded id, so a new streaming provider extends through data.
+	if isTranscriptionEndpoint(endpoint) &&
+		providers.ResolveModelTransport(modelInfo.Provider, modelInfo.Model) == providers.TransportGeminiLive {
+		if err := h.handleGeminiLiveSTT(w, r, body, modelInfo); err != nil {
+			writeLiveSTTError(w, err)
 		}
 		return
 	}

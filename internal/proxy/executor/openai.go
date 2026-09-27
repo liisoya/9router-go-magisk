@@ -29,6 +29,12 @@ func ForwardOpenAI(w http.ResponseWriter, req *Request) error {
 		}
 	}()
 
+	// Forward the upstream's retry and rate-limit headers before any branch
+	// below writes a status: they tell the client when it is worth retrying,
+	// and dropping them turns a throttle into an opaque failure. Applied on
+	// every response path, like upstream upstreamResponseHeaders.
+	forwardUpstreamResponseHeaders(w, resp.Header)
+
 	if req.IsStream {
 		stallReader := proxy.NewStallReaderWithContext(req.Ctx, resp.Body, 0, "openai")
 		bodyCloser = stallReader

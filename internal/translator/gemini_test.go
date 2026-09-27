@@ -332,12 +332,16 @@ func TestGeminiThoughtSignature(t *testing.T) {
 		t.Fatal("expected contents")
 	}
 
+	// The conversation is bracketed with user turns (NormalizeGeminiContents), so
+	// the call is looked up across all of them rather than at a fixed index.
 	var found bool
-	for _, p := range geminiReq.Contents[0].Parts {
-		if p.FunctionCall != nil && p.FunctionCall.Name == "get_weather" {
-			found = true
-			if p.ThoughtSignature != "test_signature" {
-				t.Errorf("expected thought_signature to be 'test_signature', got: %q", p.ThoughtSignature)
+	for _, c := range geminiReq.Contents {
+		for _, p := range c.Parts {
+			if p.FunctionCall != nil && p.FunctionCall.Name == "get_weather" {
+				found = true
+				if p.ThoughtSignature != "test_signature" {
+					t.Errorf("expected thought_signature to be 'test_signature', got: %q", p.ThoughtSignature)
+				}
 			}
 		}
 	}
@@ -624,4 +628,3 @@ func TestHardenAntigravityRequest_GuardsThinkingBudget(t *testing.T) {
 		t.Errorf("expected maxOutputTokens (%v) > 4096", maxTokens)
 	}
 }
-

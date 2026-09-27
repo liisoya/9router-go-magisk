@@ -6,6 +6,7 @@ import {
   MEDIA_PROVIDER_KINDS,
   PROVIDER_CATALOG,
 } from './providers'
+import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from './models'
 import { pathToTab, TAB_ROUTES } from './router'
 
 describe('providers & media separation', () => {
@@ -165,5 +166,30 @@ describe('providers & media separation', () => {
     assert.ok(p)
     assert.strictEqual(p.category, 'apikey')
     assert.strictEqual(p.hidden, true)
+  })
+  it('wires the five v0.5.91 aggregators (tokenharbor, dahl, atria, agnes, bai)', () => {
+    const expected: Record<string, { category: string; models: number; fetcher: boolean }> = {
+      tokenharbor: { category: 'apikey', models: 6, fetcher: true },
+      dahl: { category: 'apikey', models: 3, fetcher: true },
+      atria: { category: 'apikey', models: 1, fetcher: false },
+      agnes: { category: 'freeTier', models: 0, fetcher: false },
+      bai: { category: 'apikey', models: 0, fetcher: true },
+    }
+    for (const [id, want] of Object.entries(expected)) {
+      const p = PROVIDER_CATALOG.find((e) => e.id === id)
+      assert.ok(p, `${id} missing from the dashboard catalog`)
+      assert.strictEqual(p.category, want.category, `${id} category`)
+      assert.ok(isChatProvider(p), `${id} should be a chat provider`)
+      assert.strictEqual(p.alias, id, `${id} uiAlias equals its id upstream`)
+      assert.strictEqual(getModelsByProviderId(id).length, want.models, `${id} model count`)
+      assert.strictEqual(Boolean(p.modelsFetcher), want.fetcher, `${id} modelsFetcher`)
+    }
+  })
+
+  it('resolves every provider alias to a catalog with an entry', () => {
+    const missing = Object.keys(PROVIDER_ID_TO_ALIAS).filter(
+      (id) => !PROVIDER_CATALOG.some((p) => p.id === id || p.alias === id)
+    )
+    assert.deepStrictEqual(missing, [])
   })
 })

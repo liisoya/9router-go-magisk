@@ -26,7 +26,7 @@ func TestHandleUpdateConnection_AssignedModel(t *testing.T) {
 			"existingConfig": "preserved-value"
 		}
 	}`
-	if err := repo.UpdateProviderConnection(connID, "Anthropic Conn", 0, true, initialData); err != nil {
+	if err := repo.UpdateConnectionData(connID, initialData); err != nil {
 		t.Fatalf("failed to initialize connection data: %v", err)
 	}
 

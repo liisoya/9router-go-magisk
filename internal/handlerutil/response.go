@@ -153,3 +153,26 @@ func GetSessionID(ctx context.Context) string {
 	return ""
 }
 
+type clientBetaKey struct{}
+
+// WithClientAnthropicBeta carries the caller's own anthropic-beta flags on the
+// context. They have to be merged into the upstream request rather than dropped:
+// a client asking for a beta the gateway does not list would otherwise fail
+// without ever being told why. (Upstream mergeAnthropicBeta, v0.5.91.)
+func WithClientAnthropicBeta(ctx context.Context, beta string) context.Context {
+	if beta == "" || ctx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, clientBetaKey{}, beta)
+}
+
+// GetClientAnthropicBeta returns the caller's anthropic-beta flags, or "".
+func GetClientAnthropicBeta(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if val, ok := ctx.Value(clientBetaKey{}).(string); ok {
+		return val
+	}
+	return ""
+}

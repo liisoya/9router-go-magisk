@@ -45,10 +45,48 @@ func generateFakeUserID(sessionID, apiKey string) string {
 	deviceSum := sha256.Sum256([]byte("device:" + apiKey))
 	deviceID := hex.EncodeToString(deviceSum[:])
 	accountUUID := deriveUuid("account:" + apiKey)
+	// The CLI's own "claude:" prefix is stripped so the API only ever sees the
+	// bare session id.
+	sessionID = cleanClaudeSessionID(sessionID)
 	if sessionID == "" {
 		sessionID = randomUUID()
 	}
 	return fmt.Sprintf(`{"device_id":%q,"account_uuid":%q,"session_id":%q}`, deviceID, accountUUID, sessionID)
+}
+
+// claudeSessionPrefix is what the Claude CLI puts in front of its own session
+// ids. Upstream strips it before deriving the metadata.user_id session and
+// before echoing the id back in x-claude-code-session-id, so the value the API
+// sees is the bare id.
+const claudeSessionPrefix = "claude:"
+
+// cleanClaudeSessionID strips the CLI's "claude:" prefix and surrounding space.
+func cleanClaudeSessionID(sessionID string) string {
+	if len(sessionID) >= len(claudeSessionPrefix) &&
+		strings.EqualFold(sessionID[:len(claudeSessionPrefix)], claudeSessionPrefix) {
+		sessionID = sessionID[len(claudeSessionPrefix):]
+	}
+	return strings.TrimSpace(sessionID)
+}
+
+// extractClaudeSessionIdFromUserId reads the session id back out of a
+// metadata.user_id value. Claude Code sends the JSON object the cloak
+// generates, but other clients send a bare id; both are accepted. Port of
+// extractClaudeSessionIdFromUserId in open-sse/utils/claudeCloaking.js.
+func extractClaudeSessionIdFromUserId(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	if strings.HasPrefix(userID, "{") {
+		var parsed struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal([]byte(userID), &parsed); err != nil {
+			return ""
+		}
+		return cleanClaudeSessionID(parsed.SessionID)
+	}
+	return cleanClaudeSessionID(userID)
 }
 
 func randomUUID() string {

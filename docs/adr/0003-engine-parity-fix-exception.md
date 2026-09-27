@@ -48,3 +48,14 @@ bug**——例如 codebuddy-cn 执行器缺少 Node 版的 agent 系统提示词
   `module/etc/schema.sql` 仍是安装期的建库来源，两者不冲突（SCHEMA 门禁继续绿）。
 - 端点 parity 棘轮随本版**收紧 135 → 131**（上游补上的 4 条 Kiro 路由缺口消失）。
 
+**2026-09-27 · v1.9.3 → v1.9.4**
+
+- 上游本版规模：117 文件 / +8766 −1386；我们改过的文件里只有 3 个双方都动过（`chat.go`、
+  `router.go`、`web/src/api/client.ts`），合并**零文本冲突**。
+- **留**：`media-web-fetch-route`（上游仍未挂载 `HandleWebFetch`）、`/api/health` + SSO 501
+  （上游仍无注册）。`codebuddy.go` 本版上游未动，shaping 维持上游实现（我方清洗已在 v1.9.3 撤除）。
+- 复核：`HandleHealth` 未回归；登录态键未回潮（字面量仍只在 `web/src/lib/session*`）。
+- schema：上游只把 Go-only 列的回填提取为 `EnsureAdditiveColumns`，表/列无变化 →
+  `module/etc/schema.sql` **无需重生成**（SCHEMA 门禁继续绿）。
+- 端点 parity 棘轮：无新增缺口，基线 131 条不变。
+

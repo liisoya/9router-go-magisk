@@ -4,6 +4,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/samber/lo"
 )
 
 func setupDashboardTestDB(t *testing.T) (*Repo, func()) {
@@ -94,7 +96,7 @@ func TestProviderConnectionsCRUD(t *testing.T) {
 	}
 
 	// Test UpdateProviderConnection
-	err = repo.UpdateProviderConnection("conn-1", "OpenAI Updated", 5, false, `{"apiKey":"sk-2"}`)
+	err = repo.UpdateProviderConnection("conn-1", "OpenAI Updated", lo.ToPtr(5), false, `{"apiKey":"sk-2"}`)
 	if err != nil {
 		t.Fatalf("UpdateProviderConnection failed: %v", err)
 	}

@@ -70,7 +70,9 @@ func ClearCustomModelCaps() {
 	InvalidateCapabilitiesCache()
 }
 
-// Capabilities represents what a model can do beyond plain text.
+// Capabilities represents what a model can do beyond plain text, plus the shape
+// of its thinking control on the wire. The thinking fields are only meaningful
+// when Reasoning is true; an empty ThinkingFormat means "derive from transport".
 type Capabilities struct {
 	Vision      bool
 	PDF         bool
@@ -81,81 +83,113 @@ type Capabilities struct {
 	Search      bool
 	Tools       bool
 	Reasoning   bool
+	// ThinkingFormat is the wire shape of the thinking control
+	// (openai, claude-adaptive, claude-budget, gemini-level, gemini-budget,
+	// zai, qwen, kimi, deepseek, commandcode, minimax, hunyuan, step).
+	ThinkingFormat string
+	// ThinkingCanDisable reports whether thinking can be turned off. It is a
+	// pointer because a plain bool cannot say "not specified": upstream's
+	// default is true, and a table entry that names a thinking format without
+	// this flag must still resolve to true. See canDisableThinking.
+	ThinkingCanDisable *bool
+	// ThinkingRange is the {min, max} budget clamp for budget-based formats.
+	ThinkingRange *ThinkingRange
+	// ThinkingEffortSupported reports that the model accepts a reasoning_effort
+	// level on the wire.
+	ThinkingEffortSupported bool
+	// ContextWindow and MaxOutput are the token limits declared by the provider
+	// entry. Zero means "unknown, fall back to the model token-limit table".
+	ContextWindow int
+	MaxOutput     int
+}
+
+// ThinkingRange is the inclusive thinking-token budget window a model accepts.
+// It is only set for budget-based formats (claude-budget, gemini-budget).
+type ThinkingRange struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
+}
+
+// canDisableThinking resolves the tri-state ThinkingCanDisable flag: an unset
+// entry means "not specified", which is upstream's default — thinking can be
+// switched off.
+func canDisableThinking(c Capabilities) bool {
+	return c.ThinkingCanDisable == nil || *c.ThinkingCanDisable
 }
 
 var DefaultCapabilities = Capabilities{
-	Vision:      false,
-	PDF:         false,
-	AudioInput:  false,
-	VideoInput:  false,
-	ImageOutput: false,
-	AudioOutput: false,
-	Search:      false,
-	Tools:       true,
-	Reasoning:   false,
+	Vision:             false,
+	PDF:                false,
+	AudioInput:         false,
+	VideoInput:         false,
+	ImageOutput:        false,
+	AudioOutput:        false,
+	Search:             false,
+	Tools:              true,
+	Reasoning:          false,
+	ThinkingFormat:     "",
+	ThinkingCanDisable: nil,
+	ThinkingRange:      nil,
 }
 
 var modelCapabilities = map[string]Capabilities{
-	"claude-opus-5":                    {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-5-thinking":           {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-5-agentic":            {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-5-thinking-agentic":   {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-4.6":                  {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-4.7":                  {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-4-7":                  {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-4.8":                  {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-4-6":                  {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-4-8":                  {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-4.8-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-opus-4-8-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-sonnet-4.6":                {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-sonnet-4-6":                {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-sonnet-5":                  {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-sonnet-5-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-sonnet-5-agentic":          {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"claude-sonnet-5-thinking-agentic": {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"gpt-6-astra":                      {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"gpt-5.6-sol-image":                {ImageOutput: true, Tools: true},
-	"gpt-5.6-terra-image":              {ImageOutput: true, Tools: true},
-	"gpt-5.6-luna-image":               {ImageOutput: true, Tools: true},
+	"claude-opus-5":                    {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-thinking":           {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-agentic":            {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-thinking-agentic":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.6":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.7":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-7":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.8":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-6":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-8":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.8-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-8-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-4.6":                {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-4-6":                {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-5":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-5-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-5-agentic":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-5-thinking-agentic": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	"gpt-image-1":                      {ImageOutput: true},
-	"glm-5.3-flash":                    {Vision: true, Reasoning: true, Tools: true},
-	"glm-5.3":                          {Reasoning: true, Tools: true},
-	"glm-4.6v":                         {Vision: true, Reasoning: true, Tools: true},
-	"deepseek-v4-vision":               {Vision: true, Reasoning: true, Tools: true},
-	"deepseek-v4.1-flash":              {Vision: true, Reasoning: true, Tools: true},
-	"deepseek-flash":                   {Vision: true, Reasoning: true, Tools: true},
-	"grok-4.6":                         {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"grok-4.5":                         {Vision: true, Reasoning: true, Search: true, Tools: true},
-	"muse-spark-1.2-contributor-free":  {Vision: true, Reasoning: true, Tools: true},
-	"muse-spark-1.3-contributor-free":  {Vision: true, Reasoning: true, Tools: true},
-	"union-alpha":                      {Reasoning: true, Tools: true},
-	"vision-model":                     {Vision: true, Reasoning: true, Tools: true},
-	"coder-model":                      {Reasoning: true, Tools: true},
-	"kimi-k3":                          {Vision: true, VideoInput: true, Reasoning: true, Tools: true},
-	"k3":                               {Vision: true, VideoInput: true, Reasoning: true, Tools: true},
-	"kimi-for-coding":                  {Vision: true, VideoInput: true, Reasoning: true, Tools: true},
-	"kimi-for-coding-highspeed":        {Vision: true, VideoInput: true, Reasoning: true, Tools: true},
-	"kimi-k2.7-code":                   {Vision: true, VideoInput: true, Reasoning: true, Tools: true},
-	"kimi-k2.7-code-highspeed":         {Vision: true, VideoInput: true, Reasoning: true, Tools: true},
+	"glm-5.3-flash":                    {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
+	"claude-fable-5-1":                 {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false)},
+	"glm-5.2":                          {Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
+	"glm-4.6v":                         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
+	"glm-4.5v":                         {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
+	"deepseek-v4-flash-vision-exp":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"deepseek-v4-vision":               {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true},
+	"deepseek-v4.1-flash":              {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"deepseek-flash":                   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"muse-spark-1.2-contributor-free":  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	"muse-spark-1.3-contributor-free":  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	"union-alpha":                      {Vision: true, Tools: true},
+	"vision-model":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"},
+	"coder-model":                      {Reasoning: true, Tools: true, ThinkingFormat: "qwen"},
+	"kimi-k3":                          {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"k3":                               {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"kimi-for-coding":                  {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"kimi-for-coding-highspeed":        {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"kimi-k2.7-code":                   {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"kimi-k2.7-code-highspeed":         {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
 }
 
 var providerCapabilities = map[string]map[string]Capabilities{
 	"nvidia": {
-		"minimaxai/minimax-m2.7":        {Reasoning: true, Tools: true},
-		"minimaxai/minimax-m3":          {Vision: true, Reasoning: true, Tools: true},
-		"z-ai/glm-5.2":                  {Reasoning: true, Tools: true},
-		"deepseek-ai/deepseek-v4-pro":   {Reasoning: true, Tools: true},
-		"deepseek-ai/deepseek-v4-flash": {Reasoning: true, Tools: true},
+		"minimaxai/minimax-m2.7":        {Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"minimaxai/minimax-m3":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"z-ai/glm-5.2":                  {Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"deepseek-ai/deepseek-v4-pro":   {Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"deepseek-ai/deepseek-v4-flash": {Reasoning: true, Tools: true, ThinkingFormat: "openai"},
 	},
 	"codex": {
-		"gpt-6-astra":            {Vision: true, Reasoning: true, Search: true, Tools: true},
-		"gpt-5.6-sol":            {Vision: true, Reasoning: true, Search: true, Tools: true},
-		"gpt-5.6-sol-review":     {Vision: true, Reasoning: true, Search: true, Tools: true},
-		"gpt-5.6-terra":          {Vision: true, Reasoning: true, Search: true, Tools: true},
-		"gpt-5.6-terra-review":   {Vision: true, Reasoning: true, Search: true, Tools: true},
-		"gpt-5.6-luna":           {Vision: true, Reasoning: true, Search: true, Tools: true},
-		"gpt-5.6-luna-review":    {Vision: true, Reasoning: true, Search: true, Tools: true},
+		"gpt-6-astra":            {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"},
+		"gpt-5.6-sol":            {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"},
+		"gpt-5.6-sol-review":     {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"},
+		"gpt-5.6-terra":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"},
+		"gpt-5.6-terra-review":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"},
+		"gpt-5.6-luna":           {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"},
+		"gpt-5.6-luna-review":    {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"},
 		"gpt-5.6-sol-image":      {ImageOutput: true, Tools: true},
 		"gpt-5.6-terra-image":    {ImageOutput: true, Tools: true},
 		"gpt-5.6-luna-image":     {ImageOutput: true, Tools: true},
@@ -166,51 +200,39 @@ var providerCapabilities = map[string]map[string]Capabilities{
 		"gpt-image-1.5":          {ImageOutput: true, Tools: true},
 	},
 	"codebuddy-cn": {
-		"glm-5.2":             {Vision: true, Reasoning: true, Tools: true},
-		"glm-5.1":             {Vision: true, Reasoning: true, Tools: true},
+		"glm-5.2":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true)},
+		"glm-5.1":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
 		"glm-5.0-turbo":       {Reasoning: true, Tools: true},
-		"glm-5v-turbo":        {Vision: true, Reasoning: true, Tools: true},
-		"minimax-m3":          {Vision: true, Reasoning: true, Tools: true},
+		"glm-5v-turbo":        {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"minimax-m3":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
 		"minimax-m2.7":        {Vision: true, Reasoning: true, Tools: true},
-		"kimi-k2.7":           {Vision: true, Reasoning: true, Tools: true},
-		"kimi-k2.6":           {Vision: true, Reasoning: true, Tools: true},
-		"kimi-k2.5":           {Vision: true, Reasoning: true, Tools: true},
-		"hy3-preview":         {Vision: true, Reasoning: true, Tools: true},
-		"hy3":                 {Vision: true, Reasoning: true, Tools: true},
+		"kimi-k2.7":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"kimi-k2.6":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"kimi-k2.5":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"hy3-preview":         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"hy3":                 {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
 		"hy3-x":               {Vision: true, Reasoning: true, Tools: true},
-		"hy4-preview":         {Vision: true, Reasoning: true, Tools: true},
+		"hy4-preview":         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
 		"hy4-preview-x":       {Vision: true, Reasoning: true, Tools: true},
-		"glm-5.3":             {Vision: true, Reasoning: true, Tools: true},
-		"glm-5.3-flash":       {Vision: true, Reasoning: true, Tools: true},
-		"kimi-k3-1":           {Vision: true, Reasoning: true, Tools: true},
-		"deepseek-v4-pro":     {Vision: true, Reasoning: true, Tools: true},
-		"deepseek-v4.1-flash": {Vision: true, Reasoning: true, Tools: true},
-		"deepseek-v4-flash":   {Vision: true, Reasoning: true, Tools: true},
-		"deepseek-v3-2-volc":  {Reasoning: true, Tools: true},
-	},
-	"qoder": {
-		"ultimate":      {Vision: true, Reasoning: true, Tools: true},
-		"performance":   {Vision: true, Reasoning: true, Tools: true},
-		"dmodel":        {Reasoning: true, Tools: true},
-		"dfmodel":       {Reasoning: true, Tools: true},
-		"gmodel":        {Reasoning: true, Tools: true},
-		"gfmodel":       {Vision: true, Reasoning: true, Tools: true},
-		"kmodel_latest": {Vision: true, Reasoning: true, Tools: true},
-		"kmodel":        {Vision: true, Reasoning: true, Tools: true},
-		"mmodel":        {Reasoning: true, Tools: true},
-		"qmodel_latest": {Vision: true, Reasoning: true, Tools: true},
-		"qmodel":        {Vision: true, Reasoning: true, Tools: true},
-		"qfmodel":       {Vision: true, Reasoning: true, Tools: true},
-		"qmodel_38max":  {Vision: true, Reasoning: true, Tools: true},
+		"glm-5.3":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true)},
+		"glm-5.3-flash":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true)},
+		"kimi-k3-1":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"deepseek-v4-pro":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true)},
+		"deepseek-v4.1-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true)},
+		"deepseek-v4-flash":   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
+		"deepseek-v3-2-volc":  {Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false)},
 	},
 	"poolside": {
-		"laguna-s-2.1":  {Reasoning: true, Tools: true},
-		"laguna-xs-2.1": {Reasoning: true, Tools: true},
+		"laguna-s-2.1":  {Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+		"laguna-xs-2.1": {Reasoning: true, Tools: true, ThinkingFormat: "openai"},
 	},
 }
 
 func init() {
-	kiroGpt56 := Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}
+	kiroGpt56 := Capabilities{
+		Vision: true, Reasoning: true, Search: true, Tools: true,
+		ThinkingFormat: "openai", ThinkingCanDisable: new(true),
+	}
 	providerCapabilities["kiro"] = map[string]Capabilities{
 		"gpt-5.6-sol":                    kiroGpt56,
 		"gpt-5.6-terra":                  kiroGpt56,
@@ -225,6 +247,16 @@ func init() {
 		"gpt-5.6-terra-thinking-agentic": kiroGpt56,
 		"gpt-5.6-luna-thinking-agentic":  kiroGpt56,
 	}
+
+	providerCapabilities["ollama"] = map[string]Capabilities{
+		"deepseek-v4.1-flash:cloud": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	}
+	providerCapabilities["opencode-go"] = map[string]Capabilities{
+		"glm-5.3-flash": {
+			Vision: true, VideoInput: true, PDF: true, Reasoning: true, Tools: true,
+			ThinkingFormat: "openai", ThinkingCanDisable: new(false),
+		},
+	}
 }
 
 type patternCapability struct {
@@ -233,98 +265,104 @@ type patternCapability struct {
 }
 
 var patternCapabilities = []patternCapability{
-	{"*claude*opus-5*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*opus-4.6*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*opus-4.7*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*opus-4.8*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*sonnet-4.6*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*sonnet-4.7*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*haiku*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*opus*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*sonnet*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*fable*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*claude*mythos*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
+	{"*claude*opus-5*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
+	{"*claude*opus-4.6*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
+	{"*claude*opus-4.7*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
+	{"*claude*opus-4.8*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
+	{"*claude*sonnet-4.6*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
+	{"*claude*sonnet-4.7*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"}},
+	{"*claude*haiku*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
+	{"*claude*opus*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
+	{"*claude*sonnet*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
+	{"*claude*fable*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
+	{"*claude*mythos*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 	{"*claude-3*", Capabilities{Vision: true, Tools: true}},
-	{"*claude*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
+	{"*claude*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 
 	{"*gemini*image*", Capabilities{Vision: true, ImageOutput: true, Tools: true}},
-	{"*gemini-3.8*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true}},
-	{"*gemini-3*pro*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true}},
-	{"*gemini-3*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true}},
-	{"*gemini-2.5*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true}},
+	{"*gemini-3.8*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
+	{"*gemini-3.7*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
+	{"*gemini-3*pro*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
+	{"*gemini-3*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
+	{"*gemini-2.5*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-budget", ThinkingRange: &ThinkingRange{Min: 0, Max: 24576}}},
 	{"*gemini-2*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Search: true, Tools: true}},
 	{"*gemini*", Capabilities{Vision: true, Search: true, Tools: true}},
 	{"*gemma*", Capabilities{Vision: true, Tools: true}},
 	{"*nanobanana*", Capabilities{Vision: true, ImageOutput: true, Tools: true}},
 
-	{"*gpt-6*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
+	{"*gpt-6*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"}},
 
 	{"*gpt-5*image*", Capabilities{ImageOutput: true, Tools: true}},
 	{"*gpt-image*", Capabilities{ImageOutput: true, Tools: true}},
-	{"*gpt-5*codex*", Capabilities{Reasoning: true, Search: true, Tools: true}},
-	{"*gpt-5*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
+	{"*gpt-5*codex*", Capabilities{Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*gpt-5*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"}},
 	{"*gpt-4o*", Capabilities{Vision: true, Search: true, Tools: true}},
 	{"*gpt-4.1*", Capabilities{Vision: true, Tools: true}},
 	{"*gpt-4-turbo*", Capabilities{Vision: true, Tools: true}},
 	{"*gpt-4*", Capabilities{Tools: true}},
 	{"*gpt-3.5*", Capabilities{Tools: true}},
-	{"*gpt-oss*", Capabilities{Reasoning: true, Tools: true}},
+	{"*gpt-oss*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
 	{"*solar-pro*", Capabilities{Reasoning: true, Tools: true}},
-	{"*longcat*", Capabilities{Reasoning: true, Tools: true}},
 
-	{"*o1-mini*", Capabilities{Reasoning: true, Tools: true}},
-	{"*o1*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
-	{"*o3*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
-	{"*o4*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
+	{"*o1-mini*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*o1*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*o3*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*o4*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
 
 	{"*grok*image*", Capabilities{ImageOutput: true, Tools: true}},
-	{"*grok-code*", Capabilities{Reasoning: true, Tools: true}},
-	{"*grok-4.5*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*grok-4*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*grok-3*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
-	{"*grok*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true}},
+	{"*grok-code*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*grok-4.6*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*grok-4.5*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*grok-4*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*grok-3*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*grok*", Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "openai"}},
 
-	{"*qwen*vl*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
-	{"*qwen*omni*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Tools: true}},
-	{"*qwen*coder*", Capabilities{Reasoning: true, Tools: true}},
-	{"*qwen*max*", Capabilities{Reasoning: true, Tools: true}},
-	{"*qwen3.5*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true}},
-	{"*qwen3.6*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true}},
-	{"*qwen3.7*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true}},
+	{"*qwen*vl*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
+	{"*qwen*omni*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
+	{"*qwen*coder*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
+	{"*qwen*max*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
+	{"*qwen3.5*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
+	{"*qwen3.6*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
+	{"*qwen3.7*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
 	{"*qwen3.8*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true}},
-	{"*qwen*plus*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
-	{"*qwen*235b*", Capabilities{Reasoning: true, Tools: true}},
-	{"*qwq*", Capabilities{Reasoning: true, Tools: true}},
-	{"*qwen*", Capabilities{Reasoning: true, Tools: true}},
+	{"*qwen*plus*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
+	{"*qwen*235b*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
+	{"*qwq*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "qwen", ThinkingCanDisable: new(false)}},
+	{"*qwen*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "qwen"}},
 
-	{"*kimi*k3*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true}},
-	{"*kimi*for-coding*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true}},
-	{"*kimi*k2.7*code*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true}},
-	{"*kimi*k2*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
-	{"*kimi*", Capabilities{Reasoning: true, Tools: true}},
+	{"*kimi*k3*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)}},
+	{"*kimi*for-coding*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)}},
+	{"*kimi*k2.7*code*", Capabilities{Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)}},
+	{"*kimi*k2*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi"}},
+	{"*kimi*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "kimi"}},
 
-	{"*glm-5*", Capabilities{Reasoning: true, Tools: true}},
-	{"*glm-4.7*", Capabilities{Reasoning: true, Tools: true}},
-	{"*glm-4*", Capabilities{Reasoning: true, Tools: true}},
-	{"*glm*", Capabilities{Reasoning: true, Tools: true}},
+	{"*glm-5.3*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingEffortSupported: true}},
+	{"*glm-5.2*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingEffortSupported: true}},
+	{"*glm-5*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "zai"}},
+	{"*glm-4.7*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "zai"}},
+	{"*glm-4*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "zai"}},
+	{"*glm*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "zai"}},
 	{"*z-ai*", Capabilities{Reasoning: true, Tools: true}},
 	{"*zai*", Capabilities{Reasoning: true, Tools: true}},
 
-	{"*deepseek-v4*", Capabilities{Reasoning: true, Tools: true}},
+	{"*deepseek-v4.*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true}},
+	{"*deepseek-v4*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true}},
 	{"*deepseek*flash*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
-	{"*reasoner*", Capabilities{Reasoning: true, Tools: true}},
-	{"*deepseek-r*", Capabilities{Reasoning: true, Tools: true}},
+	{"*reasoner*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingCanDisable: new(false)}},
+	{"*deepseek-r*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingCanDisable: new(false)}},
 	{"*deepseek-chat*", Capabilities{Tools: true}},
-	{"*deepseek*", Capabilities{Reasoning: true, Tools: true}},
+	{"*deepseek*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "deepseek"}},
 
 	{"*minimax*image*", Capabilities{ImageOutput: true, Tools: true}},
-	{"*minimax-m3*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
-	{"*minimax-m2.7*", Capabilities{Reasoning: true, Tools: true}},
-	{"*minimax*", Capabilities{Reasoning: true, Tools: true}},
+	{"*minimax-m3*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "minimax"}},
+	{"*minimax-m2.7*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "minimax", ThinkingCanDisable: new(false)}},
+	{"*minimax-m2.5*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "minimax", ThinkingCanDisable: new(false)}},
+	{"*minimax*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "minimax", ThinkingCanDisable: new(false)}},
 
-	{"*mimo*v2.5*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Tools: true}},
-	{"*mimo*omni*", Capabilities{Vision: true, AudioInput: true, Tools: true}},
-	{"*mimo*", Capabilities{Vision: true, Tools: true}},
+	{"*mimo*v2.6*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingCanDisable: new(false)}},
+	{"*mimo*v2.5*", Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingCanDisable: new(false)}},
+	{"*mimo*omni*", Capabilities{Vision: true, AudioInput: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingCanDisable: new(false)}},
+	{"*mimo*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingCanDisable: new(false)}},
 
 	{"*llama-4*", Capabilities{Vision: true, Tools: true}},
 	{"*llama*", Capabilities{Tools: true}},
@@ -340,15 +378,14 @@ var patternCapabilities = []patternCapability{
 	{"*pplx*", Capabilities{Search: true, Tools: true}},
 	{"*perplexity*", Capabilities{Search: true, Tools: true}},
 
-	{"*laguna-s-2.1*free*", Capabilities{Reasoning: true, Tools: true}},
-	{"*laguna-s-2.1*", Capabilities{Reasoning: true, Tools: true}},
-	{"*laguna*", Capabilities{Reasoning: true, Tools: true}},
+	{"*laguna-s-2.1*free*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*laguna-s-2.1*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*laguna*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
 
-	{"*hunyuan*", Capabilities{Reasoning: true, Tools: true}},
-	{"hy3*", Capabilities{Reasoning: true, Tools: true}},
-	{"*hy4*", Capabilities{Reasoning: true, Tools: true}},
-	{"*longcat*", Capabilities{Tools: true}},
-	{"*step-*", Capabilities{Reasoning: true, Tools: true}},
+	{"*muse*spark*", Capabilities{Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"}},
+	{"*hunyuan*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "hunyuan"}},
+	{"hy3*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "hunyuan"}},
+	{"*step-*", Capabilities{Reasoning: true, Tools: true, ThinkingFormat: "step"}},
 	{"*nemotron*", Capabilities{Reasoning: true, Tools: true}},
 	{"*ling-*", Capabilities{Reasoning: true, Tools: true}},
 	{"*muse-spark*", Capabilities{Vision: true, Reasoning: true, Tools: true}},
@@ -410,6 +447,18 @@ func GetCapabilitiesForModel(provider, model string) Capabilities {
 		baseModel = after
 	}
 
+	// CommandCode routes every model through one /alpha/generate wire, so the
+	// per-family patterns below (deepseek-v4 → vision:false, thinkingFormat
+	// deepseek, …) must not win here. Upstream short-circuits the same way
+	// (open-sse/providers/capabilities.js:570).
+	if isCommandCodeProvider(provider) {
+		res := commandCodeCapabilities(model)
+		capsCacheMu.Lock()
+		capsCache[key] = res
+		capsCacheMu.Unlock()
+		return res
+	}
+
 	// 1. Provider-specific override
 	var res Capabilities
 	resolved := false
@@ -452,7 +501,7 @@ func GetCapabilitiesForModel(provider, model string) Capabilities {
 	}
 
 	// 5. Dynamic synced catalog overlay (only ever turns capabilities ON)
-	if dynamic := GetCatalogModalities(model); dynamic != nil {
+	if dynamic := GetCatalogModalities(provider, model); dynamic != nil {
 		if dynamic.Vision {
 			res.Vision = true
 		}
@@ -566,7 +615,7 @@ func mergeCapabilities(base, overlay Capabilities) Capabilities {
 		// Let's just do a naive merge.
 	}
 	// For Go, since we define complete Capabilities structs in the maps with Tools: true where needed:
-	return Capabilities{
+	res := Capabilities{
 		Vision:      base.Vision || overlay.Vision,
 		PDF:         base.PDF || overlay.PDF,
 		AudioInput:  base.AudioInput || overlay.AudioInput,
@@ -576,7 +625,20 @@ func mergeCapabilities(base, overlay Capabilities) Capabilities {
 		Search:      base.Search || overlay.Search,
 		Tools:       overlay.Tools, // We made sure to set Tools:true in all overlays where it applies. If it's omitted, it becomes false. Wait, DefaultCapabilities has Tools=true. Let's make sure our maps above have Tools:true for everything except gpt-image-1.
 		Reasoning:   base.Reasoning || overlay.Reasoning,
+		// Thinking is a declaration, not a flag: an overlay that names no
+		// thinking format says nothing about thinking and must not clear the
+		// base ThinkingCanDisable=true. The whole block is taken from the
+		// overlay as soon as it declares a format, mirroring the JS spread
+		// where an absent key keeps the default.
+		ThinkingCanDisable: base.ThinkingCanDisable,
 	}
+	if overlay.ThinkingFormat != "" {
+		res.ThinkingFormat = overlay.ThinkingFormat
+		res.ThinkingCanDisable = overlay.ThinkingCanDisable
+		res.ThinkingRange = overlay.ThinkingRange
+		res.ThinkingEffortSupported = overlay.ThinkingEffortSupported
+	}
+	return res
 }
 
 // CapabilitiesDetail matches the serializable capabilities object expected by
@@ -663,11 +725,17 @@ func AggregateComboCapabilities(leaves []CapabilitiesDetail) (ComboCapabilities,
 // context_length / max_completion_tokens mirrors.
 func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 	caps := GetCapabilitiesForModel(provider, model)
-	// Upstream resolves limits from the models.dev-synced catalog keyed by
-	// provider + model before falling back to its pattern table and the
-	// DEFAULT_CAPABILITIES floor; the catalog is the authoritative source, so
-	// it wins here too and the substring table only fills the gaps.
-	cw, maxOut := GetCatalogLimits(provider, model)
+	// A provider entry that declares its own limits (CommandCode) is more
+	// specific than the catalog, so it wins. Everything else keeps the
+	// catalog-then-table-then-floor chain.
+	cw, maxOut := caps.ContextWindow, caps.MaxOutput
+	if cw == 0 && maxOut == 0 {
+		// Upstream resolves limits from the models.dev-synced catalog keyed by
+		// provider + model before falling back to its pattern table and the
+		// DEFAULT_CAPABILITIES floor; the catalog is the authoritative source, so
+		// it wins here too and the substring table only fills the gaps.
+		cw, maxOut = GetCatalogLimits(provider, model)
+	}
 	if cw == 0 && maxOut == 0 {
 		cw, maxOut = GetModelTokenLimits(model)
 	}
@@ -677,19 +745,30 @@ func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 	if cw == 0 {
 		cw = 128000
 	}
+	var thinkingFormat *string
+	if caps.ThinkingFormat != "" {
+		f := caps.ThinkingFormat
+		thinkingFormat = &f
+	}
+	var thinkingRange any
+	if caps.ThinkingRange != nil {
+		thinkingRange = caps.ThinkingRange
+	}
 	return CapabilitiesDetail{
-		Vision:             caps.Vision,
-		PDF:                caps.PDF,
-		AudioInput:         caps.AudioInput,
-		VideoInput:         caps.VideoInput,
-		ImageOutput:        caps.ImageOutput,
-		AudioOutput:        caps.AudioOutput,
-		Search:             caps.Search,
-		Tools:              caps.Tools,
-		Reasoning:          caps.Reasoning,
-		ThinkingCanDisable: true,
-		ThinkingRange:      nil,
-		ContextWindow:      cw,
-		MaxOutput:          maxOut,
+		Vision:                  caps.Vision,
+		PDF:                     caps.PDF,
+		AudioInput:              caps.AudioInput,
+		VideoInput:              caps.VideoInput,
+		ImageOutput:             caps.ImageOutput,
+		AudioOutput:             caps.AudioOutput,
+		Search:                  caps.Search,
+		Tools:                   caps.Tools,
+		Reasoning:               caps.Reasoning,
+		ThinkingFormat:          thinkingFormat,
+		ThinkingCanDisable:      canDisableThinking(caps),
+		ThinkingRange:           thinkingRange,
+		ThinkingEffortSupported: caps.ThinkingEffortSupported,
+		ContextWindow:           cw,
+		MaxOutput:               maxOut,
 	}
 }

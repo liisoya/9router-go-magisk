@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/go-chi/chi/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
 	github.com/google/uuid v1.6.0
 	github.com/samber/lo v1.53.0
 	github.com/spf13/viper v1.21.0

@@ -115,6 +115,8 @@
   let editingConn = $state<ProviderConnection | null>(null)
   let editConnName = $state('')
   let isEditingActive = $state(true)
+  // Non-null while a reorder request is in flight.
+  let reorderingConnId = $state<string | null>(null)
 
   async function handleToggleConnActive(conn: ProviderConnection) {
     try {
@@ -135,21 +137,24 @@
     }
   }
 
-  async function handleMovePriority(idx: number, delta: number) {
-    const targetIdx = idx + delta
-    if (targetIdx < 0 || targetIdx >= providerConns.length) return
-    const currentConn = providerConns[idx]
-    const targetConn = providerConns[targetIdx]
-    const currentPri = currentConn.priority ?? idx + 1
-    const targetPri = targetConn.priority ?? targetIdx + 1
+  // Single server-side transactional call instead of two independent PUTs:
+  // a partial failure between those two writes left two rows sharing a
+  // priority, and a stable sort over tied priorities made every later click a
+  // literal no-op. The in-flight flag also stops a second click from firing a
+  // swap computed from the same stale list.
+  async function handleMovePriority(idx: number, delta: -1 | 1) {
+    const conn = providerConns[idx]
+    if (!conn || reorderingConnId) return
+    const target = providerConns[idx + delta]
+    if (!target) return
+    reorderingConnId = conn.id
     try {
-      await Promise.all([
-        api.updateConnection(currentConn.id, { priority: targetPri }),
-        api.updateConnection(targetConn.id, { priority: currentPri })
-      ])
+      await api.reorderConnection(conn.id, delta < 0 ? 'up' : 'down')
       onRefresh()
     } catch (e) {
-      console.error('Failed to swap connection priority', e)
+      alert(`Reorder failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      reorderingConnId = null
     }
   }
 
@@ -712,18 +717,18 @@
                 <div class="flex flex-col items-center gap-0.5 shrink-0">
                   <button
                     type="button"
-                    disabled={idx === 0}
+                    disabled={idx === 0 || !!reorderingConnId}
                     onclick={() => handleMovePriority(idx, -1)}
-                    class="p-0.5 text-text-muted hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                    class="p-1 text-text-muted hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                     title="Move Up"
                   >
                     <span class="material-symbols-outlined text-sm">keyboard_arrow_up</span>
                   </button>
                   <button
                     type="button"
-                    disabled={idx === providerConns.length - 1}
+                    disabled={idx === providerConns.length - 1 || !!reorderingConnId}
                     onclick={() => handleMovePriority(idx, 1)}
-                    class="p-0.5 text-text-muted hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                    class="p-1 text-text-muted hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                     title="Move Down"
                   >
                     <span class="material-symbols-outlined text-sm">keyboard_arrow_down</span>

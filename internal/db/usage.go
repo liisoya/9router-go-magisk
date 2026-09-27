@@ -73,6 +73,33 @@ func (r *Repo) UpdateConnectionLastUsed(connectionID string) error {
 	return nil
 }
 
+// RotationTimestampFormat is a fixed-width RFC3339 with nanoseconds. The
+// round-robin selector compares lastUsedAt as a string to stay allocation-free
+// on the hot path, and that only works if the fractional part is zero-padded to
+// a constant width: time.RFC3339Nano trims trailing zeros, which would make
+// "…:00.5Z" sort after "…:00.500000001Z". Seconds are not enough either — two
+// picks landing in the same second tie, and the tie-break would hand the same
+// account back on every request.
+const RotationTimestampFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+// TouchConnectionRotation stamps a connection as the one just selected by the
+// persistent round-robin and sets its consecutive-use counter to exactly
+// `consecutive` (1 for a fresh pick, previous+1 while a sticky window holds).
+// It deliberately sets the counter rather than incrementing it: the selector
+// decides the value from the row it read, and a lost race should converge on a
+// fresh window rather than drift upward forever.
+func (r *Repo) TouchConnectionRotation(connectionID string, consecutive int) error {
+	now := time.Now().UTC().Format(RotationTimestampFormat)
+	_, err := r.db.Exec(
+		`UPDATE providerConnections SET lastUsedAt = ?, consecutiveUseCount = ? WHERE id = ?`,
+		now, consecutive, connectionID,
+	)
+	if err != nil {
+		return fmt.Errorf("touch connection rotation %s: %w", connectionID, err)
+	}
+	return nil
+}
+
 // UsageHistoryRow represents a record from the usageHistory table.
 type UsageHistoryRow struct {
 	Timestamp        string

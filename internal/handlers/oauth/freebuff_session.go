@@ -332,14 +332,5 @@ func updateConnectionFreebuffModel(repo *db.Repo, conn *models.ProviderConnectio
 	if err != nil {
 		return
 	}
-	conn.Data = string(newData)
-	name := ""
-	if conn.Name != nil {
-		name = *conn.Name
-	}
-	priority := 1
-	if conn.Priority != nil {
-		priority = *conn.Priority
-	}
-	_ = repo.UpdateProviderConnection(conn.ID, name, priority, conn.IsActive == 1, string(newData))
+	_ = repo.UpdateConnectionData(conn.ID, string(newData))
 }

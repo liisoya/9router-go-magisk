@@ -198,10 +198,8 @@ func EnsureCoreSchema(db *sql.DB) error {
 			return err
 		}
 	}
-	for _, c := range goOnlyColumns {
-		if err := addColumnIfMissing(db, c[0], c[1], c[2]); err != nil {
-			return err
-		}
+	if err := EnsureAdditiveColumns(db); err != nil {
+		return err
 	}
 	if _, err := db.Exec(
 		`INSERT OR IGNORE INTO _meta(key, value) VALUES('schemaVersion', '1')`,
@@ -212,6 +210,19 @@ func EnsureCoreSchema(db *sql.DB) error {
 		`INSERT OR IGNORE INTO settings(id, data) VALUES(1, '{}')`,
 	); err != nil {
 		return fmt.Errorf("core schema: seed settings: %w", err)
+	}
+	return nil
+}
+
+// EnsureAdditiveColumns adds the Go-only columns to a database whose tables
+// were created from the upstream core schema alone. Exported so test fixtures
+// built from dbtest.CreateTables get the same shape as a real database instead
+// of silently missing the round-robin bookkeeping columns.
+func EnsureAdditiveColumns(db *sql.DB) error {
+	for _, c := range goOnlyColumns {
+		if err := addColumnIfMissing(db, c[0], c[1], c[2]); err != nil {
+			return err
+		}
 	}
 	return nil
 }

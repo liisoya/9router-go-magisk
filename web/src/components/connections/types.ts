@@ -65,6 +65,25 @@ export function getIconPath(id?: string | null, apiType?: string): string {
   return apiType === 'responses' ? '/providers/oai-r.png' : '/providers/oai-cc.png'
 }
 
+// Provider initials badge, used when a provider has no shipped PNG. The
+// catalog already carries a brand colour for every entry, so the badge is drawn
+// in the provider's own colour rather than a neutral grey — the tile reads as
+// intentional instead of as a failed image load.
+export function getProviderGlyph(
+  id?: string | null
+): { name: string; color: string; initials: string } {
+  const clean = id?.trim()
+  const entry = clean
+    ? (PROVIDER_CATALOG_MAP.get(clean) ?? PROVIDER_CATALOG.find((p) => p.alias === clean))
+    : undefined
+  const name = entry?.name ?? clean ?? 'OpenAI'
+  // Take the initials of the leading words, so "B.AI" reads "BA" rather than
+  // collapsing to a single letter, and "Dahl Inference" reads "DI".
+  const words = name.split(/[\s._/-]+/).filter(Boolean)
+  const initials = (words.length > 1 ? words[0][0] + words[1][0] : words[0]?.slice(0, 2) ?? '?').toUpperCase()
+  return { name, color: entry?.color ?? '#6B7280', initials }
+}
+
 export function getProviderStats(
   connections: ProviderConnection[],
   providerId: string,
@@ -96,9 +115,19 @@ export function matchesFilter(stats: ProviderStats, statusFilter: string, noAuth
   return true
 }
 
-export function matchesSearch(name: string, searchQuery: string): boolean {
-  if (!searchQuery.trim()) return true
-  return name.toLowerCase().includes(searchQuery.trim().toLowerCase())
+// matchesSearch matches a provider by display name, id, and alias.
+// Matching the name alone made providers unsearchable by their own identifier:
+// typing "bai" returned "Baidu Qianfan" (a substring collision) but never "B.AI",
+// and "atria-asi" / "tokenharbor" returned nothing at all — the user then
+// concluded the provider was missing and built a custom node instead.
+export function matchesSearch(
+  name: string,
+  searchQuery: string,
+  ...identifiers: (string | null | undefined)[]
+): boolean {
+  const q = searchQuery.trim().toLowerCase()
+  if (!q) return true
+  return [name, ...identifiers].some((v) => v && v.toLowerCase().includes(q))
 }
 
 export async function fetchProviderModelsData(
@@ -158,6 +187,10 @@ export async function fetchSuggestedModels(fetcher: {
   }
 }
 
+/**
+ * Catalog rows first, custom models appended after — upstream keeps the registry
+ * list in its own order and treats custom models as additions to it.
+ */
 export function buildAvailableModels(
   builtInModels: Array<{ id: string; name?: string; kind?: string; type?: string }>,
   providerCustomModels: CustomModelData[]
@@ -165,17 +198,6 @@ export function buildAvailableModels(
   const list: ModelItem[] = []
   const seen = new Set<string>()
 
-  for (const cm of providerCustomModels) {
-    if (!cm.id || seen.has(cm.id)) continue
-    seen.add(cm.id)
-    list.push({
-      id: cm.id,
-      name: cm.name || cm.id,
-      isCustom: true,
-      caps: getModelCaps(cm.id, cm),
-      kind: getModelKind(cm),
-    })
-  }
   for (const bm of builtInModels) {
     if (!bm.id || seen.has(bm.id)) continue
     seen.add(bm.id)
@@ -185,6 +207,17 @@ export function buildAvailableModels(
       isCustom: false,
       caps: getModelCaps(bm.id, bm),
       kind: getModelKind(bm),
+    })
+  }
+  for (const cm of providerCustomModels) {
+    if (!cm.id || seen.has(cm.id)) continue
+    seen.add(cm.id)
+    list.push({
+      id: cm.id,
+      name: cm.name || cm.id,
+      isCustom: true,
+      caps: getModelCaps(cm.id, cm),
+      kind: getModelKind(cm),
     })
   }
   return list

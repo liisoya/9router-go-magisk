@@ -412,8 +412,8 @@ func validateProviderKey(ctx context.Context, provider string, cfg providers.Pro
 		return validateGrokWeb(ctx, apiKey)
 	case "perplexity-web":
 		return validatePerplexityWeb(ctx, apiKey)
-	case "qoder":
-		return validateQoder(ctx, apiKey, psd)
+	case "qoder", "qoder-cn":
+		return validateQoder(ctx, provider, apiKey, psd)
 	}
 
 	if isAnthropicProbe(cfg) {
@@ -731,19 +731,40 @@ func validatePerplexityWeb(ctx context.Context, apiKey string) validateOutcome {
 
 // --- qoder: PAT → job token → COSY-signed model list (upstream `case "qoder"`) ---
 
-const (
-	qoderJobTokenExchangeURL = "https://openapi.qoder.sh/api/v1/jobToken/exchange"
-	qoderUserinfoURL         = "https://openapi.qoder.sh/api/v1/userinfo"
-	qoderModelListURLBase    = "https://api3.qoder.sh/algo/api/v2/model/list"
-	// Job-token traffic is rejected by api3 ("Login expired" 403) — the official
-	// qodercli serves it from api2 instead.
-	qoderModelListURLBaseAlt = "https://api2.qoder.sh/algo/api/v2/model/list"
-	qoderProbeUserAgent      = "qodercli/1.0.0"
-)
+// qoderEndpoints holds the hosts a Qoder deployment serves. Qoder and Qoder CN
+// are separate deployments with separate credentials, so each keeps its own
+// set; neither is ever routed to the other.
+type qoderEndpoints struct {
+	jobTokenExchangeURL string
+	userinfoURL         string
+	modelListURL        string
+	// Job-token traffic is rejected by the primary host ("Login expired" 403)
+	// — the official qodercli serves it from the alt host instead.
+	modelListURLAlt string
+}
+
+func qoderEndpointsFor(provider string) qoderEndpoints {
+	if provider == "qoder-cn" {
+		return qoderEndpoints{
+			jobTokenExchangeURL: "https://openapi.qoder.com.cn/api/v1/jobToken/exchange",
+			userinfoURL:         "https://openapi.qoder.com.cn/api/v1/userinfo",
+			modelListURL:        "https://gateway.qoder.com.cn/algo/api/v2/model/list",
+		}
+	}
+	return qoderEndpoints{
+		jobTokenExchangeURL: "https://openapi.qoder.sh/api/v1/jobToken/exchange",
+		userinfoURL:         "https://openapi.qoder.sh/api/v1/userinfo",
+		modelListURL:        "https://api3.qoder.sh/algo/api/v2/model/list",
+		modelListURLAlt:     "https://api2.qoder.sh/algo/api/v2/model/list",
+	}
+}
+
+const qoderProbeUserAgent = "qodercli/1.0.0"
 
 func isQoderPAT(token string) bool { return strings.HasPrefix(token, "pt-") }
 
-func validateQoder(ctx context.Context, apiKey string, psd map[string]any) validateOutcome {
+func validateQoder(ctx context.Context, provider, apiKey string, psd map[string]any) validateOutcome {
+	ep := qoderEndpointsFor(provider)
 	token := strings.TrimSpace(apiKey)
 	if token == "" {
 		token = psdStr(psd, "accessToken")
@@ -755,13 +776,13 @@ func validateQoder(ctx context.Context, apiKey string, psd map[string]any) valid
 
 	if isQoderPAT(token) {
 		// A PAT cannot sign COSY requests — exchange it for a job token first.
-		jobToken, err := exchangeQoderJobToken(ctx, token)
+		jobToken, err := exchangeQoderJobToken(ctx, ep.jobTokenExchangeURL, token)
 		if err != nil {
 			return validateOutcome{supported: true, message: err.Error()}
 		}
 		token = jobToken
 		if userID == "" {
-			userID = fetchQoderUserID(ctx, jobToken)
+			userID = fetchQoderUserID(ctx, ep.userinfoURL, jobToken)
 		}
 	}
 	if userID == "" {
@@ -769,9 +790,9 @@ func validateQoder(ctx context.Context, apiKey string, psd map[string]any) valid
 		return validateOutcome{supported: true, message: "Qoder user ID missing — re-login or paste a PAT"}
 	}
 
-	modelListURL := qoderModelListURLBase
-	if strings.HasPrefix(token, "jt-") {
-		modelListURL = qoderModelListURLBaseAlt
+	modelListURL := ep.modelListURL
+	if strings.HasPrefix(token, "jt-") && ep.modelListURLAlt != "" {
+		modelListURL = ep.modelListURLAlt
 	}
 	headers, err := executor.BuildQoderCosyHeaders(nil, modelListURL, userID, token)
 	if err != nil {
@@ -795,9 +816,9 @@ func validateQoder(ctx context.Context, apiKey string, psd map[string]any) valid
 
 // exchangeQoderJobToken trades a PAT (pt-...) for a short-lived job token
 // (jt-...). Plain JSON POST, not COSY-signed (upstream exchangeJobToken).
-func exchangeQoderJobToken(ctx context.Context, pat string) (string, error) {
+func exchangeQoderJobToken(ctx context.Context, exchangeURL, pat string) (string, error) {
 	payload, _ := json.Marshal(map[string]string{"personal_token": pat})
-	status, body, err := validateProbeDo(ctx, http.MethodPost, qoderJobTokenExchangeURL, map[string]string{
+	status, body, err := validateProbeDo(ctx, http.MethodPost, exchangeURL, map[string]string{
 		"Content-Type":    "application/json",
 		"Accept":          "application/json",
 		"User-Agent":      qoderProbeUserAgent,
@@ -823,8 +844,8 @@ func exchangeQoderJobToken(ctx context.Context, pat string) (string, error) {
 
 // fetchQoderUserID resolves the userId a job token belongs to. Best-effort:
 // upstream returns "" on any failure and callers fall back to the stored id.
-func fetchQoderUserID(ctx context.Context, jobToken string) string {
-	status, body, err := validateProbeDo(ctx, http.MethodGet, qoderUserinfoURL, map[string]string{
+func fetchQoderUserID(ctx context.Context, userinfoURL, jobToken string) string {
+	status, body, err := validateProbeDo(ctx, http.MethodGet, userinfoURL, map[string]string{
 		"Authorization": "Bearer " + jobToken,
 		"Accept":        "application/json",
 		"User-Agent":    qoderProbeUserAgent,

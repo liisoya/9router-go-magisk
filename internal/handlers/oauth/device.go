@@ -18,7 +18,7 @@ import (
 // deviceProviders lists providers supporting the device-code family.
 // kimi-coding aliases to kimi (dual-auth merge, like upstream).
 var deviceProviders = []string{
-	"qoder", "kilocode", "grok-cli", "github", "kiro", "kimi", "kimi-coding",
+	"qoder", "qoder-cn", "kilocode", "grok-cli", "github", "kiro", "kimi", "kimi-coding",
 	"codebuddy-cn", "codebuddy-intl",
 }
 
@@ -171,8 +171,8 @@ func (h *OAuthHandler) HandleDeviceStart(w http.ResponseWriter, r *http.Request)
 
 func deviceStart(provider, region, startURL, authMethod string) (map[string]any, error) {
 	switch provider {
-	case "qoder":
-		return qoderStart()
+	case "qoder", "qoder-cn":
+		return qoderStart(provider)
 	case "kilocode":
 		return kilocodeStart()
 	case "grok-cli":
@@ -192,18 +192,28 @@ func deviceStart(provider, region, startURL, authMethod string) (map[string]any,
 
 // --- qoder: local PKCE + nonce, poll openapi.qoder.sh ---
 
-func qoderStart() (map[string]any, error) {
+// qoderLoginURL is the account-selection page for the provider's own
+// deployment; Qoder CN signs in on qoder.com.cn.
+func qoderLoginURL(provider string) string {
+	if provider == "qoder-cn" {
+		return "https://qoder.com.cn/device/selectAccounts"
+	}
+	return "https://qoder.com/device/selectAccounts"
+}
+
+func qoderStart(provider string) (map[string]any, error) {
 	verifier := pkceVerifier()
 	challenge := sha256Base64(verifier)
 	nonce, machineID := randomUUID(), randomUUID()
+	loginURL := qoderLoginURL(provider)
 	p := url.Values{
 		"challenge": {challenge}, "challenge_method": {"S256"},
 		"machine_id": {machineID}, "nonce": {nonce},
 	}
 	return map[string]any{
 		"device_code": nonce, "user_code": strings.ToUpper(firstN(nonce, 8)),
-		"verification_uri":          "https://qoder.com/device/selectAccounts",
-		"verification_uri_complete": "https://qoder.com/device/selectAccounts?" + p.Encode(),
+		"verification_uri":          loginURL,
+		"verification_uri_complete": loginURL + "?" + p.Encode(),
 		"expires_in":                300, "interval": 2,
 		"session": map[string]any{"nonce": nonce, "verifier": verifier, "machineId": machineID},
 	}, nil
@@ -427,8 +437,8 @@ func devicePoll(provider, code string, session map[string]any) (deviceTokens, st
 	var t deviceTokens
 	var err error
 	switch provider {
-	case "qoder":
-		t, err = qoderPoll(session, code)
+	case "qoder", "qoder-cn":
+		t, err = qoderPoll(provider, session, code)
 	case "kilocode":
 		t, err = kilocodePoll(code)
 	case "grok-cli":
@@ -468,7 +478,7 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 		email = extractEmailFromJWT(t.access)
 	}
 	name := connectionDisplayName(provider, t.name, email, map[string]string{
-		"qoder": "Qoder", "kilocode": "KiloCode", "grok-cli": "Grok CLI",
+		"qoder": "Qoder", "qoder-cn": "Qoder CN", "kilocode": "KiloCode", "grok-cli": "Grok CLI",
 		"github": "GitHub", "kiro": "Kiro", "kimi": "Kimi",
 		"codebuddy-cn": "CodeBuddy", "codebuddy-intl": "CodeBuddy",
 	}[provider])
@@ -512,14 +522,23 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 
 // --- polls ---
 
-func qoderPoll(session map[string]any, nonce string) (deviceTokens, error) {
+// qoderOpenAPIBase is the openapi host for the provider's own deployment.
+func qoderOpenAPIBase(provider string) string {
+	if provider == "qoder-cn" {
+		return "https://openapi.qoder.com.cn"
+	}
+	return "https://openapi.qoder.sh"
+}
+
+func qoderPoll(provider string, session map[string]any, nonce string) (deviceTokens, error) {
 	var t deviceTokens
 	verifier, _ := session["verifier"].(string)
 	machineID, _ := session["machineId"].(string)
 	if nonce == "" || verifier == "" {
 		return t, fmt.Errorf("invalid_request: missing nonce/verifier")
 	}
-	u := "https://openapi.qoder.sh/api/v1/deviceToken/poll?nonce=" + url.QueryEscape(nonce) +
+	openapi := qoderOpenAPIBase(provider)
+	u := openapi + "/api/v1/deviceToken/poll?nonce=" + url.QueryEscape(nonce) +
 		"&verifier=" + url.QueryEscape(verifier) + "&challenge_method=S256"
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
 	req.Header.Set("Accept", "application/json")
@@ -548,7 +567,7 @@ func qoderPoll(session map[string]any, nonce string) (deviceTokens, error) {
 	t.access = token
 	t.refresh = strVal(data, "refresh_token")
 	t.extra = map[string]any{"machineId": machineID}
-	if ui, _, _ := getJSON("https://openapi.qoder.sh/api/v1/userinfo",
+	if ui, _, _ := getJSON(openapi+"/api/v1/userinfo",
 		map[string]string{"Authorization": "Bearer " + token, "User-Agent": "Go-http-client/2.0"}); ui != nil {
 		t.name = strVal(ui, "name", "username")
 		t.email = strVal(ui, "email")

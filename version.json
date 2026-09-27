@@ -1,5 +1,5 @@
 {
   "downloadUrl": "https://github.com/luqman-v1/9router-go/releases/latest",
-  "latestVersion": "1.9.3",
-  "releaseNotes": "v1.9.3: Kiro fixes (403 bearer token from wrong credential, endpoint rotation, end-to-end tool calling); /v1/models ported to upstream Next.js buildModelsList (live catalogs, registry + media kinds, upstream alias prefixes, identical response shape); GetCombos connection-pool deadlock fixed; singleflight for live catalog; dashboard model catalog synced with upstream registry."
+  "latestVersion": "1.9.4",
+  "releaseNotes": "v1.9.4: Dashboard issue #24 - Apply Proxy modal made scrollable with pool filter, progress and a working Stop; connection reorder moved to a single atomic server-side call (one transaction, contiguous 1..N) so a failed swap can no longer wedge an account pair forever; NULL connection priority no longer rewritten to 0 by unrelated edits; pinned connections now honour disable/exclusion/model-locks; round-robin is persisted per connection (upstream least-recently-used) and survives restarts. Provider search matches id and alias; qoder-cn registered end to end; bai/atria/dahl/agnes/tokenharbor/qoder-cn logos ported from upstream. Also: Gemini Live realtime STT, Claude session-id/beta/rate-limit header parity, full upstream pricing table, Codex OAuth loopback fix, upstream v0.5.86..v0.5.91 sync (Gemini turns, Claude thinking text, usage by API key)."
 }

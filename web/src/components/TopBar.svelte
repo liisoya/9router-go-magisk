@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../api/client'
+  import ProviderIcon from './connections/ProviderIcon.svelte'
   import ChangelogModal from './ChangelogModal.svelte'
   import { type ActiveTab } from '../lib/router'
   import { promptInstall, subscribeInstallPrompt } from '../lib/pwa'
@@ -227,7 +228,7 @@
         <div class="flex items-center gap-2 min-w-0">
           <span class="material-symbols-outlined text-text-muted text-base">chevron_right</span>
           <div class="flex items-center gap-2 min-w-0">
-            <img src={selectedProvider.icon} alt={selectedProvider.name} class="size-5 rounded object-contain" />
+            <ProviderIcon id={selectedProvider.id} size="sm" />
             <h1 class="text-base lg:text-2xl font-semibold text-text-main tracking-tight truncate">
               {selectedProvider.name}
             </h1>

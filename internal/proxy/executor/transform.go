@@ -222,6 +222,7 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 				}
 			}
 
+			applyCodexModelShape(m, cleanModel)
 			out, err := json.Marshal(m)
 			return out, cleanModel, err
 		}
@@ -440,6 +441,7 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 		}
 	}
 
+	applyCodexModelShape(respReq, cleanModel)
 	reqBody, err := json.Marshal(respReq)
 	return reqBody, cleanModel, err
 }

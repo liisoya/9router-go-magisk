@@ -182,14 +182,24 @@ func buildQoderCosyHeaders(body []byte, requestURL string, userID string, token 
 	return headers, nil
 }
 
-// ForwardQoder handles requests for Qoder using COSY signing.
+// ForwardQoder handles requests for Qoder using COSY signing. The chat
+// endpoint comes from the provider's own registry config, so Qoder and
+// Qoder CN each talk to their own gateway (upstream registry transport.baseUrl)
+// without either provider being aliased onto the other.
 func ForwardQoder(w http.ResponseWriter, req *Request) error {
-	headers, err := buildQoderCosyHeaders(req.Body, "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation", "", req.APIKey)
+	endpoint := ""
+	if req.Config != nil {
+		endpoint = req.Config.BaseURL
+	}
+	if endpoint == "" {
+		endpoint = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation"
+	}
+	headers, err := buildQoderCosyHeaders(req.Body, endpoint, "", req.APIKey)
 	if err != nil {
 		return fmt.Errorf("build Qoder COSY headers: %w", err)
 	}
 
-	targetURL := "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common"
+	targetURL := endpoint + "?FetchKeys=llm_model_result&AgentId=agent_common"
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()

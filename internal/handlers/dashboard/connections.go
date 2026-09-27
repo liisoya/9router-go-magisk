@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	json "encoding/json/v2"
 	"fmt"
 	"io"
@@ -12,9 +13,11 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/samber/lo"
 
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/models"
+	"9router/proxy/internal/providers"
 )
 
 // HandleGetConnections handles GET /api/connections.
@@ -138,7 +141,7 @@ var usageSupportedProviders = []string{
 	"antigravity", "claude", "codebuddy-cn", "codebuddy-intl", "codex",
 	"commandcode", "deepseek", "gemini-cli", "github", "glm", "glm-cn",
 	"grok-cli", "groq", "kimi", "kiro", "minimax", "minimax-cn", "ollama",
-	"opencode-go", "qoder", "trae", "vercel-ai-gateway", "xiaomi-mimo", "zed",
+	"opencode-go", "qoder", "qoder-cn", "trae", "vercel-ai-gateway", "xiaomi-mimo", "zed",
 }
 
 // usageApikeyProviders mirrors upstream USAGE_APIKEY_PROVIDERS
@@ -146,7 +149,7 @@ var usageSupportedProviders = []string{
 var usageApikeyProviders = []string{
 	"codebuddy-cn", "codebuddy-intl", "commandcode", "deepseek", "glm",
 	"glm-cn", "groq", "kimi", "kiro", "minimax", "minimax-cn", "ollama",
-	"opencode-go", "qoder", "vercel-ai-gateway", "xiaomi-mimo",
+	"opencode-go", "qoder", "qoder-cn", "vercel-ai-gateway", "xiaomi-mimo",
 }
 
 func strSliceContains(list []string, v string) bool {
@@ -309,6 +312,11 @@ type createConnectionRequest struct {
 	DefaultModel         string         `json:"defaultModel"`
 	ProviderSpecificData map[string]any `json:"providerSpecificData"`
 	Data                 any            `json:"data"`
+	// AllowOverwrite (or its legacy `overwrite` spelling) states that a
+	// name collision is intended. A request carrying an id is already an
+	// explicit edit and never needs the flag.
+	AllowOverwrite bool `json:"allowOverwrite"`
+	Overwrite      bool `json:"overwrite"`
 }
 
 // HandleCreateConnection handles POST /api/connections.
@@ -334,7 +342,11 @@ func (h *DashboardHandler) HandleCreateConnection(w http.ResponseWriter, r *http
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing provider")
 		return
 	}
-	if req.ID == "" {
+	// An id in the body means the caller is editing a known connection; its
+	// absence is what makes this a create, and a create must not quietly
+	// replace an existing one.
+	explicitID := req.ID != ""
+	if !explicitID {
 		req.ID = uuid.New().String()
 	}
 	if req.AuthType == "" {
@@ -382,6 +394,45 @@ func (h *DashboardHandler) HandleCreateConnection(w http.ResponseWriter, r *http
 			return
 		}
 		dataStr = string(encoded)
+	}
+
+	// A create that reuses a name that is already in use used to replace the
+	// stored key without a word: a script naming rows "Key 1", "Key 2", … kept
+	// the existing pool entries and handed back a success. A caller that means
+	// "change the key behind this name" passes an id or an explicit overwrite;
+	// everyone else gets a typed 409 naming the row that would have been
+	// replaced. #4311
+	if !explicitID && req.AuthType == "apikey" && name != "" {
+		existing, err := h.Repo.GetProviderConnectionByName(req.Provider, req.AuthType, name)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if existing != nil {
+			if !req.AllowOverwrite && !req.Overwrite {
+				handlerutil.WriteJSON(w, http.StatusConflict, map[string]any{
+					"error": "A connection named \"" + name + "\" already exists for provider \"" +
+						req.Provider + "\". Pass allowOverwrite: true to replace it.",
+					"code":         "PROVIDER_NAME_CONFLICT",
+					"existingId":   existing.ID,
+					"existingName": existing.Name,
+				})
+				return
+			}
+			// Overwriting rewrites the row in place, keeping its id and its
+			// place in the rotation; adding a second row with the same name would
+			// leave the account picker with two candidates it cannot tell apart.
+			if err := h.Repo.ReplaceProviderConnectionPayload(existing.ID, name, dataStr); err != nil {
+				handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+				"status":   "ok",
+				"id":       existing.ID,
+				"replaced": existing.ID,
+			})
+			return
+		}
 	}
 
 	if err := h.Repo.CreateProviderConnectionFull(req.ID, req.Provider, req.AuthType, name, req.Priority, dataStr); err != nil {
@@ -506,11 +557,13 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	} else if existing.Name != nil {
 		name = *existing.Name
 	}
-	priority := 0
+	// A NULL priority must stay NULL. Defaulting it to 0 would sort this row
+	// ahead of every other account (0 beats every positive rank) and silently
+	// promote it to the top of the rotation on any unrelated edit — rename,
+	// proxy assignment, model assignment.
+	priority := existing.Priority
 	if p, ok := rawBody["priority"].(float64); ok {
-		priority = int(p)
-	} else if existing.Priority != nil {
-		priority = *existing.Priority
+		priority = lo.ToPtr(int(p))
 	}
 	isActive := existing.IsActive == 1
 	if hasIsActive {
@@ -594,6 +647,67 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	}
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
+}
+
+// HandleReorderConnection handles POST /api/connections/{id}/reorder.
+// Body: {"direction": "up"|"down"}.
+//
+// The whole swap plus the 1..N renumbering happens in one SQLite transaction,
+// so the pool can never end up with two rows sharing a priority. See
+// Repo.ReorderProviderConnections for why the previous two-PUT client swap was
+// not safe.
+func (h *DashboardHandler) HandleReorderConnection(w http.ResponseWriter, r *http.Request) {
+	id := getURLParam(r, "id")
+	if id == "" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing connection id")
+		return
+	}
+
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	var body struct {
+		Direction string `json:"direction"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	direction := 0
+	switch strings.ToLower(strings.TrimSpace(body.Direction)) {
+	case "up":
+		direction = -1
+	case "down":
+		direction = 1
+	default:
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, `direction must be "up" or "down"`)
+		return
+	}
+
+	conn, err := h.Repo.GetProviderConnectionByID(id)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if conn == nil {
+		handlerutil.WriteJSONError(w, http.StatusNotFound, "connection not found")
+		return
+	}
+
+	if err := h.Repo.ReorderProviderConnections(conn.Provider, id, direction); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	conns, err := h.Repo.GetProviderConnections(conn.Provider, false)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id, "connections": conns})
 }
 
 func mergeMapField(target map[string]any, key string, source map[string]any) {
@@ -834,10 +948,54 @@ func (h *DashboardHandler) HandleGetConnectionModels(w http.ResponseWriter, r *h
 		if len(models) == 0 {
 			models = clineResp.Models
 		}
+
+		// The free tier is published on a separate feed: /api/v1/models carries
+		// no `cline-free/*` ids at all. The feed is additive and a dead feed must
+		// never take the catalogue down with it, so ids already present win —
+		// the same "first writer wins" rule upstream uses.
+		models = mergeClineFreeTier(models, clineFreeTierModels(r.Context()))
 		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 			"provider":     conn.Provider,
 			"connectionId": conn.ID,
 			"models":       models,
+		})
+		return
+	}
+
+	// OpenAI-compatible aggregators with a live /v1/models catalogue. The
+	// connection's key is the only credential these need.
+	if listURL := providers.ModelsListURL(conn.Provider); listURL != "" {
+		token := connData.APIKey
+		if token == "" {
+			token = connData.AccessToken
+		}
+		if token == "" {
+			handlerutil.WriteJSONError(w, http.StatusUnauthorized, "no API key configured")
+			return
+		}
+		headers := map[string]string{"Authorization": "Bearer " + token}
+		status, body, err := validateProbeDo(r.Context(), http.MethodGet, listURL, headers, nil)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to fetch models: "+err.Error())
+			return
+		}
+		if status != http.StatusOK {
+			handlerutil.WriteJSONError(w, status, fmt.Sprintf("failed to fetch models: %d", status))
+			return
+		}
+		var listResp struct {
+			Data   []any `json:"data"`
+			Models []any `json:"models"`
+		}
+		_ = json.Unmarshal(body, &listResp)
+		items := listResp.Data
+		if len(items) == 0 {
+			items = listResp.Models
+		}
+		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+			"provider":     conn.Provider,
+			"connectionId": conn.ID,
+			"models":       items,
 		})
 		return
 	}
@@ -902,4 +1060,68 @@ func (h *DashboardHandler) HandleGetConnectionModels(w http.ResponseWriter, r *h
 		"connectionId": conn.ID,
 		"models":       models,
 	})
+}
+
+// clineFreeTierEndpoint publishes Cline's free tier. The main /api/v1/models
+// catalogue carries no `cline-free/*` ids, so the tier has to come from here.
+// Upstream: open-sse/services/clinepassModels.js (v0.5.91).
+const clineFreeTierEndpoint = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
+
+// clineFreeTierModels returns the recommended-models feed's free[] tier, or nil
+// on any failure — the tier is additive, so a dead feed must not break the
+// catalogue the caller already has.
+func clineFreeTierModels(ctx context.Context) []any {
+	status, body, err := validateProbeDo(
+		ctx, http.MethodGet, clineFreeTierEndpoint,
+		map[string]string{"Accept": "application/json"}, nil,
+	)
+	if err != nil || status != http.StatusOK {
+		return nil
+	}
+	var feed struct {
+		Free []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"free"`
+	}
+	if err := json.Unmarshal(body, &feed); err != nil {
+		return nil
+	}
+	out := make([]any, 0, len(feed.Free))
+	for _, m := range feed.Free {
+		if strings.TrimSpace(m.ID) == "" {
+			continue
+		}
+		name := m.Name
+		if name == "" {
+			name = m.ID
+		}
+		out = append(out, map[string]any{"id": m.ID, "name": name})
+	}
+	return out
+}
+
+// mergeClineFreeTier appends the free-tier entries the catalogue is missing.
+// First writer wins on a shared id, so anything the two sources agree on keeps
+// the catalogue's own entry.
+func mergeClineFreeTier(catalogue, free []any) []any {
+	if len(free) == 0 {
+		return catalogue
+	}
+	present := make(map[string]bool, len(catalogue))
+	for _, m := range catalogue {
+		if mm, ok := m.(map[string]any); ok {
+			if id, ok := mm["id"].(string); ok {
+				present[id] = true
+			}
+		}
+	}
+	for _, m := range free {
+		mm, _ := m.(map[string]any)
+		id, _ := mm["id"].(string)
+		if !present[id] {
+			catalogue = append(catalogue, m)
+		}
+	}
+	return catalogue
 }

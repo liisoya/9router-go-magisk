@@ -14,7 +14,6 @@ import (
 
 func TestApplyConnectionStrategy_RoundRobin(t *testing.T) {
 	h := NewChatHandler(nil)
-	h.ResetConnectionState("")
 
 	c1 := &models.ProviderConnection{ID: "conn-1"}
 	c2 := &models.ProviderConnection{ID: "conn-2"}
@@ -24,25 +23,25 @@ func TestApplyConnectionStrategy_RoundRobin(t *testing.T) {
 	strat := db.ProviderStrategy{RotateStrategy: "round-robin"}
 
 	// 1st request -> c1
-	r1 := h.ApplyConnectionStrategy("antigravity", conns, strat)
+	r1 := h.ApplyConnectionStrategy(conns, strat)
 	if r1[0].ID != "conn-1" {
 		t.Fatalf("call 1: expected conn-1, got %s", r1[0].ID)
 	}
 
 	// 2nd request -> c2
-	r2 := h.ApplyConnectionStrategy("antigravity", conns, strat)
+	r2 := h.ApplyConnectionStrategy(conns, strat)
 	if r2[0].ID != "conn-2" {
 		t.Fatalf("call 2: expected conn-2, got %s", r2[0].ID)
 	}
 
 	// 3rd request -> c3
-	r3 := h.ApplyConnectionStrategy("antigravity", conns, strat)
+	r3 := h.ApplyConnectionStrategy(conns, strat)
 	if r3[0].ID != "conn-3" {
 		t.Fatalf("call 3: expected conn-3, got %s", r3[0].ID)
 	}
 
 	// 4th request -> c1 (wrapped)
-	r4 := h.ApplyConnectionStrategy("antigravity", conns, strat)
+	r4 := h.ApplyConnectionStrategy(conns, strat)
 	if r4[0].ID != "conn-1" {
 		t.Fatalf("call 4: expected conn-1, got %s", r4[0].ID)
 	}
@@ -50,7 +49,6 @@ func TestApplyConnectionStrategy_RoundRobin(t *testing.T) {
 
 func TestApplyConnectionStrategy_Sticky(t *testing.T) {
 	h := NewChatHandler(nil)
-	h.ResetConnectionState("")
 
 	c1 := &models.ProviderConnection{ID: "conn-1"}
 	c2 := &models.ProviderConnection{ID: "conn-2"}
@@ -63,28 +61,28 @@ func TestApplyConnectionStrategy_Sticky(t *testing.T) {
 
 	// First 3 calls should stay on conn-1
 	for i := range 3 {
-		r := h.ApplyConnectionStrategy("antigravity", conns, strat)
+		r := h.ApplyConnectionStrategy(conns, strat)
 		if r[0].ID != "conn-1" {
 			t.Fatalf("call %d: expected conn-1 (sticky), got %s", i+1, r[0].ID)
 		}
 	}
 
 	// 4th call rotates to conn-2
-	r4 := h.ApplyConnectionStrategy("antigravity", conns, strat)
+	r4 := h.ApplyConnectionStrategy(conns, strat)
 	if r4[0].ID != "conn-2" {
 		t.Fatalf("call 4: expected conn-2 after sticky limit, got %s", r4[0].ID)
 	}
 
 	// Next 2 calls also stay on conn-2 (total 3 on conn-2)
 	for i := range 2 {
-		r := h.ApplyConnectionStrategy("antigravity", conns, strat)
+		r := h.ApplyConnectionStrategy(conns, strat)
 		if r[0].ID != "conn-2" {
 			t.Fatalf("call %d on conn-2: expected conn-2, got %s", i+2, r[0].ID)
 		}
 	}
 
 	// Rotates back to conn-1
-	r7 := h.ApplyConnectionStrategy("antigravity", conns, strat)
+	r7 := h.ApplyConnectionStrategy(conns, strat)
 	if r7[0].ID != "conn-1" {
 		t.Fatalf("call 7: expected conn-1, got %s", r7[0].ID)
 	}
@@ -96,7 +94,6 @@ func TestGetBestConnection_WithRoundRobinStrategy(t *testing.T) {
 
 	repo := db.NewRepo(database)
 	h := NewChatHandler(repo)
-	h.ResetConnectionState("")
 
 	// Seed 3 active connections for antigravity
 	seedConnDB(t, database, "antigravity", "conn-ag-1", "tok-1", "https://mock.example.com/1")
@@ -161,7 +158,6 @@ func TestHandleAccountFallback_RotatesUpstreamRequests(t *testing.T) {
 	seedConnDB(t, database, "deepseek", "conn-ds-2", "sk-2", srv2.URL)
 	repo := db.NewRepo(database)
 	h := NewChatHandler(repo)
-	h.ResetConnectionState("")
 
 	// Enable round-robin strategy on deepseek
 	if err := repo.SetProviderStrategy("deepseek", db.ProviderStrategy{
@@ -205,7 +201,6 @@ func TestGetBestConnection_DashboardFallbackStrategyKey(t *testing.T) {
 
 	repo := db.NewRepo(database)
 	h := NewChatHandler(repo)
-	h.ResetConnectionState("")
 
 	// Write raw settings JSON matching Next.js / Svelte 5 dashboard
 	settingsJSON := `{
@@ -252,7 +247,6 @@ func TestGetBestConnection_GlobalFallbackStrategy(t *testing.T) {
 
 	repo := db.NewRepo(database)
 	h := NewChatHandler(repo)
-	h.ResetConnectionState("")
 
 	// Global fallbackStrategy = "round-robin", stickyRoundRobinLimit = 1
 	settingsJSON := `{
@@ -410,7 +404,6 @@ func TestEndToEnd_RoundRobin_ComboAndProviderViaHTTP(t *testing.T) {
 
 	repo := db.NewRepo(database)
 	h := NewChatHandler(repo)
-	h.ResetConnectionState("")
 
 	reqBody := `{"model":"combo-e2e","messages":[{"role":"user","content":"hi"}]}`
 

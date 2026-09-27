@@ -7,12 +7,14 @@
     type FreebuffSessionStatusResponse,
     type ProviderConnection,
     type ProviderNode,
+    type ModelCaps,
     type ProxyPool,
     type Settings
   } from '../../api/client'
   import { PROVIDER_CATALOG, type ProviderCatalogItem } from '../../lib/providers'
   import {
     clearCallback,
+    CODEX_REDIRECT_URI,
     clearPending,
     dashboardCallbackURL,
     loadPendings,
@@ -41,6 +43,7 @@
   import AddCompatibleNodeModal from './AddCompatibleNodeModal.svelte'
   import EditCompatibleNodeModal from './EditCompatibleNodeModal.svelte'
   import FreebuffSessionBanner from './FreebuffSessionBanner.svelte'
+  import ProviderIcon from './ProviderIcon.svelte'
 
   interface Props {
     providerId: string
@@ -66,7 +69,6 @@
     providerNodes.find((n) => n.id === providerId)
   )
   let providerName = $derived(selectedNode?.name || selectedCatalogItem?.name || providerId)
-  let providerIcon = $derived(getIconPath(providerId, selectedNode?.apiType))
   let providerColor = $derived(selectedCatalogItem?.color || '#f59e0b')
   let providerWebsite = $derived(
     selectedCatalogItem?.notice?.apiKeyUrl ||
@@ -170,16 +172,10 @@
   let allAvailableModels = $derived<ProviderModelItem[]>(
     buildAvailableModels(builtInModels, providerCustomModels)
   )
-  // Display-only A–Z sort (case-insensitive) so the list order is stable
-  // instead of catalog insertion order. filter() returns a fresh array,
-  // so the in-place sort below is safe.
-  let visibleModels = $derived(
-    allAvailableModels
-      .filter((m) => !disabledModelIds.includes(m.id))
-      .sort((a, b) =>
-        (a.name || a.id).localeCompare(b.name || b.id, undefined, { sensitivity: 'base' })
-      )
-  )
+  // Registry order, like upstream: `models` there is getModelsByProviderId()
+  // verbatim (providers/[id]/page.js:158) with custom models appended after the
+  // catalog, so the rows read in the same sequence on both dashboards.
+  let visibleModels = $derived(allAvailableModels.filter((m) => !disabledModelIds.includes(m.id)))
   // Suggested free models from the provider's public catalog (upstream parity).
   let suggestedModels = $state<SuggestedModel[]>([])
   let suggestedNotAdded = $derived(
@@ -192,6 +188,31 @@
   let allDisabled = $derived(
     allAvailableModels.length > 0 && disabledModelIds.length >= allAvailableModels.length
   )
+
+  // Capabilities + thinking levels are resolved server-side (GET /api/models/caps):
+  // the catalog ships as a static bundle, but caps depend on the provider
+  // registry, the capability tables and the synced models.dev catalog.
+  let modelCaps = $state<Record<string, ModelCaps>>({})
+  // Union of the thinking levels this provider's models accept, with the
+  // explicit "auto" reset first — upstream providerThinkingLevels
+  // (dashboard/providers/[id]/page.js:186). null hides the picker entirely for a
+  // provider whose models have no reasoning.
+  let providerThinkingLevels = $derived.by(() => {
+    const levels = new Set<string>()
+    for (const m of allAvailableModels) {
+      for (const l of modelCaps[m.id]?.thinkingLevels ?? []) {
+        if (l !== 'none') levels.add(l)
+      }
+    }
+    return levels.size ? ['auto', ...levels] : null
+  })
+  // A picked level only applies to a model that actually supports it, so the
+  // displayed id and the copied id never carry a level the provider rejects.
+  function resolveThinkingSuffix(modelId: string): string | null {
+    if (!thinkingLevel || thinkingLevel === 'auto') return null
+    const levels = modelCaps[modelId]?.thinkingLevels
+    return levels && levels.includes(thinkingLevel) ? thinkingLevel : null
+  }
   // Compatible nodes (upstream CompatibleModelsSection): rows = custom models
   // + legacy aliases, both keyed by the node row id; display = node prefix.
   let modelAliases = $state<Record<string, string>>({})
@@ -306,6 +327,9 @@
   // OAuth auto-handoff: callback tab writes to storage + BroadcastChannel,
   // this modal restores the pending session and auto-submits.
   let autoSubmitted = $state(false)
+  // Codex completes its login on a server-owned loopback listener, so the
+  // modal watches the server instead of the browser callback page.
+  let codexPollTimer: ReturnType<typeof setInterval> | null = $state(null)
 
   function dashboardCallback(): string {
     return dashboardCallbackURL(dashboardOrigin())
@@ -466,10 +490,31 @@
 
   let showApplyProxyModal = $state(false)
   let isApplyingProxy = $state(false)
+  // Non-null while a reorder request is in flight; the chevrons disable on it
+  // so a second click cannot fire a swap computed from a stale list.
+  let reorderingConnId = $state<string | null>(null)
+  // Bulk-apply progress + abort flag for the Apply Proxy modal.
+  let applyProxyDone = $state(0)
+  let applyProxyAbort = $state(false)
+  let proxyPoolSearch = $state('')
+
+  let filteredProxyPools = $derived.by(() => {
+    const q = proxyPoolSearch.trim().toLowerCase()
+    if (!q) return proxyPools
+    return proxyPools.filter(
+      (p) => p.name.toLowerCase().includes(q) || p.proxyUrl.toLowerCase().includes(q)
+    )
+  })
 
   let editingConnection = $state<ProviderConnection | null>(null)
   let editName = $state('')
   let editPriority = $state<number>(1)
+  // The value the priority field was seeded with. Saving sends priority only
+  // when the field actually changed: a NULL-priority row has no number of its
+  // own, so seeding the input with 1 and always sending it turned a plain
+  // rename into an assignment of rank 1, colliding with whichever row already
+  // held it.
+  let editSeededPriority = $state<number>(1)
   let editTestStatus = $state<'ok' | 'error' | null>(null)
   let editTestError = $state<string | null>(null)
   let isTestingEdit = $state(false)
@@ -629,17 +674,21 @@
   async function loadData() {
     suggestedModels = []
     try {
-      const [modelsData, settingsData, poolsData, aliasesData] = await Promise.all([
+      const [modelsData, settingsData, poolsData, aliasesData, capsData] = await Promise.all([
         fetchProviderModelsData(providerId, storageAlias),
         api.getSettings().catch(() => ({})),
         api.getProxyPools().catch(() => []),
         api.getModelAliases().catch(() => ({ aliases: {} })),
+        // Providers without a static catalog answer 404; the page then shows no
+        // capability icons and hides the thinking picker, same as upstream.
+        api.getModelCaps(providerId).catch(() => ({ caps: {} as Record<string, ModelCaps> })),
       ])
       customModels = modelsData.customModels
       disabledModelIds = modelsData.disabledModelIds
       modelAliases = aliasesData?.aliases || {}
       settings = settingsData
       proxyPools = poolsData
+      modelCaps = capsData?.caps || {}
 
       // Suggested free models from the provider's public catalog (if configured in upstream registry).
       const fetcher = selectedCatalogItem?.modelsFetcher
@@ -1003,21 +1052,27 @@
     isStoppingOneByOne = true
   }
 
-  // Priority reordering
-  async function swapPriority(idxA: number, idxB: number) {
-    const connA = providerConnections[idxA]
-    const connB = providerConnections[idxB]
-    if (!connA || !connB) return
-    const priorityA = connA.priority ?? idxA + 1
-    const priorityB = connB.priority ?? idxB + 1
+  // Priority reordering.
+  // Single server-side transactional call instead of two independent PUTs:
+  // a partial failure between those two writes left two rows sharing a
+  // priority, and a stable sort over tied priorities made every later click a
+  // literal no-op — the pair became permanently un-reorderable through the UI.
+  // The in-flight flag also stops a second click from firing a swap computed
+  // from the same stale list (last-write-wins, so the list appeared frozen).
+  async function swapPriority(idx: number, delta: -1 | 1) {
+    const conn = providerConnections[idx]
+    if (!conn || reorderingConnId) return
+    const target = providerConnections[idx + delta]
+    if (!target) return
+
+    reorderingConnId = conn.id
     try {
-      await Promise.all([
-        api.updateConnection(connA.id, { priority: priorityB }),
-        api.updateConnection(connB.id, { priority: priorityA })
-      ])
+      await api.reorderConnection(conn.id, delta < 0 ? 'up' : 'down')
       onRefresh()
     } catch (err) {
-      console.error('Error swapping priority:', err)
+      alert(`Reorder failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      reorderingConnId = null
     }
   }
 
@@ -1072,25 +1127,46 @@
 
   // Upstream applies bulk proxy changes to every connection of the provider,
   // regardless of the checkbox selection.
+  //
+  // Cancel sets the abort flag and the loop stops on the next iteration, so
+  // closing the modal no longer leaves requests firing in the background. The
+  // running counter is shown in the modal: with 100+ connections a sequential
+  // loop is slow enough that the previous label-less "Applying..." read as a
+  // hang.
   async function applyProxyAssignments(assignments: Array<{ id: string; poolId: string | null }>) {
     isApplyingProxy = true
+    applyProxyAbort = false
+    applyProxyDone = 0
     let failed = 0
     try {
       for (const assignment of assignments) {
+        if (applyProxyAbort) break
         try {
           await api.updateConnection(assignment.id, proxyAssignmentPayload(assignment.poolId))
         } catch {
           failed++
         }
+        applyProxyDone++
       }
       onRefresh()
       showApplyProxyModal = false
-      if (failed > 0) {
+      if (applyProxyAbort) {
+        alert(`Cancelled after ${applyProxyDone} of ${assignments.length} connection(s).`)
+      } else if (failed > 0) {
         alert(`Updated with ${failed} failed request(s).`)
       }
     } finally {
       isApplyingProxy = false
+      applyProxyAbort = false
     }
+  }
+
+  function cancelApplyProxy() {
+    if (isApplyingProxy) {
+      applyProxyAbort = true
+      return
+    }
+    showApplyProxyModal = false
   }
 
   async function handleApplyProxyPool(poolId: string | null) {
@@ -1118,6 +1194,7 @@
     editingConnection = conn
     editName = conn.name || ''
     editPriority = conn.priority ?? 1
+    editSeededPriority = editPriority
     editTestStatus = null
     editTestError = null
   }
@@ -1147,10 +1224,17 @@
     if (!editingConnection) return
     isSavingEdit = true
     try {
-      await api.updateConnection(editingConnection.id, {
-        name: editName.trim() || undefined,
-        priority: editPriority
-      })
+      const payload: { name?: string; priority?: number } = {
+        name: editName.trim() || undefined
+      }
+      // Omit an untouched priority: a NULL-priority row has no number of its
+      // own, so always sending the seeded 1 would rewrite a plain rename into
+      // a rank-1 assignment, tying with whoever already holds it and
+      // recreating the un-reorderable pair the reorder endpoint repairs.
+      if (editPriority !== editSeededPriority) {
+        payload.priority = editPriority
+      }
+      await api.updateConnection(editingConnection.id, payload)
       editingConnection = null
       onRefresh()
     } catch (err) {
@@ -1226,7 +1310,9 @@
     callbackInput = ''
     copiedAuthUrl = false
     try {
-      const cb = dashboardCallback()
+      // Codex cannot use the dashboard callback: OpenAI only accepts the
+      // redirect URI registered for the Codex CLI client.
+      const cb = providerId === 'codex' ? CODEX_REDIRECT_URI : dashboardCallback()
       const res = await api.pkceAuthorize(
         providerId,
         providerId === 'gitlab'
@@ -1240,7 +1326,10 @@
       oauthAuthUrl = res.url || res.authUrl
       pkceCodeVerifier = res.codeVerifier || ''
       pkceState = res.state || ''
-      pkceRedirectUri = res.redirectUri || ''
+      pkceRedirectUri = res.redirectUri || cb
+      if (providerId === 'codex') {
+        await startCodexLoopback()
+      }
       rememberPending({
         state: pkceState,
         verifier: pkceCodeVerifier,
@@ -1258,6 +1347,68 @@
       }
     } catch (err) {
       alert(`Failed to initiate authorization: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  // Codex redirects the browser to a fixed loopback port, so the server needs
+  // that listener running before the popup opens — otherwise the callback dies
+  // on a closed port and the login can never complete.
+  async function startCodexLoopback() {
+    stopCodexPoll()
+    const proxy = await api.codexStartProxy({
+      appPort: window.location.port || (window.location.protocol === 'https:' ? '443' : '80'),
+      state: pkceState,
+      codeVerifier: pkceCodeVerifier,
+      redirectUri: CODEX_REDIRECT_URI,
+    })
+    if (!proxy.success) {
+      throw new Error(
+        proxy.reason === 'port_busy'
+          ? 'Port 1455 is in use; close the conflicting process and retry'
+          : 'Could not start the local login listener',
+      )
+    }
+    codexPollTimer = setInterval(pollCodexStatus, 1500)
+  }
+
+  async function pollCodexStatus() {
+    try {
+      const res = await api.codexPollStatus(pkceState)
+      if (res.status === 'done') {
+        stopCodexPoll()
+        showOAuthModal = false
+        onRefresh()
+      } else if (res.status === 'error') {
+        stopCodexPoll()
+        oauthError = res.error || 'Authorization failed'
+      } else if (res.status === 'unknown') {
+        // The server no longer tracks this login. Stop polling, but say so:
+        // silently freezing the modal on "Waiting for popup authorization…"
+        // leaves the user with a login that can never finish and no way to
+        // tell that apart from simply being slow.
+        stopCodexPoll()
+        oauthError = 'The local login listener is no longer running. Close this window and click Login again.'
+      }
+    } catch {
+      // Biarkan polling berikutnya mencoba lagi.
+    }
+  }
+
+  function stopCodexPoll() {
+    if (codexPollTimer) {
+      clearInterval(codexPollTimer)
+      codexPollTimer = null
+    }
+  }
+
+  // Dismissing the modal abandons the login, so any loopback listener and
+  // poll loop it started have to be released with it.
+  function closeOAuthModal() {
+    showOAuthModal = false
+    stopDevicePoll()
+    stopCodexPoll()
+    if (providerId === 'codex') {
+      void api.codexStopProxy().catch(() => {})
     }
   }
 
@@ -1904,8 +2055,8 @@
 
   // Model actions
   function copyModelId(modelId: string) {
-    const suffix = thinkingLevel !== 'auto' && thinkingLevel ? `(${thinkingLevel})` : ''
-    const full = `${storageAlias}/${modelId}${suffix}`
+    const level = resolveThinkingSuffix(modelId)
+    const full = `${storageAlias}/${modelId}${level ? `(${level})` : ''}`
     navigator.clipboard.writeText(full)
     copiedModelId = modelId
     setTimeout(() => (copiedModelId = null), 2000)
@@ -2226,14 +2377,11 @@
         class="flex size-12 shrink-0 items-center justify-center rounded-lg"
         style="background-color: {providerColor}15;"
       >
-        <img
-          alt={providerName}
-          loading="lazy"
-          width="48"
-          height="48"
-          decoding="async"
-          class="max-h-12 max-w-12 rounded-lg object-contain"
-          src={providerIcon}
+        <ProviderIcon
+          id={providerId}
+          apiType={selectedNode?.apiType}
+          size="lg"
+          class="border-transparent bg-transparent"
         />
       </div>
 
@@ -2606,7 +2754,10 @@
         </div>
       </div>
     {:else}
-      <div class="flex min-w-0 flex-col divide-y divide-black/[0.03] dark:divide-white/[0.03] max-h-[500px] overflow-y-auto pr-1">
+      <!-- relative z-50: the open row proxy dropdown paints a fixed inset-0
+           click-away backdrop over the whole viewport, which otherwise swallows
+           the first click on any priority chevron. -->
+      <div class="relative z-50 flex min-w-0 flex-col divide-y divide-black/[0.03] dark:divide-white/[0.03] max-h-[500px] overflow-y-auto pr-1">
         {#each providerConnections as conn, idx (conn.id)}
           {@const isFirst = idx === 0}
           {@const isLast = idx === providerConnections.length - 1}
@@ -2635,21 +2786,27 @@
               <div class="group flex min-w-0 flex-col gap-3 rounded-lg p-2 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between">
                 <!-- Left info -->
                 <div class="flex min-w-0 flex-1 items-start gap-2 sm:items-center sm:gap-3">
-                  <!-- Reorder buttons -->
-                  <div class="flex shrink-0 flex-col">
+                  <!-- Reorder buttons. z-[60] sits above the row proxy
+                       dropdown's fixed inset-0 click-away backdrop (z-40): a
+                       positioned backdrop paints above unpositioned content, so
+                       without this the first chevron click after opening a
+                       dropdown is always swallowed. -->
+                  <div class="relative z-[60] flex shrink-0 flex-col">
                     <button
                       type="button"
-                      disabled={isFirst}
-                      onclick={() => swapPriority(idx, idx - 1)}
-                      class="p-0.5 rounded {isFirst ? 'text-text-muted/30 cursor-not-allowed' : 'hover:bg-sidebar text-text-muted hover:text-primary cursor-pointer'}"
+                      disabled={isFirst || !!reorderingConnId}
+                      title={isFirst ? 'Already first' : 'Move up'}
+                      onclick={() => swapPriority(idx, -1)}
+                      class="p-1 rounded disabled:opacity-40 {isFirst || reorderingConnId ? 'text-text-muted/30 cursor-not-allowed' : 'hover:bg-sidebar text-text-muted hover:text-primary cursor-pointer'}"
                     >
                       <span class="material-symbols-outlined text-sm">keyboard_arrow_up</span>
                     </button>
                     <button
                       type="button"
-                      disabled={isLast}
-                      onclick={() => swapPriority(idx, idx + 1)}
-                      class="p-0.5 rounded {isLast ? 'text-text-muted/30 cursor-not-allowed' : 'hover:bg-sidebar text-text-muted hover:text-primary cursor-pointer'}"
+                      disabled={isLast || !!reorderingConnId}
+                      title={isLast ? 'Already last' : 'Move down'}
+                      onclick={() => swapPriority(idx, 1)}
+                      class="p-1 rounded disabled:opacity-40 {isLast || reorderingConnId ? 'text-text-muted/30 cursor-not-allowed' : 'hover:bg-sidebar text-text-muted hover:text-primary cursor-pointer'}"
                     >
                       <span class="material-symbols-outlined text-sm">keyboard_arrow_down</span>
                     </button>
@@ -3087,20 +3244,18 @@
     <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-center gap-3">
         <h2 class="text-lg font-semibold">Available Models</h2>
+        {#if providerThinkingLevels}
         <select
           title="Appends (level) suffix to copied model names"
           value={thinkingLevel}
           onchange={handleThinkingChange}
           class="rounded-md border border-border bg-background px-2 py-1 text-xs focus:border-primary focus:outline-none cursor-pointer"
         >
-          <option value="auto">Thinking: Auto</option>
-          <option value="minimal">Thinking: Minimal</option>
-          <option value="low">Thinking: Low</option>
-          <option value="medium">Thinking: Medium</option>
-          <option value="high">Thinking: High</option>
-          <option value="max">Thinking: Max</option>
-          <option value="xhigh">Thinking: Xhigh</option>
+          {#each providerThinkingLevels as opt (opt)}
+            <option value={opt}>Thinking: {opt.charAt(0).toUpperCase() + opt.slice(1)}</option>
+          {/each}
         </select>
+        {/if}
       </div>
 
       <div class="flex gap-2">
@@ -3158,7 +3313,9 @@
     <!-- Models flex-wrap list matching upstream -->
     <div class="flex flex-wrap gap-3">
       {#each visibleModels as model (model.id)}
-        {@const fullModelId = `${storageAlias}/${model.id}`}
+        {@const level = resolveThinkingSuffix(model.id)}
+        {@const fullModelId = `${storageAlias}/${model.id}${level ? `(${level})` : ''}`}
+        {@const rowCaps = modelCaps[model.id] ?? model.caps}
         {@const testStatus = modelTestStatuses[model.id]}
         {@const isTestingThis = testStatus === 'testing'}
         {@const isSessionActive = checkIsActiveSession(model.id)}
@@ -3182,7 +3339,7 @@
               <span class="flex min-w-0 items-center text-[9px] gap-1 pl-1">
                 <span class="truncate text-[9px] italic text-text-muted/70">{model.name}</span>
                 <span class="inline-flex items-center gap-0.5">
-                  {#if model.caps?.vision}
+                  {#if rowCaps?.vision}
                     <div class="relative inline-flex group/tt">
                       <span class="material-symbols-outlined leading-none cursor-help text-text-muted/70" style="font-size: 12px;">visibility</span>
                       <div class="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-50 w-max max-w-56 rounded px-2 py-1 text-[11px] leading-snug bg-gray-900 text-white opacity-0 group-hover/tt:opacity-100 transition-opacity duration-150 whitespace-normal shadow-lg">
@@ -3190,7 +3347,7 @@
                       </div>
                     </div>
                   {/if}
-                  {#if model.caps?.reasoning}
+                  {#if rowCaps?.reasoning}
                     <div class="relative inline-flex group/tt">
                       <span class="material-symbols-outlined leading-none cursor-help text-text-muted/70" style="font-size: 12px;">neurology</span>
                       <div class="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-50 w-max max-w-56 rounded px-2 py-1 text-[11px] leading-snug bg-gray-900 text-white opacity-0 group-hover/tt:opacity-100 transition-opacity duration-150 whitespace-normal shadow-lg">
@@ -3382,7 +3539,7 @@
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div
         class="absolute inset-0 bg-black/50 backdrop-blur-[2px] fade-in"
-        onclick={() => { showOAuthModal = false; stopDevicePoll() }}
+        onclick={closeOAuthModal}
         role="presentation"
       ></div>
     <div class="relative w-full bg-surface border border-border-subtle rounded-[14px] shadow-[var(--shadow-elev)] fade-in max-w-lg p-6">
@@ -3390,7 +3547,7 @@
         <h2 class="text-lg font-semibold text-text-main">Connect {providerName}</h2>
         <button
           type="button"
-          onclick={() => { showOAuthModal = false; stopDevicePoll() }}
+          onclick={closeOAuthModal}
           class="p-1 rounded text-text-muted hover:text-text-main cursor-pointer"
         >
           <span class="material-symbols-outlined text-lg">close</span>
@@ -3712,24 +3869,29 @@
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
     <div
       class="absolute inset-0 bg-black/50 backdrop-blur-[2px] fade-in"
-      onclick={() => (showApplyProxyModal = false)}
+      onclick={cancelApplyProxy}
       role="presentation"
     ></div>
-    <div class="relative w-full bg-surface border border-border-subtle rounded-[14px] shadow-[var(--shadow-elev)] fade-in max-w-lg p-6">
-      <div class="flex items-center justify-between pb-3 border-b border-border-subtle mb-4">
+    <div class="relative flex max-h-[85vh] w-full flex-col bg-surface border border-border-subtle rounded-[14px] shadow-[var(--shadow-elev)] fade-in max-w-lg">
+      <div class="flex shrink-0 items-center justify-between px-6 pt-5 pb-3 border-b border-border-subtle">
         <h2 class="text-lg font-semibold text-text-main">
           Apply Proxy ({providerConnections.length} connections)
         </h2>
         <button
           type="button"
-          onclick={() => (showApplyProxyModal = false)}
-          class="p-1 rounded text-text-muted hover:text-text-main cursor-pointer"
+          onclick={cancelApplyProxy}
+          disabled={isApplyingProxy}
+          aria-label="Close"
+          class="p-1 rounded text-text-muted hover:text-text-main disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
         >
           <span class="material-symbols-outlined text-lg">close</span>
         </button>
       </div>
 
-      <div class="space-y-2 mb-6">
+      <!-- The pool list scrolls on its own. With 100+ imported pools an
+           unbounded list grew this centred panel past the viewport, which
+           clipped the title and every action above the fold. -->
+      <div class="min-h-0 flex-1 space-y-2 overflow-y-auto custom-scrollbar px-6 py-4">
         <button
           type="button"
           onclick={handleApplyProxyRotate}
@@ -3756,7 +3918,15 @@
           </div>
         </button>
 
-        {#each proxyPools as pool}
+        <input
+          type="search"
+          bind:value={proxyPoolSearch}
+          placeholder="Filter {proxyPools.length} pools by name or URL"
+          disabled={isApplyingProxy}
+          class="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs text-text-main placeholder:text-text-muted focus:border-primary focus:outline-none disabled:opacity-50"
+        />
+
+        {#each filteredProxyPools as pool}
           <button
             type="button"
             onclick={() => handleApplyProxyPool(pool.id)}
@@ -3774,20 +3944,25 @@
               <div class="text-[11px] text-text-muted truncate">{pool.proxyUrl}</div>
             </div>
           </button>
+        {:else}
+          <p class="py-6 text-center text-xs text-text-muted">No proxy pool matches “{proxyPoolSearch}”.</p>
         {/each}
       </div>
 
-      {#if isApplyingProxy}
-        <p class="mb-4 text-xs text-text-muted">Applying...</p>
-      {/if}
-
-      <div class="flex justify-end">
+      <div class="flex shrink-0 items-center justify-between gap-3 px-6 py-4 border-t border-border-subtle">
+        <p class="text-xs text-text-muted" aria-live="polite">
+          {#if isApplyingProxy}
+            Applying {applyProxyDone} / {providerConnections.length}…
+          {:else}
+            {filteredProxyPools.length} of {proxyPools.length} pools
+          {/if}
+        </p>
         <button
           type="button"
-          onclick={() => (showApplyProxyModal = false)}
+          onclick={cancelApplyProxy}
           class="px-3 py-1.5 text-xs font-semibold rounded-[8px] bg-surface-2 hover:bg-surface-3 text-text-main border border-border cursor-pointer"
         >
-          Cancel
+          {isApplyingProxy ? 'Stop' : 'Cancel'}
         </button>
       </div>
     </div>

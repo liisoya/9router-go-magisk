@@ -2,6 +2,12 @@ package providers
 
 // ProviderAliasMap maps short aliases to canonical provider IDs.
 var ProviderAliasMap = map[string]string{
+	"b-ai":           "bai",
+	"agnes-ai":       "agnes",
+	"atria-asi":      "atria",
+	"dahl-inference": "dahl",
+	"thh":            "tokenharbor",
+	"th":             "tokenharbor",
 	"aai":            "assemblyai",
 	"ag":             "antigravity",
 	"ali":            "alicode",
@@ -68,6 +74,7 @@ var ProviderAliasMap = map[string]string{
 	"pplx-responses": "perplexity-agent",
 	"pw":             "perplexity-web",
 	"qd":             "qoder",
+	"qdcn":           "qoder-cn",
 	"runway":         "runwayml",
 	"stability":      "stability-ai",
 	"tg":             "together",

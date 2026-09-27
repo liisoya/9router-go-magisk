@@ -59,6 +59,10 @@ func (p *GeminiPart) UnmarshalJSON(data []byte) error {
 type GeminiFunctionCall struct {
 	Name string         `json:"name"`
 	Args map[string]any `json:"args"`
+	// ID correlates a call with its response. Gemini rejects a functionResponse
+	// whose id does not match an open call, so the terminal-turn guard below has
+	// to be able to echo it.
+	ID string `json:"id,omitempty"`
 }
 
 // DefaultThinkingSignature is the hardcoded thought signature the Next.js
@@ -72,6 +76,7 @@ const DefaultThinkingSignature = "EuwGCukGAXLI2nxwZIq54WWSoL/YN0P3TsDZ7zRnLi8g0S
 
 type GeminiFunctionResp struct {
 	Name     string          `json:"name"`
+	ID       string          `json:"id,omitempty"`
 	Response *GeminiFuncResp `json:"response,omitempty"`
 }
 
@@ -861,10 +866,14 @@ func convertContentToGeminiParts(content any) []GeminiPart {
 	return nil
 }
 
-// NormalizeGeminiContents merges adjacent same-role messages, strips empty parts,
-// and ensures an initial user turn (parity with open-sse/translator/formats/gemini.js).
+// NormalizeGeminiContents merges adjacent same-role messages, strips empty
+// parts, and brackets the conversation with user turns — parity with
+// open-sse/translator/formats/gemini.js. Gemini rejects a contents array that
+// does not start on a user turn, and equally one that ends on a model turn: a
+// prefill, a truncated stream, or tool calls the client never answered all
+// arrive that way and would 400 without the guards.
 func NormalizeGeminiContents(contents []GeminiContent) []GeminiContent {
-	var out []GeminiContent
+	out := make([]GeminiContent, 0, len(contents)+2)
 	for _, c := range contents {
 		if c.Role == "" || len(c.Parts) == 0 {
 			continue
@@ -888,7 +897,51 @@ func NormalizeGeminiContents(contents []GeminiContent) []GeminiContent {
 			})
 		}
 	}
+	if len(out) == 0 {
+		return out
+	}
+
+	if out[0].Role != "user" {
+		out = append([]GeminiContent{{
+			Role:  "user",
+			Parts: []GeminiPart{{Text: "..."}},
+		}}, out...)
+	}
+	if last := out[len(out)-1]; last.Role == "model" {
+		out = append(out, GeminiContent{Role: "user", Parts: geminiTerminalUserParts(last.Parts)})
+	}
 	return out
+}
+
+// geminiTerminalUserParts answers a terminal model turn: one functionResponse
+// per unanswered functionCall, carrying the call's id so Gemini can match it,
+// or a plain nudge when the model was talking rather than calling a tool.
+func geminiTerminalUserParts(modelParts []GeminiPart) []GeminiPart {
+	var calls []*GeminiFunctionCall
+	for _, p := range modelParts {
+		if p.FunctionCall != nil {
+			calls = append(calls, p.FunctionCall)
+		}
+	}
+	if len(calls) == 0 {
+		return []GeminiPart{{Text: "Continue."}}
+	}
+
+	responses := make([]GeminiPart, 0, len(calls))
+	for _, call := range calls {
+		name := call.Name
+		if name == "" {
+			name = "tool"
+		}
+		responses = append(responses, GeminiPart{
+			FunctionResponse: &GeminiFunctionResp{
+				Name:     name,
+				ID:       call.ID,
+				Response: &GeminiFuncResp{Result: "Continue."},
+			},
+		})
+	}
+	return responses
 }
 
 func isGeminiPartEmpty(p GeminiPart) bool {

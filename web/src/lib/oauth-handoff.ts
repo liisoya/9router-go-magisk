@@ -163,3 +163,11 @@ export function oauthLoopbackCallbackURL(port: string, secure: boolean): string 
   const callbackPort = port || (secure ? '443' : '80')
   return `http://localhost:${callbackPort}/callback`
 }
+
+/** Codex's OAuth client (app_EMoamEEZ73f0CkXaXp7hrann) has exactly one
+ * registered loopback redirect URI. auth.openai.com validates redirect_uri
+ * during the authorize step and answers `invalid_authorize_request` for any
+ * other value — including the dashboard's own /callback URL and the right port
+ * with the wrong path. The loopback server behind it is started by
+ * `POST /api/oauth/codex/start-proxy`. */
+export const CODEX_REDIRECT_URI = 'http://localhost:1455/auth/callback'

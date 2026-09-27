@@ -49,6 +49,84 @@ export const PROVIDER_CATEGORIES = [
 
 export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
   {
+    "id": "agnes",
+    "name": "Agnes AI",
+    "category": "freeTier",
+    "alias": "agnes",
+    "color": "#7C3AED",
+    "icon": "auto_awesome",
+    "website": "https://agnes-ai.com",
+    "notice": {"text":"OpenAI-compatible gateway from Agnes AI, offering free API credits on sign-up. Accepts a bearer token or an x-api-key header.", "apiKeyUrl":"https://platform.agnes-ai.com"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
+    "id": "atria",
+    "name": "Atria Dawn",
+    "category": "apikey",
+    "alias": "atria",
+    "color": "#C2410C",
+    "icon": "flare",
+    "website": "https://atria-asi.ai",
+    "notice": {"text":"OpenAI-compatible endpoint from Atria Dawn (AtomInnoLab). Currently a research preview offering a single text model, Atria-Dawn-Preview.", "apiKeyUrl":"https://api.atria-asi.ai/dashboard"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
+    "id": "bai",
+    "name": "B.AI",
+    "category": "apikey",
+    "alias": "bai",
+    "color": "#0369A1",
+    "icon": "account_balance",
+    "website": "https://b.ai",
+    "notice": {"text":"OpenAI-compatible gateway with one of the larger catalogues here. Accepts a bearer token or an x-api-key header. Model ids are fetched live from the provider.", "apiKeyUrl":"https://b.ai"},
+    "modelsFetcher": {"url": "https://api.b.ai/v1/models", "type": "openai"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
+    "id": "dahl",
+    "name": "Dahl Inference",
+    "category": "apikey",
+    "alias": "dahl",
+    "color": "#1E40AF",
+    "icon": "hub",
+    "website": "https://dahl.global",
+    "notice": {"text":"OpenAI-compatible Gonka inference node. Small, fixed catalogue (GLM-5.3-Flash, DeepSeek-V4-Flash, MiniMax-M2.7) at a flat per-token rate.", "apiKeyUrl":"https://dahl.global/dashboard"},
+    "modelsFetcher": {"url": "https://inference.dahl.global/v1/models", "type": "openai"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
+    "id": "tokenharbor",
+    "name": "Token Harbor",
+    "category": "apikey",
+    "alias": "tokenharbor",
+    "color": "#0F766E",
+    "icon": "anchor",
+    "website": "https://tokenharbor.ai",
+    "notice": {"text":"OpenAI-compatible aggregator. One API key reaches every model, billed per-token from a prepaid wallet. Model ids are bare (e.g. claude-opus-5.5, gpt-6-astra, deepseek-v4.1-flash:free) and are fetched live from the provider.", "apiKeyUrl":"https://tokenharbor.ai/dashboard"},
+    "modelsFetcher": {"url": "https://tokenharbor.ai/v1/models", "type": "openai"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
     "id": "antigravity",
     "name": "Antigravity",
     "category": "oauth",
@@ -260,6 +338,22 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "serviceKinds": [
       "llm",
       "image"
+    ]
+  },
+  {
+    "id": "qoder-cn",
+    "name": "Qoder CN",
+    "category": "oauth",
+    "alias": "qdcn",
+    "color": "#EC4899",
+    "icon": "water_drop",
+    "website": "https://qoder.com.cn",
+    "notice": {"signupUrl":"https://qoder.com.cn"},
+    "authHint": "Personal Access Token (pt-...) from https://qoder.com.cn/account/integrations",
+    "noAuth": false,
+    "authModes": ["oauth", "apikey"],
+    "serviceKinds": [
+      "llm"
     ]
   },
   {

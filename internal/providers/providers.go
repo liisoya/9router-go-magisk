@@ -3,6 +3,7 @@ package providers
 import (
 	"net/http"
 	"os"
+	"strings"
 )
 
 // ProviderConfig describes how to reach an upstream provider.
@@ -32,6 +33,87 @@ func (p *ProviderConfig) IsGeminiNative() bool { return p.Format == "gemini-nati
 // native one (e.g. the "gemini" provider at /v1beta/openai/chat/completions).
 func (p *ProviderConfig) IsGeminiOpenAICompat() bool { return p.Format == "gemini-openai" }
 
+// modelsListURL is the OpenAI-compatible /v1/models endpoint of providers whose
+// catalogue is fetched live for the dashboard's "Suggested free models" import.
+// It is the same set upstream wires into PROVIDER_MODELS_CONFIG
+// (src/app/api/providers/[id]/models/route.js, v0.5.91).
+var modelsListURL = map[string]string{
+	"tokenharbor": "https://tokenharbor.ai/v1/models",
+	"dahl":        "https://inference.dahl.global/v1/models",
+	"atria":       "https://api.atria-asi.ai/v1/models",
+	"agnes":       "https://apihub.agnes-ai.com/v1/models",
+	"bai":         "https://api.b.ai/v1/models",
+}
+
+// ModelsListURL returns the live catalogue endpoint for a provider, or "" when
+// the provider has none.
+func ModelsListURL(provider string) string {
+	return modelsListURL[strings.ToLower(provider)]
+}
+
+// AnthropicBetaRedactThinking asks Anthropic to return thinking blocks as a
+// signature only. That is right for clients that never render thinking, but it
+// blanks the very summaries a client requested with
+// `thinking.display: "summarized"`, so it is dropped per request when the body
+// asks for them. Upstream: ANTHROPIC_BETA_REDACT_THINKING in
+// open-sse/providers/shared.js.
+const AnthropicBetaRedactThinking = "redact-thinking-2026-02-12"
+
+// WithoutBetaFlag returns a copy of headers with one Anthropic-Beta flag
+// removed. The registry's header map is shared by every request, so a
+// request-scoped edit has to copy rather than mutate.
+func WithoutBetaFlag(headers map[string]string, flag string) map[string]string {
+	current, ok := headers["Anthropic-Beta"]
+	if !ok {
+		return headers
+	}
+	kept := make([]string, 0, 8)
+	for _, existing := range strings.Split(current, ",") {
+		if trimmed := strings.TrimSpace(existing); trimmed != "" && trimmed != flag {
+			kept = append(kept, trimmed)
+		}
+	}
+	res := make(map[string]string, len(headers))
+	for k, v := range headers {
+		res[k] = v
+	}
+	res["Anthropic-Beta"] = strings.Join(kept, ",")
+	return res
+}
+
+// MergeAnthropicBeta unions any number of comma-separated beta flag lists into
+// one de-duplicated header value, keeping the order they were seen in. The
+// caller's own flags are merged in rather than dropped: a client asking for a
+// beta the gateway does not list would otherwise be refused without ever being
+// told why. Port of mergeAnthropicBeta in open-sse/providers/shared.js.
+func MergeAnthropicBeta(values ...string) string {
+	seen := make(map[string]bool, 8)
+	merged := make([]string, 0, 8)
+	for _, value := range values {
+		for _, flag := range strings.Split(value, ",") {
+			flag = strings.TrimSpace(flag)
+			if flag == "" || seen[flag] {
+				continue
+			}
+			seen[flag] = true
+			merged = append(merged, flag)
+		}
+	}
+	return strings.Join(merged, ",")
+}
+
+// WithHeader returns a copy of headers with one entry set. The registry's
+// header map is shared by every request, so a request-scoped change has to
+// copy rather than mutate — the same reason WithoutBetaFlag copies.
+func WithHeader(headers map[string]string, key, value string) map[string]string {
+	res := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		res[k] = v
+	}
+	res[key] = value
+	return res
+}
+
 // KnownProviders maps provider IDs to their upstream configuration.
 var KnownProviders = map[string]ProviderConfig{
 	"openai": {
@@ -39,10 +121,30 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	"agnes": {
+		BaseURL:    "https://apihub.agnes-ai.com/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	"anthropic": {
 		BaseURL:    "https://api.anthropic.com/v1/messages",
 		AuthHeader: "x-api-key",
 		AuthScheme: "raw",
+	},
+	"dahl": {
+		BaseURL:    "https://inference.dahl.global/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
+	"bai": {
+		BaseURL:    "https://api.b.ai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
+	"atria": {
+		BaseURL:    "https://api.atria-asi.ai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
 	},
 	"deepseek": {
 		BaseURL:    "https://api.deepseek.com/chat/completions",
@@ -619,6 +721,13 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	// Qoder CN is a distinct deployment with its own gateway and credentials.
+	// It is never aliased onto qoder (AGENTS.md section 3.A).
+	"qoder-cn": {
+		BaseURL:    "https://gateway.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	"grok-web": {
 		BaseURL:    "https://grok.com/rest/app-chat/conversations/new",
 		AuthHeader: "Authorization",
@@ -742,6 +851,11 @@ var KnownProviders = map[string]ProviderConfig{
 	},
 	"tencent": {
 		BaseURL:    "https://api.hunyuan.cloud.tencent.com/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
+	"tokenharbor": {
+		BaseURL:    "https://tokenharbor.ai/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},

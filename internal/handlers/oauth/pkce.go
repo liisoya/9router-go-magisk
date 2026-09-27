@@ -30,6 +30,16 @@ type pkceConfig struct {
 	includeState   bool
 	userInfoPath   string // appended to baseURL, e.g. GitLab /api/v4/user
 	discoverIssuer string // OIDC issuer for runtime discovery (xAI)
+	// fixedRedirectURI pins the callback URL for providers whose public OAuth
+	// client only registered one loopback URI (Codex). auth.openai.com
+	// validates redirect_uri at the authorize step and answers
+	// invalid_authorize_request for anything else, so the dashboard-derived
+	// <host>/callback must not be used. Empty means "follow the dashboard".
+	fixedRedirectURI string
+	// fixedPort is the loopback port fixedRedirectURI lives on. A provider with
+	// fixedRedirectURI always needs a local listener bound to it; see
+	// codex_proxy.go.
+	fixedPort      int
 	connPrefix     string
 	display        string
 	emailFromIDTok bool
@@ -62,6 +72,13 @@ var pkceProviders = map[string]*pkceConfig{
 		connPrefix:     "cx-",
 		display:        "Codex",
 		emailFromIDTok: true,
+		// Codex CLI's OAuth client has exactly one registered loopback
+		// redirect URI. Verified against auth.openai.com: both
+		// http://localhost:<dashboardPort>/callback and
+		// http://localhost:1455/callback are rejected with
+		// invalid_authorize_request; only this literal reaches the login page.
+		fixedRedirectURI: codexRedirectURI,
+		fixedPort:        codexProxyPort,
 	},
 	"xai": {
 		providers:      []string{"xai"},
@@ -102,7 +119,7 @@ func (h *OAuthHandler) HandlePKCEAuthorize(w http.ResponseWriter, r *http.Reques
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "unsupported provider (want claude|codex|xai|gitlab)")
 		return
 	}
-	redirectURI := callbackRedirectURI(r)
+	redirectURI := callbackRedirectURIFor(cfg, r)
 	state := r.URL.Query().Get("state")
 	if state == "" {
 		state = randomString(32)
@@ -159,97 +176,150 @@ func (h *OAuthHandler) HandlePKCEAuthorize(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// HandlePKCEExchange exchanges the authorization code and stores the connection.
-// POST /api/oauth/pkce/exchange
-func (h *OAuthHandler) HandlePKCEExchange(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Provider     string `json:"provider"`
-		Code         string `json:"code"`
-		CodeVerifier string `json:"codeVerifier"`
-		RedirectURI  string `json:"redirectUri"`
-		RedirectUri  string `json:"redirect_uri"`
-		State        string `json:"state"`
-		Name         string `json:"name"`
-		BaseURL      string `json:"baseUrl"`
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-	}
-	if raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil && len(raw) > 0 {
-		_ = json.Unmarshal(raw, &body)
-	}
+// pkceExchangeBody is the JSON payload accepted by POST /api/oauth/pkce/exchange.
+type pkceExchangeBody struct {
+	Provider     string `json:"provider"`
+	Code         string `json:"code"`
+	CodeVerifier string `json:"codeVerifier"`
+	RedirectURI  string `json:"redirectUri"`
+	RedirectUri  string `json:"redirect_uri"`
+	State        string `json:"state"`
+	Name         string `json:"name"`
+	BaseURL      string `json:"baseUrl"`
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret"`
+}
+
+// pkceExchange is one resolved authorization_code exchange. Resolving it once
+// keeps the HTTP handler and the Codex loopback proxy — which receives the
+// callback on a separate listener and has no dashboard request to parse — on
+// exactly one exchange code path.
+type pkceExchange struct {
+	cfg          *pkceConfig
+	provider     string
+	code         string
+	codeVerifier string
+	state        string
+	name         string
+	redirectURI  string
+	clientID     string
+	clientSecret string
+	tokenURL     string
+	base         string // self-hosted GitLab base, "" for hosted providers
+}
+
+// pkceTokens is the token endpoint's response, normalized across providers.
+type pkceTokens struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresIn    int
+	Scope        string
+	IDToken      string
+}
+
+// pkceExchangeResult reports a completed exchange to HTTP and proxy callers.
+type pkceExchangeResult struct {
+	ConnectionID string
+	Name         string
+	Email        string
+}
+
+// exchangeError carries the HTTP status a failed exchange step surfaces as.
+type exchangeError struct {
+	status  int
+	message string
+}
+
+func (e *exchangeError) Error() string { return e.message }
+
+func exchangeFail(status int, format string, args ...any) *exchangeError {
+	return &exchangeError{status: status, message: fmt.Sprintf(format, args...)}
+}
+
+// resolvePKCEExchange validates the request and fills in the provider's
+// endpoints. The only network I/O is xAI's OIDC discovery; everything else is
+// pure validation so a bad request never reaches the token endpoint.
+func resolvePKCEExchange(body pkceExchangeBody, r *http.Request) (*pkceExchange, *exchangeError) {
 	cfg := pkceLookup(body.Provider)
 	if cfg == nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "unsupported provider (want claude|codex|xai|gitlab)")
-		return
+		return nil, exchangeFail(http.StatusBadRequest, "unsupported provider (want claude|codex|xai|gitlab)")
 	}
 	code := body.Code
 	if i := strings.Index(code, "#"); i >= 0 { // Claude appends state after #
 		code = code[:i]
 	}
 	if code == "" {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing code parameter")
-		return
+		return nil, exchangeFail(http.StatusBadRequest, "missing code parameter")
 	}
 	if body.CodeVerifier == "" {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing codeVerifier parameter")
-		return
+		return nil, exchangeFail(http.StatusBadRequest, "missing codeVerifier parameter")
 	}
-	redirectURI := exchangeRedirectURI(r, body.RedirectURI, body.RedirectUri)
-	tokenURL := cfg.tokenURL
-	clientID := cfg.clientID
-	base := ""
+
+	ex := &pkceExchange{
+		cfg:          cfg,
+		provider:     body.Provider,
+		code:         code,
+		codeVerifier: body.CodeVerifier,
+		state:        body.State,
+		name:         body.Name,
+		redirectURI:  exchangeRedirectURIFor(cfg, r, body.RedirectURI, body.RedirectUri),
+		clientID:     cfg.clientID,
+		clientSecret: body.ClientSecret,
+		tokenURL:     cfg.tokenURL,
+	}
 	if body.Provider == "gitlab" {
-		base = strings.TrimSuffix(body.BaseURL, "/")
-		if base == "" {
-			base = "https://gitlab.com"
+		ex.base = strings.TrimSuffix(body.BaseURL, "/")
+		if ex.base == "" {
+			ex.base = "https://gitlab.com"
 		}
-		tokenURL = base + "/oauth/token"
+		ex.tokenURL = ex.base + "/oauth/token"
 		if body.ClientID != "" {
-			clientID = body.ClientID
+			ex.clientID = body.ClientID
 		}
 	}
 	if body.Provider == "xai" {
 		if disc, err := discoverOIDCEndpoints(cfg.discoverIssuer); err == nil {
-			tokenURL = disc.tokenURL
+			ex.tokenURL = disc.tokenURL
 		}
 	}
+	return ex, nil
+}
 
+// requestToken swaps the authorization code for tokens. Providers differ only
+// in request encoding (Claude uses a JSON body, everyone else form-encoded)
+// and in whether state rides along.
+func (ex *pkceExchange) requestToken(ctx context.Context) (*pkceTokens, *exchangeError) {
 	var tokenReq *http.Request
-	if cfg.exchangeJSON { // Claude: JSON body incl. state
+	var err error
+	if ex.cfg.exchangeJSON { // Claude: JSON body incl. state
 		payload := map[string]string{
-			"code":          code,
+			"code":          ex.code,
 			"grant_type":    "authorization_code",
-			"client_id":     clientID,
-			"redirect_uri":  redirectURI,
-			"code_verifier": body.CodeVerifier,
+			"client_id":     ex.clientID,
+			"redirect_uri":  ex.redirectURI,
+			"code_verifier": ex.codeVerifier,
 		}
-		if cfg.includeState {
-			payload["state"] = body.State
+		if ex.cfg.includeState {
+			payload["state"] = ex.state
 		}
 		raw, _ := json.Marshal(payload)
-		var err error
-		tokenReq, err = http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, bytes.NewReader(raw))
-		if err != nil {
-			handlerutil.WriteJSONError(w, http.StatusInternalServerError, "create token request failed")
-			return
+		if tokenReq, err = http.NewRequestWithContext(ctx, http.MethodPost, ex.tokenURL, bytes.NewReader(raw)); err != nil {
+			return nil, exchangeFail(http.StatusInternalServerError, "create token request failed")
 		}
 		tokenReq.Header.Set("Content-Type", "application/json")
 	} else { // codex / xai / gitlab: form body
 		form := url.Values{
 			"grant_type":    {"authorization_code"},
-			"client_id":     {clientID},
-			"code":          {code},
-			"redirect_uri":  {redirectURI},
-			"code_verifier": {body.CodeVerifier},
+			"client_id":     {ex.clientID},
+			"code":          {ex.code},
+			"redirect_uri":  {ex.redirectURI},
+			"code_verifier": {ex.codeVerifier},
 		}
-		if body.ClientSecret != "" {
-			form.Set("client_secret", body.ClientSecret)
+		if ex.clientSecret != "" {
+			form.Set("client_secret", ex.clientSecret)
 		}
-		var err error
-		tokenReq, err = http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
-		if err != nil {
-			handlerutil.WriteJSONError(w, http.StatusInternalServerError, "create token request failed")
-			return
+		if tokenReq, err = http.NewRequestWithContext(ctx, http.MethodPost, ex.tokenURL, strings.NewReader(form.Encode())); err != nil {
+			return nil, exchangeFail(http.StatusInternalServerError, "create token request failed")
 		}
 		tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -258,58 +328,74 @@ func (h *OAuthHandler) HandlePKCEExchange(w http.ResponseWriter, r *http.Request
 	client := &http.Client{Timeout: 15 * time.Second}
 	tokenResp, err := client.Do(tokenReq)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("token exchange failed: %v", err))
-		return
+		return nil, exchangeFail(http.StatusBadGateway, "token exchange failed: %v", err)
 	}
 	defer tokenResp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(tokenResp.Body, 1<<20))
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to read token response")
-		return
+		return nil, exchangeFail(http.StatusBadGateway, "failed to read token response")
 	}
 	if tokenResp.StatusCode != http.StatusOK {
-		log.Warn("oauth", "pkce token exchange non-200", "provider", body.Provider, "status", tokenResp.StatusCode, "bytes", len(respBody))
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("token exchange returned status %d: %s", tokenResp.StatusCode, string(respBody)))
-		return
+		log.Warn("oauth", "pkce token exchange non-200", "provider", ex.provider, "status", tokenResp.StatusCode, "bytes", len(respBody))
+		return nil, exchangeFail(http.StatusBadGateway, "token exchange returned status %d: %s", tokenResp.StatusCode, string(respBody))
 	}
-	var tokens struct {
+	var wire struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int    `json:"expires_in"`
 		Scope        string `json:"scope"`
 		IDToken      string `json:"id_token"`
 	}
-	if err := json.Unmarshal(respBody, &tokens); err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to decode token response")
-		return
+	if err := json.Unmarshal(respBody, &wire); err != nil {
+		return nil, exchangeFail(http.StatusBadGateway, "failed to decode token response")
 	}
-	if tokens.AccessToken == "" {
-		handlerutil.WriteJSONError(w, http.StatusBadGateway, "missing access_token in token response")
-		return
+	if wire.AccessToken == "" {
+		return nil, exchangeFail(http.StatusBadGateway, "missing access_token in token response")
 	}
+	return &pkceTokens{
+		AccessToken:  wire.AccessToken,
+		RefreshToken: wire.RefreshToken,
+		ExpiresIn:    wire.ExpiresIn,
+		Scope:        wire.Scope,
+		IDToken:      wire.IDToken,
+	}, nil
+}
 
+// buildConnectionData maps tokens plus provider-specific claims onto the
+// connection's stored data blob. Codex additionally keeps the ChatGPT account
+// id and plan from the id_token: the codex endpoint rejects requests that do
+// not carry chatgpt-account-id, and plan type drives quota routing.
+func (ex *pkceExchange) buildConnectionData(ctx context.Context, tokens *pkceTokens) (map[string]any, string) {
 	email, extra := "", map[string]any{}
-	if cfg.emailFromIDTok {
-		email = extractEmailFromJWT(tokens.IDToken)
+	if ex.cfg.emailFromIDTok {
+		info := codexAccountInfo(tokens.IDToken)
+		email = firstNonEmpty(info.Email, extractEmailFromJWT(tokens.IDToken))
 		if tokens.IDToken != "" {
 			extra["idToken"] = tokens.IDToken
 		}
+		if info.AccountID != "" || info.PlanType != "" {
+			psd := map[string]any{}
+			if info.AccountID != "" {
+				psd["chatgptAccountId"] = info.AccountID
+			}
+			if info.PlanType != "" {
+				psd["chatgptPlanType"] = info.PlanType
+			}
+			extra["providerSpecificData"] = psd
+		}
 	}
-	if cfg.userInfoPath != "" && base != "" { // GitLab: fetch user profile
-		if u, err := fetchOAuthUserInfo(r.Context(), base+cfg.userInfoPath, tokens.AccessToken); err == nil {
+	if ex.cfg.userInfoPath != "" && ex.base != "" { // GitLab: fetch user profile
+		if u, err := fetchOAuthUserInfo(ctx, ex.base+ex.cfg.userInfoPath, tokens.AccessToken); err == nil {
 			if v, _ := u["email"].(string); v != "" {
 				email = v
 			} else if v, _ := u["public_email"].(string); v != "" {
 				email = v
 			}
 			extra["gitlabUser"] = u
-			extra["gitlabBaseUrl"] = base
+			extra["gitlabBaseUrl"] = ex.base
 		}
 	}
 
-	connName := connectionDisplayName(body.Provider, body.Name, email, cfg.display)
-	connID := cfg.connPrefix + shortHash(tokens.AccessToken)
-	now := currentTimestamp()
 	dataMap := map[string]any{"apiKey": tokens.AccessToken, "accessToken": tokens.AccessToken}
 	if tokens.RefreshToken != "" {
 		dataMap["refreshToken"] = tokens.RefreshToken
@@ -323,42 +409,83 @@ func (h *OAuthHandler) HandlePKCEExchange(w http.ResponseWriter, r *http.Request
 	if tokens.ExpiresIn > 0 {
 		dataMap["expiresAt"] = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).UTC().Format(time.RFC3339)
 	}
+	return dataMap, email
+}
+
+// completePKCEExchange runs the token swap and persists the resulting
+// connection, returning the outcome shared by the HTTP and proxy paths.
+func (h *OAuthHandler) completePKCEExchange(ctx context.Context, ex *pkceExchange) (pkceExchangeResult, *exchangeError) {
+	tokens, fail := ex.requestToken(ctx)
+	if fail != nil {
+		return pkceExchangeResult{}, fail
+	}
+	dataMap, email := ex.buildConnectionData(ctx, tokens)
+	connName := connectionDisplayName(ex.provider, ex.name, email, ex.cfg.display)
+	connID := ex.cfg.connPrefix + shortHash(tokens.AccessToken)
+	if err := h.persistConnection(connID, ex.provider, connName, dataMap, tokens.RefreshToken); err != nil {
+		return pkceExchangeResult{}, exchangeFail(http.StatusInternalServerError, "failed to save connection: %v", err)
+	}
+	return pkceExchangeResult{ConnectionID: connID, Name: connName, Email: email}, nil
+}
+
+// persistConnection upserts a connection row, keeping the stored refresh token
+// when the provider's response omitted one (Codex only rotates it on the
+// first exchange).
+func (h *OAuthHandler) persistConnection(connID, provider, connName string, dataMap map[string]any, refreshToken string) error {
+	if h.Repo == nil || h.Repo.RawDB() == nil {
+		return nil
+	}
+	if refreshToken == "" {
+		var existing string
+		if err := h.Repo.RawDB().QueryRow("SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&existing); err == nil && existing != "" {
+			var old map[string]any
+			if jerr := json.Unmarshal([]byte(existing), &old); jerr == nil {
+				if rt, ok := old["refreshToken"].(string); ok && rt != "" {
+					dataMap["refreshToken"] = rt
+				}
+			}
+		}
+	}
 	dataBytes, err := json.Marshal(dataMap)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to marshal connection data")
+		return fmt.Errorf("marshal connection data: %w", err)
+	}
+	now := currentTimestamp()
+	var existing string
+	if err := h.Repo.RawDB().QueryRow("SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&existing); err == nil && existing != "" {
+		_, err = h.Repo.RawDB().Exec(
+			"UPDATE providerConnections SET name = ?, data = ?, updatedAt = ? WHERE id = ?",
+			connName, string(dataBytes), now, connID,
+		)
+	} else {
+		_, err = h.Repo.RawDB().Exec(
+			"INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, 1, ?, ?, ?)",
+			connID, provider, connName, string(dataBytes), now, now,
+		)
+	}
+	return err
+}
+
+// HandlePKCEExchange exchanges the authorization code and stores the connection.
+// POST /api/oauth/pkce/exchange
+func (h *OAuthHandler) HandlePKCEExchange(w http.ResponseWriter, r *http.Request) {
+	var body pkceExchangeBody
+	if raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &body)
+	}
+	ex, fail := resolvePKCEExchange(body, r)
+	if fail != nil {
+		handlerutil.WriteJSONError(w, fail.status, fail.message)
 		return
 	}
-	if h.Repo != nil && h.Repo.RawDB() != nil {
-		var existing string
-		err := h.Repo.RawDB().QueryRow("SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&existing)
-		if err == nil && existing != "" {
-			if tokens.RefreshToken == "" {
-				var old map[string]any
-				if jerr := json.Unmarshal([]byte(existing), &old); jerr == nil {
-					if rt, ok := old["refreshToken"].(string); ok && rt != "" {
-						dataMap["refreshToken"] = rt
-					}
-				}
-				dataBytes, _ = json.Marshal(dataMap)
-			}
-			_, err = h.Repo.RawDB().Exec(
-				"UPDATE providerConnections SET name = ?, data = ?, updatedAt = ? WHERE id = ?",
-				connName, string(dataBytes), now, connID,
-			)
-		} else {
-			_, err = h.Repo.RawDB().Exec(
-				"INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, 1, ?, ?, ?)",
-				connID, body.Provider, connName, string(dataBytes), now, now,
-			)
-		}
-		if err != nil {
-			handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save connection: %v", err))
-			return
-		}
+	res, fail := h.completePKCEExchange(r.Context(), ex)
+	if fail != nil {
+		handlerutil.WriteJSONError(w, fail.status, fail.message)
+		return
 	}
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-		"status": "authorized", "id": connID, "connectionId": connID,
-		"provider": body.Provider, "name": connName, "email": email,
+		"status": "authorized", "id": res.ConnectionID, "connectionId": res.ConnectionID,
+		"provider": ex.provider, "name": res.Name, "email": res.Email,
 	})
 }
 

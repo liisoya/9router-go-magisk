@@ -14,16 +14,22 @@ type Setting struct {
 
 // ProviderConnection represents an upstream provider connection.
 type ProviderConnection struct {
-	ID        string  `json:"id"`
-	Provider  string  `json:"provider"`
-	AuthType  string  `json:"authType"`
-	Name      *string `json:"name,omitempty"`
-	Email     *string `json:"email,omitempty"`
-	Priority  *int    `json:"priority,omitempty"`
-	IsActive  int     `json:"isActive"` // 0 or 1
-	Data      string  `json:"data"`     // JSON string representing additional provider config
-	CreatedAt string  `json:"createdAt"`
-	UpdatedAt string  `json:"updatedAt"`
+	ID       string  `json:"id"`
+	Provider string  `json:"provider"`
+	AuthType string  `json:"authType"`
+	Name     *string `json:"name,omitempty"`
+	Email    *string `json:"email,omitempty"`
+	Priority *int    `json:"priority,omitempty"`
+	IsActive int     `json:"isActive"` // 0 or 1
+	Data     string  `json:"data"`     // JSON string representing additional provider config
+	// LastUsedAt / ConsecutiveUseCount back persistent round-robin. Upstream
+	// keeps no in-memory rotation index: it sorts candidates by lastUsedAt and
+	// writes the winner's stamp back (src/sse/services/auth.js:154-189), so the
+	// rotation survives a restart and behaves the same in every process.
+	LastUsedAt          *string `json:"lastUsedAt,omitempty"`
+	ConsecutiveUseCount *int    `json:"consecutiveUseCount,omitempty"`
+	CreatedAt           string  `json:"createdAt"`
+	UpdatedAt           string  `json:"updatedAt"`
 }
 
 // ProviderNode represents a deployment node / executor config.
@@ -61,8 +67,8 @@ type Combo struct {
 	ID        string  `json:"id"`
 	Name      string  `json:"name"`
 	Kind      *string `json:"kind,omitempty"`
-	Models    string  `json:"models"`    // JSON string representing model selection details
-	Strategy  string  `json:"strategy"`  // routing strategy: "fallback", "round-robin", "capacity", "fusion"
+	Models    string  `json:"models"`   // JSON string representing model selection details
+	Strategy  string  `json:"strategy"` // routing strategy: "fallback", "round-robin", "capacity", "fusion"
 	CreatedAt string  `json:"createdAt"`
 	UpdatedAt string  `json:"updatedAt"`
 }

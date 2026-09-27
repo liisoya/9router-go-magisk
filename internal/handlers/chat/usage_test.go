@@ -46,7 +46,10 @@ func TestMaskAPIKeyPure(t *testing.T) {
 	}{
 		{"short key (< 8 chars)", "abc", "***"},
 		{"exact 8 chars", "12345678", "***"},
-		{"long key", "sk-1234567890abcdef12345678", "sk-1***5678"},
+		// Upstream widens the kept prefix from 4 to 8 (v0.5.91): every key an
+		// instance mints shares the sk-{machineId} head, so a 4-char prefix
+		// cannot tell team keys apart.
+		{"long key", "sk-1234567890abcdef12345678", "sk-12345***5678"},
 		{"empty key", "", "***"},
 		{"7 chars", "1234567", "***"},
 	}

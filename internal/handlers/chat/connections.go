@@ -1,6 +1,13 @@
 package chat
 
 import (
+	json "encoding/json/v2"
+	"fmt"
+	"math/rand/v2"
+	"slices"
+	"strings"
+	"time"
+
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/log"
@@ -8,10 +15,6 @@ import (
 	"9router/proxy/internal/providers"
 	internalproxy "9router/proxy/internal/proxy"
 	"9router/proxy/internal/translator"
-	json "encoding/json/v2"
-	"fmt"
-	"math/rand/v2"
-	"strings"
 )
 
 // CredentialFallbacks maps search/tool providers to the primary chat provider whose API key can be reused.
@@ -85,7 +88,21 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 		if conn.Provider != provider {
 			return nil, nil, fmt.Errorf("connection %s belongs to provider %s, not %s", connectionID, conn.Provider, provider)
 		}
-	} else {
+		// Upstream resolves the pin inside availableConnections
+		// (src/sse/services/auth.js:143-148), so a disabled or model-locked
+		// row never matches and the request falls through to the configured
+		// strategy. Honouring the pin unconditionally made the dashboard's
+		// enable/disable toggle a no-op for every pinned request.
+		ineligible, reason := h.pinnedConnectionIneligible(conn, excludeIDs, model)
+		if ineligible {
+			log.Warn("connections", "pinned connection ineligible, falling back to strategy",
+				"provider", provider, "conn", conn.ID, "reason", reason)
+			connectionID = ""
+			conn = nil
+		}
+	}
+
+	if conn == nil {
 		connections, queryErr := h.Repo.GetProviderConnections(provider, true)
 		if queryErr != nil {
 			return nil, nil, fmt.Errorf("failed to query connections for %s: %w", provider, queryErr)
@@ -140,7 +157,7 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 				}
 			}
 			if strat.RotateStrategy != "" && strat.RotateStrategy != "none" {
-				connections = h.applyConnectionStrategy(provider, connections, strat)
+				connections = h.applyConnectionStrategy(connections, strat)
 			}
 		}
 
@@ -194,6 +211,48 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 	}
 
 	return conn, &connData, nil
+}
+
+// pinnedConnectionIneligible reports whether a client-pinned connection must
+// not serve the request, mirroring the availability filter upstream applies
+// before it looks for a preferred connection (src/sse/services/auth.js:100-148):
+// disabled rows, explicitly excluded rows, active model locks, and connections
+// the provider's strict model assignment does not bind to this model.
+func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection, excludeIDs []string, model string) (bool, string) {
+	if conn == nil {
+		return true, "nil connection"
+	}
+	if conn.IsActive != 1 {
+		return true, "disabled"
+	}
+	if slices.Contains(excludeIDs, conn.ID) {
+		return true, "excluded"
+	}
+	if model == "" {
+		return false, ""
+	}
+	lockKey := canonicalLockModel(conn.Provider, model)
+	if locked, _ := h.Repo.IsConnectionModelLocked(conn.ID, lockKey); locked {
+		return true, "model lock " + lockKey
+	}
+	if lockKey != model {
+		if locked, _ := h.Repo.IsConnectionModelLocked(conn.ID, model); locked {
+			return true, "model lock " + model
+		}
+	}
+	if conn.Provider == "antigravity" && IsAntigravityModelBlocked(conn.ID, model) {
+		return true, "antigravity quota cache"
+	}
+
+	settings, err := h.Repo.GetSettings()
+	if err != nil || settings == nil {
+		return false, ""
+	}
+	filtered := filterConnectionsForModel(conn.Provider, []*models.ProviderConnection{conn}, model, settings)
+	if len(filtered) == 0 {
+		return true, "strict model assignment"
+	}
+	return false, ""
 }
 
 // GetProviderConfig returns the upstream configuration for a provider.
@@ -411,30 +470,22 @@ func canonicalLockModel(provider, model string) string {
 }
 
 // ApplyConnectionStrategy rotates candidate connections according to the provider's configured strategy.
-func (h *ChatHandler) ApplyConnectionStrategy(provider string, conns []*models.ProviderConnection, strat db.ProviderStrategy) []*models.ProviderConnection {
-	return h.applyConnectionStrategy(provider, conns, strat)
+func (h *ChatHandler) ApplyConnectionStrategy(conns []*models.ProviderConnection, strat db.ProviderStrategy) []*models.ProviderConnection {
+	return h.applyConnectionStrategy(conns, strat)
 }
 
-func (h *ChatHandler) applyConnectionStrategy(provider string, conns []*models.ProviderConnection, strat db.ProviderStrategy) []*models.ProviderConnection {
+func (h *ChatHandler) applyConnectionStrategy(conns []*models.ProviderConnection, strat db.ProviderStrategy) []*models.ProviderConnection {
 	if len(conns) <= 1 {
 		return conns
 	}
 
-	strategy := strings.ToLower(strings.TrimSpace(strat.RotateStrategy))
-	switch strategy {
-	case "round-robin", "roundrobin":
-		stickyLimit := 1
-		if strat.StickyLimit > 0 {
-			stickyLimit = strat.StickyLimit
-		}
-		return h.rotateConnectionsSticky(provider, conns, stickyLimit)
-
-	case "sticky":
+	switch strings.ToLower(strings.TrimSpace(strat.RotateStrategy)) {
+	case "round-robin", "roundrobin", "sticky":
 		stickyLimit := strat.StickyLimit
 		if stickyLimit <= 0 {
 			stickyLimit = 1
 		}
-		return h.rotateConnectionsSticky(provider, conns, stickyLimit)
+		return h.selectByRecency(conns, stickyLimit)
 
 	case "random":
 		offset := rand.IntN(len(conns))
@@ -450,49 +501,77 @@ func (h *ChatHandler) applyConnectionStrategy(provider string, conns []*models.P
 	}
 }
 
-func (h *ChatHandler) rotateConnectionsSticky(provider string, conns []*models.ProviderConnection, stickyLimit int) []*models.ProviderConnection {
-	h.stickyMu.Lock()
-	defer h.stickyMu.Unlock()
-	if h.stickyState == nil {
-		h.stickyState = make(map[string]*comboStickyState)
+// selectByRecency implements persistent round-robin, ported from upstream
+// getProviderCredentials (src/sse/services/auth.js:151-189). Upstream keeps no
+// in-memory rotation index: it picks the most recently used row, holds it while
+// its consecutive-use count is below the sticky limit, otherwise moves to the
+// least recently used one, and writes the winner's stamp back. The Go port
+// instead held a positional index keyed only by provider, which reset to the
+// top account on every restart and advanced on every internal selection rather
+// than once per request.
+func (h *ChatHandler) selectByRecency(conns []*models.ProviderConnection, stickyLimit int) []*models.ProviderConnection {
+	// Most recently used wins the tie-break by list order, which is priority
+	// order, so two rows stamped in the same second rotate deterministically.
+	currentIdx := -1
+	for i, c := range conns {
+		if c == nil || c.LastUsedAt == nil {
+			continue
+		}
+		if currentIdx < 0 || *conns[currentIdx].LastUsedAt <= *c.LastUsedAt {
+			currentIdx = i
+		}
 	}
 
-	key := "conn:" + provider
-	state, exists := h.stickyState[key]
-	if !exists {
-		state = &comboStickyState{Index: 0, ConsecutiveUseCount: 0}
-		h.stickyState[key] = state
+	winner := -1
+	consecutive := 1
+	if currentIdx >= 0 {
+		count := 0
+		if conns[currentIdx].ConsecutiveUseCount != nil {
+			count = *conns[currentIdx].ConsecutiveUseCount
+		}
+		if count < stickyLimit {
+			// Still inside the sticky window: keep serving the same account.
+			winner = currentIdx
+			consecutive = count + 1
+		}
 	}
 
-	servingIndex := state.Index % len(conns)
-	state.ConsecutiveUseCount++
-	if state.ConsecutiveUseCount >= stickyLimit {
-		state.Index = (servingIndex + 1) % len(conns)
-		state.ConsecutiveUseCount = 0
-	}
-	state.ServingIndex = servingIndex
-
-	rotated := make([]*models.ProviderConnection, len(conns))
-	for i := range conns {
-		rotated[i] = conns[(servingIndex+i)%len(conns)]
-	}
-	return rotated
-}
-
-// ResetConnectionState clears rotation state for a provider (or all providers if provider="").
-func (h *ChatHandler) ResetConnectionState(provider string) {
-	h.stickyMu.Lock()
-	defer h.stickyMu.Unlock()
-	if h.stickyState == nil {
-		return
-	}
-	if provider == "" {
-		for k := range h.stickyState {
-			if strings.HasPrefix(k, "conn:") {
-				delete(h.stickyState, k)
+	if winner < 0 {
+		// Least recently used; a row that has never served sorts first, and
+		// rows stamped in the same pass keep priority order.
+		var oldest *string
+		for i, c := range conns {
+			if c == nil {
+				continue
+			}
+			if c.LastUsedAt == nil {
+				winner = i
+				oldest = nil
+				break
+			}
+			if oldest == nil || *c.LastUsedAt < *oldest {
+				winner = i
+				oldest = c.LastUsedAt
 			}
 		}
-		return
+		consecutive = 1
 	}
-	delete(h.stickyState, "conn:"+provider)
+
+	if h.Repo != nil {
+		if err := h.Repo.TouchConnectionRotation(conns[winner].ID, consecutive); err != nil {
+			log.Warn("connections", "persist round-robin stamp failed", "conn", conns[winner].ID, "error", err)
+		}
+	}
+	now := time.Now().UTC().Format(db.RotationTimestampFormat)
+	conns[winner].LastUsedAt = &now
+	conns[winner].ConsecutiveUseCount = &consecutive
+
+	rotated := make([]*models.ProviderConnection, 0, len(conns))
+	rotated = append(rotated, conns[winner])
+	for i, c := range conns {
+		if i != winner {
+			rotated = append(rotated, c)
+		}
+	}
+	return rotated
 }

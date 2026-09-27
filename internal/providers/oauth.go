@@ -78,6 +78,11 @@ var KnownOAuthConfigs = map[string]OAuthClientConfig{
 		ClientSecret: envOr("QODER_OAUTH_CLIENT_SECRET", ""),
 		TokenURL:     "https://center.qoder.sh/algo/api/v3/user/refresh_token",
 	},
+	"qoder-cn": {
+		ClientID:     envOr("QODER_CN_OAUTH_CLIENT_ID", ""),
+		ClientSecret: envOr("QODER_CN_OAUTH_CLIENT_SECRET", ""),
+		TokenURL:     "https://gateway.qoder.com.cn/algo/api/v3/user/refresh_token",
+	},
 	"codebuddy-cn": {
 		ClientID:     envOr("CODEBUDDY_CN_OAUTH_CLIENT_ID", ""),
 		ClientSecret: envOr("CODEBUDDY_CN_OAUTH_CLIENT_SECRET", ""),

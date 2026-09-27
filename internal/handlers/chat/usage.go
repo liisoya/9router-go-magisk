@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/constants"
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/pricing"
 	"9router/proxy/internal/translator"
@@ -147,11 +148,21 @@ func (h *ChatHandler) logUsage(info *UsageLogInfo, usage *translator.OpenAIUsage
 	}
 
 	totalTokens := usage.PromptTokens + usage.CompletionTokens
-	cost := pricing.EstimateCost(info.Model, usage.PromptTokens, usage.CompletionTokens)
-	metaJSON := fmt.Sprintf(`{"provider":"%s","model":"%s","connectionId":"%s"}`, info.Provider, info.Model, info.ConnectionID)
-
 	cachedTokens := usage.GetCachedTokens()
 	cacheCreationTokens := usage.CacheCreationInputTokens
+
+	// prompt_tokens is cache-inclusive, so the cached and cache-creation counts
+	// are handed over too: the formula takes them out of the input rate and
+	// charges them at their own, cheaper rate. The provider matters because
+	// gateways can price the same model differently.
+	cost := pricing.EstimateCost(info.Provider, info.Model, pricing.TokenCounts{
+		PromptTokens:        usage.PromptTokens,
+		CompletionTokens:    usage.CompletionTokens,
+		CachedTokens:        cachedTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		ReasoningTokens:     usage.ReasoningTokens(),
+	})
+	metaJSON := fmt.Sprintf(`{"provider":"%s","model":"%s","connectionId":"%s"}`, info.Provider, info.Model, info.ConnectionID)
 
 	log.Info("usage", "logged", "provider", info.Provider, "model", info.Model, "prompt", usage.PromptTokens, "completion", usage.CompletionTokens, "cached", cachedTokens, "cache_creation", cacheCreationTokens, "ttft_ms", ttftMs, "latency_ms", latencyMs, "cost", cost)
 
@@ -414,12 +425,9 @@ func getJSONMap(m map[string]any, key string) map[string]any {
 	return make(map[string]any)
 }
 
-// maskAPIKey returns a masked version of an API key for storage.
-// NOTE: kept as if/else, not lo.Ternary — Ternary evaluates both branches
-// eagerly and the slicing panics on short keys.
+// maskAPIKey returns a masked version of an API key for storage. The canonical
+// implementation lives in handlerutil so the usage-stats reader can derive the
+// same mask from a stored row to recover the key's name.
 func maskAPIKey(key string) string {
-	if len(key) <= 8 {
-		return "***"
-	}
-	return key[:4] + "***" + key[len(key)-4:]
+	return handlerutil.MaskAPIKey(key)
 }

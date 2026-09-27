@@ -25,6 +25,10 @@ func setupHealthConnTestDB(t *testing.T) (*Repo, func()) {
 		cleanup()
 		t.Fatalf("create providerConnections: %v", err)
 	}
+	if err := EnsureAdditiveColumns(database); err != nil {
+		cleanup()
+		t.Fatalf("additive columns: %v", err)
+	}
 
 	repo := NewRepo(database)
 	return repo, cleanup

@@ -190,13 +190,13 @@
 | 文件 | 我们的改动 | 合并时怎么办 |
 |---|---|---|
 | `AGENTS.md` | §5.0「回归测试否则不算修」硬规则（2026-09-26，模块层与引擎层都适用） | 保留；上游若改同一段，把这条并回去 |
-| `internal/handlers/router.go` | ① ADR-0003 定点补丁：`/api/models/test` 鉴权 —— **上游 v1.9.2 已吸收，本地补丁已撤**；② 挂载 `/web/fetch` + `/v1/web/fetch`（`HandleWebFetch` 此前从未挂载 → Dashboard 网页抓取必 404；补丁存档 `tools/patches/media-web-fetch-route.patch`）；③ 抽出 `healthHandler` 并注册 `/api/health`（带 CORS，浏览器侧可达性探测）；④ 注册 SSO 回调 `/api/auth/oidc/callback`、`/api/auth/saml/acs`（诚实返 501） | 取上游后复核：`TestSetupServerRouter_ModelTestSessionAuth` 仍在跑、两条 web/fetch 路由仍在、`/api/health` 仍带 CORS、SSO 两条仍在（**v1.9.3 复核：四条都仍在 → 全部保留**） |
+| `internal/handlers/router.go` | ① ADR-0003 定点补丁：`/api/models/test` 鉴权 —— **上游 v1.9.2 已吸收，本地补丁已撤**；② 挂载 `/web/fetch` + `/v1/web/fetch`（`HandleWebFetch` 此前从未挂载 → Dashboard 网页抓取必 404；补丁存档 `tools/patches/media-web-fetch-route.patch`）；③ 抽出 `healthHandler` 并注册 `/api/health`（带 CORS，浏览器侧可达性探测）；④ 注册 SSO 回调 `/api/auth/oidc/callback`、`/api/auth/saml/acs`（诚实返 501） | 取上游后复核：`TestSetupServerRouter_ModelTestSessionAuth` 仍在跑、两条 web/fetch 路由仍在、`/api/health` 仍带 CORS、SSO 两条仍在（**v1.9.3 与 v1.9.4 复核：四条都仍在 → 全部保留**） |
 | `internal/handlers/sso/sso.go` | `HandleLoginNotImplemented`（SSO 回调的 501 实现，Phase 24） | 保留 |
-| `internal/handlers/chat/chat.go` | 删除从未被引用的 `HandleHealth` —— **2026-09-27 已撤：上游 v1.9.3 自己删掉了它** | 取上游后确认该函数未回归（若回归，DEADH 会红） |
+| `internal/handlers/chat/chat.go` | 删除从未被引用的 `HandleHealth` —— **2026-09-27 已撤：上游 v1.9.3 自己删掉了它** | 取上游后确认该函数未回归（若回归，DEADH 会红）；**v1.9.4 复核：未回归** |
 | `internal/proxy/executor/codebuddy.go` | codebuddy-cn agent 提示词清洗 —— **2026-09-27 已撤**：上游 v1.9.3 的 shaping（丢弃全部 `system`/`developer` + 前置固定 prompt）在清洗**之后**执行，使清洗恒为 no-op | 若腾讯 11128 复发：把清洗放到 shaping **之后**再引入，别恢复成"shaping 之前"的那一版 |
 | `internal/handlers/router_test.go`、`internal/handlers/dashboard_routes_seam_test.go` | 我们新增的路由断言与测试 seam | 合并后确认仍在（DEADH / dashboard 路由子集门禁依赖它们） |
 | `internal/handlers/dashboard/settings_test.go` | 回插 `TestHandleExportDatabase_AcceptsPasswordHeader`（锁 `x-9r-password` 契约） | 合并后确认该测试仍在 |
-| `web/src/api/client.ts`、`App.svelte`、`components/{LoginView,EndpointView,ProfileSettingsView,analytics/AnalyticsView}.svelte`、`lib/{session,db-backup}.ts`（含 `.test.ts`） | 登录态收敛到 `lib/session.ts`（防回潮门禁扫全树）、备份导出/导入的密码弹层与请求形状（Phase 20） | 保留我们的交互，其余取上游；合并后必须跑 `session.test.ts` 的防回潮扫描（**v1.9.3 复核：未回潮 → 保留**） |
+| `web/src/api/client.ts`、`App.svelte`、`components/{LoginView,EndpointView,ProfileSettingsView,analytics/AnalyticsView}.svelte`、`lib/{session,db-backup}.ts`（含 `.test.ts`） | 登录态收敛到 `lib/session.ts`（防回潮门禁扫全树）、备份导出/导入的密码弹层与请求形状（Phase 20） | 保留我们的交互，其余取上游；合并后必须跑 `session.test.ts` 的防回潮扫描（**v1.9.3 与 v1.9.4 复核：均未回潮 → 保留**） |
 | `COMPARISON.md` | §0 端点 parity 巡检节（机器可验） | 与上游 statuses 图例并存，不删除任何一侧 |
 | `README.md` | **换成了模块自己的英文首页**（2026-09-27），同目录另有 `README.zh-CN.md` 中文版。上游原文**不在本仓留副本**（会过期的快照不如没有），顶部语言切换行直接链上游仓库的 README | 合并时**保留我们的 `README.md`**：上游 README 的改动不再自动进来，正文里也没有上游内容需要对齐；想看上游原文点切换行 |
 

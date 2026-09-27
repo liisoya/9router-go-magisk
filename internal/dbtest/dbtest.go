@@ -3,6 +3,8 @@ package dbtest
 import (
 	"database/sql"
 	"fmt"
+
+	"9router/proxy/internal/db"
 )
 
 // SchemaStatements returns all CREATE TABLE statements used by 9router-go tests.
@@ -85,12 +87,15 @@ func SchemaStatements() []string {
 	}
 }
 
-// CreateTables creates all tables from SchemaStatements in the given database.
+// CreateTables creates all tables from SchemaStatements in the given database,
+// then applies the Go-only additive columns so a fixture matches the shape of a
+// real database. Without this, queries that read the round-robin bookkeeping
+// columns fail in tests while working in production.
 func CreateTables(database *sql.DB) error {
 	for _, stmt := range SchemaStatements() {
 		if _, err := database.Exec(stmt); err != nil {
 			return fmt.Errorf("create table: %w\nSQL: %s", err, stmt)
 		}
 	}
-	return nil
+	return db.EnsureAdditiveColumns(database)
 }

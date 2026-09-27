@@ -60,6 +60,30 @@ func callbackRedirectURI(r *http.Request) string {
 	return requestScheme(r) + "://" + requestHost(r) + "/callback"
 }
 
+// callbackRedirectURIFor resolves the authorize-step redirect URI for a PKCE
+// provider. A provider with a fixedRedirectURI (Codex) always wins over the
+// dashboard-derived value: its public OAuth client registered exactly one
+// loopback callback, so a dashboard-host URL makes auth.openai.com reject the
+// authorize step with invalid_authorize_request before the user ever sees the
+// login page. Every other provider keeps following the dashboard.
+func callbackRedirectURIFor(cfg *pkceConfig, r *http.Request) string {
+	if cfg != nil && cfg.fixedRedirectURI != "" {
+		return cfg.fixedRedirectURI
+	}
+	return callbackRedirectURI(r)
+}
+
+// exchangeRedirectURIFor is the exchange-step twin of callbackRedirectURIFor.
+// The frontend echoes back the redirectUri the authorize step handed it, so
+// both legs always agree; the fixed value is the fallback for clients that
+// omit it.
+func exchangeRedirectURIFor(cfg *pkceConfig, r *http.Request, camel, snake string) string {
+	if cfg != nil && cfg.fixedRedirectURI != "" {
+		return cfg.fixedRedirectURI
+	}
+	return exchangeRedirectURI(r, camel, snake)
+}
+
 // exchangeRedirectURI resolves the redirect_uri for exchange handlers: the
 // value sent back by the frontend (which echoes authorize's redirectUri, so
 // both legs always match) wins, otherwise fall back to the request host.

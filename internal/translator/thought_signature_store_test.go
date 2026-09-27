@@ -75,13 +75,18 @@ func TestThoughtSignatureStore_ParallelCallsFirstGetsSig(t *testing.T) {
 		t.Fatalf("unmarshal geminiBytes failed: %v", err)
 	}
 
-	if len(gReq.Contents) != 1 {
-		t.Fatalf("expected 1 content, got %d", len(gReq.Contents))
+	// NormalizeGeminiContents brackets the conversation with user turns, so the
+	// calls are located by role instead of by a fixed index.
+	var calls []GeminiPart
+	for _, c := range gReq.Contents {
+		if c.Role != "model" {
+			continue
+		}
+		calls = append(calls, c.Parts...)
 	}
-
-	parts := gReq.Contents[0].Parts
+	parts := calls
 	if len(parts) != 2 {
-		t.Fatalf("expected 2 parts, got %d", len(parts))
+		t.Fatalf("expected 2 function-call parts, got %d (contents: %d)", len(parts), len(gReq.Contents))
 	}
 
 	// First call should get DefaultThinkingSignature

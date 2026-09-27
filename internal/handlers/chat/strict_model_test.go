@@ -99,16 +99,22 @@ func TestGetBestConnection_StrictAssignmentIntegration(t *testing.T) {
 	if err := repo.CreateProviderConnection("conn-a", "test-strict", "apikey", "Conn A", "key-a"); err != nil {
 		t.Fatalf("failed to create conn-a: %v", err)
 	}
-	if err := repo.UpdateProviderConnection("conn-a", "Conn A", 10, true, `{"apiKey":"key-a","assignedModel":"model-a"}`); err != nil {
+	if err := repo.UpdateConnectionData("conn-a", `{"apiKey":"key-a","assignedModel":"model-a"}`); err != nil {
 		t.Fatalf("failed to update conn-a data: %v", err)
+	}
+	if err := repo.SetConnectionPriority("conn-a", 10); err != nil {
+		t.Fatalf("failed to set conn-a priority: %v", err)
 	}
 
 	// Conn B: providerSpecificData.assignedModel: "model-b"
 	if err := repo.CreateProviderConnection("conn-b", "test-strict", "apikey", "Conn B", "key-b"); err != nil {
 		t.Fatalf("failed to create conn-b: %v", err)
 	}
-	if err := repo.UpdateProviderConnection("conn-b", "Conn B", 5, true, `{"apiKey":"key-b","providerSpecificData":{"assignedModel":"model-b"}}`); err != nil {
+	if err := repo.UpdateConnectionData("conn-b", `{"apiKey":"key-b","providerSpecificData":{"assignedModel":"model-b"}}`); err != nil {
 		t.Fatalf("failed to update conn-b data: %v", err)
+	}
+	if err := repo.SetConnectionPriority("conn-b", 5); err != nil {
+		t.Fatalf("failed to set conn-b priority: %v", err)
 	}
 
 	// Enable StrictModelAssignment for test-strict in settings

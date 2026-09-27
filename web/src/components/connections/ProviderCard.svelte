@@ -3,7 +3,8 @@
   import Badge from '../../lib/ui/Badge.svelte'
   import Card from '../../lib/ui/Card.svelte'
   import Toggle from '../../lib/ui/Toggle.svelte'
-  import { getIconPath, type ProviderStats } from './types'
+  import ProviderIcon from './ProviderIcon.svelte'
+  import { type ProviderStats } from './types'
 
   interface Props {
     id: string
@@ -25,7 +26,6 @@
     onToggleAll,
   }: Props = $props()
 
-  let icon = $derived(getIconPath(id, apiType))
   let isAllDisabled = $derived(stats.allDisabled)
 </script>
 
@@ -53,17 +53,7 @@
   >
     <div class="flex min-w-0 items-center justify-between gap-3">
       <div class="flex min-w-0 items-center gap-3">
-        <div class="w-8 h-8 shrink-0 rounded-lg flex items-center justify-center bg-black/5 dark:bg-white/5 border border-border overflow-hidden">
-          <img
-            src={icon}
-            alt={name}
-            class="w-5 h-5 object-contain"
-            onerror={(e) => {
-              const target = e.currentTarget as HTMLImageElement
-              target.style.display = 'none'
-            }}
-          />
-        </div>
+        <ProviderIcon {id} {apiType} size="md" />
         <div class="min-w-0">
           <h3 class="truncate font-semibold text-sm text-text-main group-hover:text-brand-500 transition-colors">
             {name}

@@ -74,6 +74,10 @@ func setupEmbeddingsTestDB(t *testing.T) (*sql.DB, func()) {
 			t.Fatalf("failed to create table: %v", err)
 		}
 	}
+	if err := db.EnsureAdditiveColumns(database); err != nil {
+		cleanup()
+		t.Fatalf("additive columns: %v", err)
+	}
 
 	_, err = database.Exec(`INSERT INTO apiKeys (id, key, name, isActive, createdAt) VALUES
 		('1', 'test-api-key', 'Test Key', 1, '2026-07-18T00:00:00Z')`)

@@ -77,6 +77,8 @@ func fetchProviderUsage(ctx context.Context, provider string, data map[string]an
 		return fetchOllamaUsage(ctx, apiKey), true
 	case "qoder":
 		return fetchQoderUsage(ctx, firstNonEmptyStr(accessToken, apiKey)), true
+	case "qoder-cn":
+		return fetchQoderUsageAt(ctx, firstNonEmptyStr(accessToken, apiKey), "https://openapi.qoder.com.cn/api/v2/quota/usage"), true
 	case "codebuddy-intl":
 		return fetchCodeBuddyIntlUsage(ctx, accessToken, apiKey), true
 	case "kiro":
@@ -669,10 +671,16 @@ func usageNumOK(v any) (float64, bool) {
 // ---------- qoder: GET openapi quota/usage ----------
 
 func fetchQoderUsage(ctx context.Context, accessToken string) usageResult {
+	return fetchQoderUsageAt(ctx, accessToken, "https://openapi.qoder.sh/api/v2/quota/usage")
+}
+
+// fetchQoderUsageAt hits the provider's own openapi host, so Qoder and
+// Qoder CN each read their own quota instead of sharing one endpoint.
+func fetchQoderUsageAt(ctx context.Context, accessToken, usageURL string) usageResult {
 	if strings.TrimSpace(accessToken) == "" {
 		return usageResult{message: "Qoder usage unavailable: no access token", bare: true}
 	}
-	status, _, out, err := usageGet(ctx, "https://openapi.qoder.sh/api/v2/quota/usage", map[string]string{
+	status, _, out, err := usageGet(ctx, usageURL, map[string]string{
 		"Authorization": "Bearer " + strings.TrimSpace(accessToken),
 		"Accept":        "application/json",
 	})

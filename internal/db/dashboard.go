@@ -5,13 +5,17 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"9router/proxy/internal/models"
 )
 
 // UpdateProviderConnection updates a provider connection's name, priority, isActive, data, and updatedAt.
-func (r *Repo) UpdateProviderConnection(id string, name string, priority int, isActive bool, data string) error {
+// priority is a pointer so a NULL priority stays NULL: coercing it to 0 would
+// sort the row ahead of every other account (priority 0 beats every positive
+// rank) and silently promote it to the top of the rotation.
+func (r *Repo) UpdateProviderConnection(id string, name string, priority *int, isActive bool, data string) error {
 	activeInt := 0
 	if isActive {
 		activeInt = 1
@@ -27,6 +31,22 @@ func (r *Repo) UpdateProviderConnection(id string, name string, priority int, is
 	)
 	if err != nil {
 		return fmt.Errorf("update provider connection %s: %w", id, err)
+	}
+	return nil
+}
+
+// UpdateConnectionData updates only the data payload and updatedAt.
+// Background writers (token refresh, node sync, probe persist) must use this:
+// a full-row update writes back the name/isActive/priority they read before the
+// write, which reverts a reorder or a toggle the user just performed.
+func (r *Repo) UpdateConnectionData(id string, data string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := r.db.Exec(
+		`UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?`,
+		data, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update connection data %s: %w", id, err)
 	}
 	return nil
 }
@@ -66,6 +86,74 @@ func (r *Repo) SetConnectionPriority(id string, priority int) error {
 	)
 	if err != nil {
 		return fmt.Errorf("set connection priority %s: %w", id, err)
+	}
+	return nil
+}
+
+// ReorderProviderConnections atomically moves one connection within its
+// provider's pool and renumbers the whole pool to a contiguous 1..N sequence.
+//
+// The dashboard previously reordered with two independent full-row PUTs. That
+// has no cross-row transaction, so a partial failure left two rows sharing a
+// priority — and a stable sort over tied priorities then made every later swap
+// a literal no-op, permanently bricking the pair. Doing the swap plus the
+// renumber in one SQLite transaction makes partial failure impossible, and
+// normalising to 1..N also repairs any duplicates left behind by older data.
+// direction is -1 to move the row up and +1 to move it down.
+func (r *Repo) ReorderProviderConnections(provider, id string, direction int) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("reorder %s/%s: begin transaction: %w", provider, id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(
+		`SELECT id FROM providerConnections WHERE provider = ?
+		 ORDER BY CASE WHEN priority IS NULL THEN 999999 ELSE priority END ASC, updatedAt DESC, id ASC`,
+		provider,
+	)
+	if err != nil {
+		return fmt.Errorf("reorder %s/%s: read pool: %w", provider, id, err)
+	}
+	var order []string
+	for rows.Next() {
+		var rowID string
+		if scanErr := rows.Scan(&rowID); scanErr != nil {
+			_ = rows.Close()
+			return fmt.Errorf("reorder %s/%s: scan pool: %w", provider, id, scanErr)
+		}
+		order = append(order, rowID)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("reorder %s/%s: read pool: %w", provider, id, err)
+	}
+	_ = rows.Close()
+
+	idx := slices.Index(order, id)
+	if idx < 0 {
+		return fmt.Errorf("reorder %s/%s: connection not found in provider pool", provider, id)
+	}
+	target := idx + direction
+	if target < 0 || target >= len(order) {
+		// Already at the edge: still renumber, so a pool carrying stale or
+		// duplicate priorities is normalised even on a no-move request.
+		target = idx
+	} else {
+		order[idx], order[target] = order[target], order[idx]
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i, rowID := range order {
+		if _, err = tx.Exec(
+			`UPDATE providerConnections SET priority = ?, updatedAt = ? WHERE id = ?`,
+			i+1, now, rowID,
+		); err != nil {
+			return fmt.Errorf("reorder %s/%s: write rank %d: %w", provider, id, i+1, err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("reorder %s/%s: commit: %w", provider, id, err)
 	}
 	return nil
 }

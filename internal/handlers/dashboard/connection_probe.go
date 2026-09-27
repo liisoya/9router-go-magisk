@@ -897,17 +897,9 @@ func (h *DashboardHandler) persistProbeResult(conn *models.ProviderConnection, r
 		}
 	}
 
-	name := ""
-	if conn.Name != nil {
-		name = *conn.Name
-	}
-	priority := 0
-	if conn.Priority != nil {
-		priority = *conn.Priority
-	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {
 		return
 	}
-	_ = h.Repo.UpdateProviderConnection(conn.ID, name, priority, conn.IsActive == 1, string(encoded))
+	_ = h.Repo.UpdateConnectionData(conn.ID, string(encoded))
 }

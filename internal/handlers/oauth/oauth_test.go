@@ -41,6 +41,11 @@ func setupOAuthTestDB(t *testing.T) (*sql.DB, func()) {
 		os.Remove(tmpFile.Name())
 		t.Fatalf("exec schema failed: %v", err)
 	}
+	if err := db.EnsureAdditiveColumns(database); err != nil {
+		database.Close()
+		os.Remove(tmpFile.Name())
+		t.Fatalf("additive columns: %v", err)
+	}
 
 	cleanup := func() {
 		database.Close()

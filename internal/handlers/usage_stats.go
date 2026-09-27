@@ -133,6 +133,55 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 			}
 		}
 
+		// Friendly names for the API-key breakdown. The stored value is not
+		// uniform across the shared database: rows this build writes keep only
+		// the masked key, while rows the Next.js dashboard wrote keep the full
+		// one. Index both forms so a stored row resolves either way.
+		keyNames := make(map[string]string)
+		if keys, err := repo.GetApiKeys(); err == nil {
+			for _, k := range keys {
+				if k.Name == nil || *k.Name == "" {
+					continue
+				}
+				keyNames[k.Key] = *k.Name
+				keyNames[handlerutil.MaskAPIKey(k.Key)] = *k.Name
+			}
+		}
+
+		// addAPIKeyUsage folds one request into the byApiKey bucket. The bucket is
+		// keyed by the stored key value, not by a freshly derived display mask:
+		// every key an instance mints shares the same prefix, so a re-derived
+		// mask collapsed a whole team key set into a single row and attributed
+		// one key's usage to another (upstream v0.5.91, same class of fix).
+		addAPIKeyUsage := func(apiKey, rawModel, provider, providerDisplay, timestamp string, requests int, promptTok, complTok, cachedTok int64, cost float64) {
+			if apiKey == "" || apiKey == "***" {
+				apiKey = "local-no-key"
+			}
+			bucketKey := apiKey + "|" + rawModel + "|" + provider
+			cur := resp.ByApiKey[bucketKey]
+			cur.RawModel = rawModel
+			cur.Provider = providerDisplay
+			cur.ApiKeyMasked = apiKey
+			cur.ApiKeyKey = apiKey
+			switch {
+			case keyNames[apiKey] != "":
+				cur.KeyName = keyNames[apiKey]
+			case apiKey == "local-no-key":
+				cur.KeyName = "Local (No Key)"
+			default:
+				cur.KeyName = apiKey[:min(8, len(apiKey))] + "..."
+			}
+			cur.Requests += requests
+			cur.PromptTokens += promptTok
+			cur.CompletionTokens += complTok
+			cur.CachedTokens += cachedTok
+			cur.Cost += cost
+			if timestamp > cur.LastUsed {
+				cur.LastUsed = timestamp
+			}
+			resp.ByApiKey[bucketKey] = cur
+		}
+
 		useDailySummary := period != "today" && period != "24h"
 
 		if useDailySummary {
@@ -237,6 +286,33 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 							}
 						}
 					}
+
+					// byApiKey. The daily payload carries no per-request timestamp
+					// (the date is the row key), so LastUsed stays empty here — same
+					// as the other daily branches.
+					if bak, ok := dayData["byApiKey"].(map[string]any); ok {
+						for _, kVal := range bak {
+							km, ok := kVal.(map[string]any)
+							if !ok {
+								continue
+							}
+							rawModel, _ := km["rawModel"].(string)
+							prov, _ := km["provider"].(string)
+							apiKey, _ := km["apiKey"].(string)
+							displayName := prov
+							if dn, ok := nodeNameMap[prov]; ok && dn != "" {
+								displayName = dn
+							}
+							addAPIKeyUsage(
+								apiKey, rawModel, prov, displayName, "",
+								getMapInt(km, "requests"),
+								getMapInt64(km, "promptTokens"),
+								getMapInt64(km, "completionTokens"),
+								getMapInt64(km, "cachedTokens"),
+								getMapFloat(km, "cost"),
+							)
+						}
+					}
 				}
 			}
 		} else {
@@ -319,6 +395,12 @@ func HandleUsageStats(repo *db.Repo) http.HandlerFunc {
 						}
 						resp.ByAccount[accKey] = a
 					}
+
+					// byApiKey
+					addAPIKeyUsage(
+						r.APIKey, r.Model, provName, provDisplayName, r.Timestamp,
+						1, promptTok, complTok, cachedTok, entryCost,
+					)
 				}
 			}
 		}

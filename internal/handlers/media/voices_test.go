@@ -112,6 +112,9 @@ func newVoicesTestRepo(t *testing.T) *db.Repo {
 	)`); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
+	if err := db.EnsureAdditiveColumns(database); err != nil {
+		t.Fatalf("additive columns: %v", err)
+	}
 	return db.NewRepo(database)
 }
 

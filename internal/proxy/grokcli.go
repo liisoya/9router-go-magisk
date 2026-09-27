@@ -55,9 +55,17 @@ func ForwardGrokCLI(ctx context.Context, client *http.Client, cfg *providers.Pro
 
 // ForwardCodex forwards to codex / perplexity-agent using OpenAI Responses API format.
 // Body transformation (Chat→Responses API) is done by the caller.
-func ForwardCodex(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool) (*http.Response, error) {
+//
+// psd is the connection's providerSpecificData. chatgpt-account-id selects
+// which ChatGPT workspace the request bills against; the codex endpoint
+// rejects a request that omits it, so a connection stored without
+// chatgptAccountId can authorize but never complete a call.
+func ForwardCodex(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool, psd map[string]any) (*http.Response, error) {
 	headers := map[string]string{
 		"originator": "codex_cli_rs",
+	}
+	if accountID, ok := psd["chatgptAccountId"].(string); ok && accountID != "" {
+		headers["chatgpt-account-id"] = accountID
 	}
 	setAuth(headers, cfg, apiKey)
 	streamHeaders(headers, isStream)

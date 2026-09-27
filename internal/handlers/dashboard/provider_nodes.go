@@ -297,15 +297,7 @@ func syncNodeConnections(h *DashboardHandler, nodeID, prefix, apiType, nodeType,
 		if err != nil {
 			continue
 		}
-		name := ""
-		if conn.Name != nil {
-			name = *conn.Name
-		}
-		priority := 0
-		if conn.Priority != nil {
-			priority = *conn.Priority
-		}
-		_ = h.Repo.UpdateProviderConnection(conn.ID, name, priority, conn.IsActive == 1, string(dataBytes))
+		_ = h.Repo.UpdateConnectionData(conn.ID, string(dataBytes))
 	}
 }
 

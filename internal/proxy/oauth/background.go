@@ -201,15 +201,7 @@ func refreshBackgroundConnection(ctx context.Context, repo *db.Repo, c Connectio
 		log.Printf("[BG_TOKEN_REFRESH] marshal failed conn=%s: %v", c.ID, err)
 		return
 	}
-	name := ""
-	if conn.Name != nil {
-		name = *conn.Name
-	}
-	priority := 0
-	if conn.Priority != nil {
-		priority = *conn.Priority
-	}
-	if err := repo.UpdateProviderConnection(c.ID, name, priority, conn.IsActive == 1, string(merged)); err != nil {
+	if err := repo.UpdateConnectionData(c.ID, string(merged)); err != nil {
 		log.Printf("[BG_TOKEN_REFRESH] persist failed conn=%s: %v", c.ID, err)
 		return
 	}

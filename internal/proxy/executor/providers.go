@@ -55,7 +55,7 @@ func ForwardCodex(w http.ResponseWriter, req *Request) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardCodex(ctx, req.Client, req.Config, req.APIKey, transformedBody, req.IsStream)
+	resp, err := proxy.ForwardCodex(ctx, req.Client, req.Config, req.APIKey, transformedBody, req.IsStream, req.ConnData)
 	if err != nil {
 		return fmt.Errorf("ForwardCodex: %w", err)
 	}
@@ -820,7 +820,12 @@ func ensureMessagesMaxTokens(body []byte, model string) []byte {
 		}
 	}
 
-	// 5. Clean OpenAI-specific fields that strict Claude API rejects
+	// 5. Clean OpenAI-specific fields that strict Claude API rejects.
+	// Claude returns thinking text only with thinking.display "summarized", a
+	// field OpenAI has no equivalent for, so the client's ask cannot survive
+	// translation on its own — capture it into the Claude field first.
+	// (upstream thinkingUnified captureThinking)
+	applyClaudeThinkingDisplay(reqMap)
 	delete(reqMap, "stream_options")
 	delete(reqMap, "store")
 	delete(reqMap, "reasoning_effort")

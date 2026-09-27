@@ -69,6 +69,7 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 
 		// Models
 		r.Get("/models/custom", h.HandleGetCustomModels)
+		r.Get("/models/caps", h.HandleGetModelCaps)
 		r.Post("/models/custom", h.HandleSaveCustomModel)
 		r.Delete("/models/custom/{key}", h.HandleDeleteCustomModel)
 		r.Get("/models/disabled", h.HandleGetDisabledModels)
