@@ -156,7 +156,7 @@ function renderPanel(st, live) {
   document.getElementById('mod-cur').textContent = st.module_version || '未知';
   state.moduleVersion = (st.module_version || '').replace(/^v/, '').split('-r')[0];
   state.engineVersion = (st.engine_version || '').trim();
-  state.modUrl = st.mod_url || DEFAULT_MOD_UPDATE_URL;
+  state.modUrl = st.mod_url || KU.DEFAULT_MOD_UPDATE_URL;
   resources(st);
   renderAddrs(st);
   loadCurrentUpstreams(st);

@@ -124,6 +124,27 @@ test('app.js 不得再手写 release 地址 / 仓库字面量 / 清单 URL', () 
   assert.ok(!/raw\.githubusercontent\.com/.test(APP), 'app.js 里出现清单 URL 字面量（应为 KU.*_URL）');
   assert.ok(/KU\./.test(APP), 'app.js 没有使用 KUpstream（地址契约的所有者）');
 });
+// ── 回潮扫描之二：upstream.js **拥有**的名字，app.js 里必须带 `KU.` 前缀 ──
+// 2026-09-27 真机事故：把常量收编进 upstream.js 时漏改了 renderPanel 里的一处裸引用
+// （`st.mod_url || DEFAULT_MOD_UPDATE_URL`），面板每次刷新都抛 ReferenceError —— 纯函数
+// 用例全绿也拦不住，因为它们不跑装配层。名字清单**从 upstream.js 的返回对象里现取**，
+// 不手写：手写的清单自己就会漂，那正是这个仓库反复吃过亏的地方。
+const UPSTREAM_SRC = fs.readFileSync(path.join(__dirname, '..', 'upstream.js'), 'utf8');
+function ownedNames(src) {
+  const m = src.match(/return\s*\{([\s\S]*?)\};/);
+  assert.ok(m, 'upstream.js 里找不到 return 对象（改名了？本门禁需要同步）');
+  return m[1].split(/[,\s]+/).map(s => s.trim()).filter(s => /^[A-Za-z_$][\w$]*$/.test(s));
+}
+test('app.js 引用 upstream.js 拥有的名字时必须带 KU. 前缀（不许裸引用）', () => {
+  const names = ownedNames(UPSTREAM_SRC);
+  assert.ok(names.length >= 10, `只从 upstream.js 解析出 ${names.length} 个名字，解析规则该更新了`);
+  // 注释里写名字是正常的（解释为什么要带前缀），先剥掉注释再扫
+  const code = APP.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const bare = names.filter(n => new RegExp(`(?<![.\\w$])${n}(?![\\w$])`).test(code));
+  assert.deepStrictEqual(bare, [],
+    `app.js 裸引用了这些名字（应写成 KU.<名字>）：${bare.join(', ')}`);
+});
+
 test('index.html 必须加载 upstream.js，且在 parsers.js / app.js 之前', () => {
   const iUp = IDX.indexOf('upstream.js');
   const iApp = IDX.indexOf('app.js');

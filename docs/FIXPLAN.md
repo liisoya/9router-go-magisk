@@ -569,6 +569,41 @@
 
 
 
+## Phase 28 · 面板「概览读不出来 + 点重启报错」：收编 URL 常量时漏改一处裸引用（用户报障）✅ 2026-09-27
+
+> 用户报障：「查看手机显示引擎还是 1.9.2，点重启会报错，概览的信息也读不出来了」。
+> 取证结论：**引擎其实已经更新到 1.9.4 了**（shell 层验过 PID 20329 与 `/version` 自报 1.9.4），
+> 坏的是面板 —— 它显示的是 localStorage 里的旧快照。
+
+- [x] **28.1 根因：Phase 27 的收编动作漏了一处**
+  - Phase 27 把 URL 常量收进 `module/webroot/upstream.js` 时改了 4 处引用，漏掉 `renderPanel` 里的
+    `state.modUrl = st.mod_url || DEFAULT_MOD_UPDATE_URL`（`app.js:159`）—— 那是一处**裸引用**
+    （没有 `KU.` 前缀），而常量已经不存在了。
+  - 连锁反应正好解释用户看到的三件事：① 状态行在第 159 行**之前**渲染，所以显示的是缓存快照
+    （1.9.2 / 旧 PID 27777）；② `resources()` 与 `renderAddrs()` 在它**之后**，抛错后不再执行
+    —— 服务地址卡在"加载中"、资源占用全是 `-`；③ 异常冒泡到 `withBusy` 的 catch，
+    原样变成 `❌ 操作失败：DEFAULT_MOD_UPDATE_URL is not defined`。
+- [x] **28.2 门禁缺口（比 bug 本身更值得修）**
+  - 老门禁全是纯函数用例（parsers / bridge / upstream），**`app.js` 这个装配层从来没有运行时用例**；
+    回潮扫描只查 URL 字面量，不查标识符。这类缺陷因此只能等真机报障。
+  - 新增 `module/webroot/test/app-wiring.test.js`：在桩 DOM + 桩 `ksu.exec`（cb3 形态 + 命中形态缓存）
+    里跑**真实的** `app.js`，断言 ① 初始化链上没有 unhandledRejection、② `renderPanel` **后半段**的
+    三处渲染（资源占用 / dnsfwd 内存 / 服务地址）与链尾 `renderAccelCur` 都留下了痕迹、
+    ③ 每个 `btn-*` 都真的绑上了处理函数（id 写错会静默失联）。
+  - `upstream.test.js` 加"回潮扫描之二"：**`upstream.js` 拥有的名字**（清单从它的 return 对象**现取**，
+    不手写 —— 手写清单自己会漂）在 `app.js` 里必须带 `KU.` 前缀，裸引用即红。
+  - **红灯自证**：把那一行改回裸引用 → 两条门禁精确变红（`not ok` 两条，其余 84 条不受影响）。
+- [x] **28.3 修复与真机恢复**
+  - 改回 `KU.DEFAULT_MOD_UPDATE_URL`；`tools/check.sh --offline` **11/11** 全绿。
+  - 用 `tools/deploy-device.sh` 直推 webroot 到报障设备（dev 通道，不必等发版）：
+    设备侧 `md5(app.js)` 与仓库**逐字节一致**，自检 `panel` 显示
+    `engine_version=1.9.4 engine_ver_src=runtime`。
+  - 设备面板需**重开** WebUI 才会加载新 JS（管理器 WebView 会缓存脚本）。
+- [x] **28.4 顺手修文档结构**：Phase 27 插入时把 `## 验收矩阵` 标题吃掉了，表格成了无头孤儿 —— 已补回。
+- [ ] **待发版**：本修复尚未进入任何发布包（**r1 里就是坏的那份**），需要随下一次模块发版带上。
+
+## 验收矩阵（每 Phase 完成后真机过一遍）
+
 | 功能 | 操作 | 期望 |
 |---|---|---|
 | 概览 | 重进模块管理页 | 秒出，状态/内存/RSS 齐全 |

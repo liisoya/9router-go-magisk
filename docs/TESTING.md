@@ -34,7 +34,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | ID | 断言 | 命令 | 前置 | 失败意味着 |
 |---|---|---|---|---|
 | JS-SYNTAX | 全部 shell 脚本语法正确 | `sh -n module/**/*.sh tools/**/*.sh` | sh | 设备上脚本直接不可执行（**mksh 与 dash 有差异，真机断言仍是最终判据**） |
-| JS-UNIT | 模块 WebUI 纯函数回归（当前 **83 例 / 5 文件**；清单由 **glob 全量**展开，不手写文件名） | `node --test module/webroot/test/*.test.js` | node | 解析层/命令构造器/键契约/上游地址契约回归。**为什么必须 glob**：此前手写 3 个文件，候选 5 新增的 `engine-spec-contract.test.js` 因此成了「存在、能被跑、但唯一入口从不跑它」的门禁孤儿（2026-09-27 修正） |
+| JS-UNIT | 模块 WebUI 回归（当前 **86 例 / 6 文件**；清单由 **glob 全量**展开，不手写文件名）。含**装配层冒烟**：在桩 DOM + 桩 `ksu.exec` 里跑真实的 `app.js` | `node --test module/webroot/test/*.test.js` | node | 解析层/命令构造器/键契约/上游地址契约回归，以及装配层"跑到底"的回归。**为什么必须 glob**：此前手写 3 个文件，候选 5 新增的 `engine-spec-contract.test.js` 因此成了「存在、能被跑、但唯一入口从不跑它」的门禁孤儿（2026-09-27 修正） |
 | BUN-UNIT | 引擎 Dashboard 纯函数回归 **82 例**（10 文件） | `bun test web/src` | bun | Dashboard 逻辑回归（请求形状、供应商解析、导入导出等） |
 | GO-BUILD | 引擎可编译 | `go build ./...` | go | 引擎源码编译失败 |
 | GO-TEST | Go 单元测试（排除外网/真机依赖用例） | `go test ./... -skip '<见 §4>'` | go | 引擎侧回归 |
@@ -91,7 +91,8 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | `module/webroot/test/bridge-commands.test.js` | 19 | 命令构造器：引号转义、base64 写文件、备份/恢复、`download` 必带 `-f`、`fetch` 必带 `-L`、`sqlSnapshot` 成败判据、`promiseWrap`、`fileSize`/`elfMagic` |
 | `module/webroot/test/contract-keys.test.js` | 6 | 键契约：shell `emit` 键集合 ↔ `app.js` 消费键；状态词值枚举双向对齐 |
 | `module/webroot/test/engine-spec-contract.test.js` | 5 | 「什么算一个引擎」两侧缝死（常量/魔数字面量/检查项存在性/边界语义） |
-| `module/webroot/test/upstream.test.js` | 13 | 上游 release 地址契约：tag 缺 v 必须补（原故障复现）、资产与校验和同 tag、加速前缀只加 GitHub 域、`SHA256SUMS` 整词解析、与 `checksumGate` 的 fail-closed 联动、**`app.js` 回潮扫描**（不许再手写 release 地址） |
+| `module/webroot/test/upstream.test.js` | 14 | 上游 release 地址契约：tag 缺 v 必须补（原故障复现）、资产与校验和同 tag、加速前缀只加 GitHub 域、`SHA256SUMS` 整词解析、与 `checksumGate` 的 fail-closed 联动、**两道回潮扫描**（不许再手写 release 地址；`upstream.js` 拥有的名字必须带 `KU.` 前缀） |
+| `module/webroot/test/app-wiring.test.js` | 2 | **装配层冒烟**：在桩 DOM + 桩 `ksu.exec`（cb3 形态 + 命中形态缓存）里跑真实的 `app.js` —— ① 初始化链无 unhandledRejection、`renderPanel` **后半段**与链尾 `renderAccelCur` 都渲染到了、② 每个 `btn-*` 都真的绑上了处理函数。2026-09-27「面板读不出来」事故的回归 |
 | `web/src/**/*.test.ts`（10 文件） | 91 | Dashboard：请求形状（`db-backup`）、供应商/路由解析、批量添加、代理导入、OAuth 交接、登录态收敛、analytics 类型等 |
 | Go `./...`（约 28 包） | — | 引擎侧；外网/真机依赖用例见 §4 |
 
@@ -145,6 +146,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-27 | 修改 | 真机档前置 | T13 引入真机档唯一的**外网依赖**，§4 已登记（不可达 = SKIP，不是回归） | 见本次提交 |
 | 2026-09-27 | 修改 | PARITY（基线 135 → 131） | 上游同步 v1.9.3：4 条 Kiro OAuth 路由缺口被上游补齐 → 按棘轮语义 `--write-baseline` 收紧。**附带**：基线文件被当前生成器去掉了方法名对齐空格（格式归一），所以 diff 看起来很宽 —— `git diff --ignore-all-space` 只有 1 增 5 删，可据此复核 | 见本次提交 |
 | 2026-09-27 | 修改 | GO-BUILD / GO-TEST 前置 | 上游 v1.9.3 带来新依赖 `golang.org/x/sync`，本机 `proxy.golang.org` 直连超时 → §4 登记 `GOPROXY=https://goproxy.cn,direct`（`ALL_PROXY` 对 Go 无效） | 见本次提交 |
+| 2026-09-27 | 新增 | JS-UNIT（83 → 86 例，+`app-wiring.test.js`，`upstream` +1） | Phase 28：把 URL 常量收编进 `upstream.js` 时漏改一处裸引用，面板整个读不出来 —— **纯函数用例拦不住装配层缺陷**。新增「跑真实 `app.js`」的冒烟门禁 + 「`upstream.js` 拥有的名字必须带 `KU.` 前缀」的静态扫描（清单从 return 对象现取）。红灯自证：两处都精确变红 | 见本次提交 |
 
 ## 6. UI parity 已知缺口（基线与理由）
 
