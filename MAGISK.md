@@ -6,7 +6,7 @@
 
 ```
 9router-go-magisk/
-├── cmd/ internal/ web/ ...   # 上游 v1.9.2 引擎源码（默认不改；ADR-0003 定点修复除外，补丁存档 tools/patches/）
+├── cmd/ internal/ web/ ...   # 上游 v1.9.3 引擎源码（默认不改；ADR-0003 定点修复除外，补丁存档 tools/patches/）
 ├── module/                   # Magisk/KernelSU 模块层
 │   ├── module.prop           # id=ninerouter-go + updateJson
 │   ├── customize.sh          # 安装期：ABI 检查 + chmod 兜底
@@ -19,6 +19,7 @@
 │   ├── etc/schema.sql        # 数据库 schema 引导（上游 DATABASE.md 派生，构建期断言防漂移）
 │   └── webroot/              # 模块 WebUI（KSU/WebUIX）：概览/DNS/一致性检查/更新
 │       ├── index.html        # HTML 结构（MODDIR 由构建期注入 __MOD_ID__）
+│       ├── upstream.js       # 上游 release 地址契约（tag 归一/资产名/校验和/加速前缀）
 │       ├── parsers.js        # 纯函数解析层（可离线 node --test 回归）
 │       ├── bridge.js         # root-shell 桥（串行队列 / CRLF / sqlFile 环境补偿）
 │       ├── app.js            # UI 装配与事件
@@ -36,15 +37,16 @@
 ## 门禁（唯一入口 `tools/check.sh`，清单与断言含义见 `docs/TESTING.md`）
 
 ```bash
-tools/check.sh --offline   # 离线：shell 语法 / 模块 WebUI 46 例 / Dashboard 82 例 / go build+test / tsc / schema
-tools/check.sh --device    # 真机：T1–T10（生命周期与安装）+ A1–A5（仪表盘 API）
+tools/check.sh --offline   # 离线：shell 语法 / 模块 WebUI 纯函数 / Dashboard 纯函数 / go build+test / tsc / schema / 注入器 / 棘轮
+tools/check.sh --device    # 真机：T1–T13（生命周期·安装门禁·版本自愈·更新链路）+ A1–A5（仪表盘 API）
 tools/check.sh --parity    # 对照：端点 parity 棘轮 + UI 调用 parity（需 ../9router，UPSTREAM= 可覆盖）
 tools/check.sh --all       # 三档全跑（缺前置 → SKIP 摘要，退出 0；--require-device/--require-parity 为严格模式）
 ```
 
-- 模块 WebUI 三套离线回归（`module/webroot/test/`）：`parsers.test.js` 解析层 fixture、
-  `bridge-commands.test.js` 命令构造器与成败判据、`contract-keys.test.js` 键契约门禁
-  （shell 的 `emit` 键集合 vs `app.js` 消费键，源码即契约）
+- 模块 WebUI 离线回归（`module/webroot/test/`，清单由 glob 全量展开，**不手写文件名**）：
+  `parsers.test.js` 解析层与"先门禁后动作"计划、`bridge-commands.test.js` 命令构造器与成败判据、
+  `contract-keys.test.js` 键契约与状态词、`engine-spec-contract.test.js`「什么算一个引擎」两侧缝死、
+  `upstream.test.js` 上游 release 地址契约（含 `app.js` 不许手写地址的回潮扫描）
 - 真机断言逐条含义、已知不绿灯（外网依赖用例）与**变更记录**都在 `docs/TESTING.md`
 - 新增/修改/删除任何门禁断言 → 必须同步登记台账（`AGENT-CONVENTIONS.md §4`）
 
