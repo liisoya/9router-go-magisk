@@ -32,11 +32,11 @@
 4. 到 API Keys 页拿一个 key。
 5. 在你的编程工具里填三样东西：
 
-```text
-Endpoint   http://<手机IP>:20130/v1
-API Key    第 4 步拿到的那个
-Model      供应商提供的模型（加上前缀）比如 kr/claude-sonnet-4.5
-```
+| 设置项 | 值 |
+|---|---|
+| Endpoint | `http://<手机IP>:20130/v1` |
+| API Key | 第 4 步拿到的那个 |
+| Model | 供应商提供的模型（加上前缀）比如 `kr/claude-sonnet-4.5` |
 
 Claude Code 的不同点只在 Endpoint：`ANTHROPIC_BASE_URL=http://<手机IP>:20130/v1`。
 
