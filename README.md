@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/platform-Android%20arm64-3ddc84)
 ![Root](https://img.shields.io/badge/root-KernelSU%20%2F%20Magisk-blue)
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [Upstream README](UPSTREAM-README.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · [Upstream README](https://github.com/luqman-v1/9router-go#readme)
 
 [🤔 What is this](#-what-is-this) • [⚡ Quick Start](#-quick-start) • [💡 What the module does](#-what-the-module-does) • [📖 FAQ](#-faq) • [🙏 Credits](#-credits)
 
