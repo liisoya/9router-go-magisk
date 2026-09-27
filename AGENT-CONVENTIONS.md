@@ -105,7 +105,7 @@
 
 | 归属 | 文件 | 改动代价 |
 |---|---|---|
-| **上游共享** | `AGENTS.md` `CLAUDE.md` `ARCHITECTURE.md` `COMPARISON.md` `README.md` `ROADMAP.md` `TECHNICAL_DEBT.md` `CHANGELOG.md` `DATABASE.md` `Makefile` `VERSION` `version.json` `web/**` `internal/**` `cmd/**` `docs/BUILD_DASHBOARD.md` `docs/DASHBOARD_PROVIDER_PARITY.md` `docs/superpowers/**` | 改动 = **预期下次合并冲突**；必须登记 §10 |
+| **上游共享** | `AGENTS.md` `CLAUDE.md` `ARCHITECTURE.md` `COMPARISON.md` `README.md`（**本仓已换成模块英文首页，上游原文存 `UPSTREAM-README.md`，见 §10.2**） `ROADMAP.md` `TECHNICAL_DEBT.md` `CHANGELOG.md` `DATABASE.md` `Makefile` `VERSION` `version.json` `web/**` `internal/**` `cmd/**` `docs/BUILD_DASHBOARD.md` `docs/DASHBOARD_PROVIDER_PARITY.md` `docs/superpowers/**` | 改动 = **预期下次合并冲突**；必须登记 §10 |
 | **我们独有** | `module/**` `tools/**` `build.sh` `update.json` `CONTEXT.md` `MAGISK.md` `AGENT-CONVENTIONS.md` `docs/TESTING.md` `docs/FIXPLAN.md` `docs/adr/**` | 可自由改（仍受 §4 约束） |
 
 > 新增文档时优先取**上游没有的名字**（如本文件、`docs/TESTING.md`），从源头避开冲突。
@@ -198,5 +198,7 @@
 | `internal/handlers/dashboard/settings_test.go` | 回插 `TestHandleExportDatabase_AcceptsPasswordHeader`（锁 `x-9r-password` 契约） | 合并后确认该测试仍在 |
 | `web/src/api/client.ts`、`App.svelte`、`components/{LoginView,EndpointView,ProfileSettingsView,analytics/AnalyticsView}.svelte`、`lib/{session,db-backup}.ts`（含 `.test.ts`） | 登录态收敛到 `lib/session.ts`（防回潮门禁扫全树）、备份导出/导入的密码弹层与请求形状（Phase 20） | 保留我们的交互，其余取上游；合并后必须跑 `session.test.ts` 的防回潮扫描（**v1.9.3 复核：未回潮 → 保留**） |
 | `COMPARISON.md` | §0 端点 parity 巡检节（机器可验） | 与上游 statuses 图例并存，不删除任何一侧 |
+| `README.md` | **换成了模块自己的英文首页**（2026-09-27）；上游原文挪到 `UPSTREAM-README.md` 留档；同目录另有 `README.zh-CN.md` 中文版，三份之间用顶部语言切换行互链 | 合并时**保留我们的 `README.md`**（上游 README 的改动不再自动进来）。要跟上游就手工刷 `UPSTREAM-README.md` 快照，或者干脆以上游仓库的 README 为准 |
+| `UPSTREAM-README.md` | 上游 README 的快照（文件名是本仓独有，不会与上游撞名） | 不参与合并；上游 README 有实质更新时手工同步一次 |
 
 > 每次合并后，**先看本表，再跑 `tools/check.sh --all`**。新增对共享文件的改动必须追加到本表。

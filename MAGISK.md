@@ -1,6 +1,7 @@
 # MAGISK.md — 模块层使用与构建说明
 
-> 引擎/Dashboard 本身见上游 `README.md`；本文件只讲模块层。
+> 引擎/Dashboard 本身见 `UPSTREAM-README.md`（上游 README 的快照，最新版以上游仓库为准）；
+> 本文件只讲模块层。模块自己的首页是 `README.md`（英文）/ `README.zh-CN.md`（中文）。
 
 ## 目录
 

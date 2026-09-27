@@ -1,248 +1,115 @@
 <div align="center">
 
-# 9router-go — FREE AI Router & Token Saver (Single Binary)
+# 9Router Go — Android Module
 
-**Never stop coding. Save 20-40% tokens with RTK + auto-fallback to FREE & cheap AI models.**
+**Runs 9Router Go on your Android phone.**
 
-**Connect Claude Code, Cursor, Antigravity, Codex, Gemini, OpenCode, Cline, OpenClaw... to 40+ AI providers & 100+ models — no Node.js needed at runtime.**
+[![Release](https://img.shields.io/github/v/release/liisoya/9router-go-magisk)](https://github.com/liisoya/9router-go-magisk/releases/latest)
+![Platform](https://img.shields.io/badge/platform-Android%20arm64-3ddc84)
+![Root](https://img.shields.io/badge/root-KernelSU%20%2F%20Magisk-blue)
 
-[![CI](https://github.com/luqman-v1/9router-go/actions/workflows/ci.yml/badge.svg)](https://github.com/luqman-v1/9router-go/actions/workflows/ci.yml)
-[![Release](https://github.com/luqman-v1/9router-go/actions/workflows/release.yml/badge.svg)](https://github.com/luqman-v1/9router-go/actions/workflows/release.yml)
-[![GitHub release](https://img.shields.io/github/v/release/luqman-v1/9router-go)](https://github.com/luqman-v1/9router-go/releases/latest)
-[![License](https://img.shields.io/github/license/luqman-v1/9router-go)](https://github.com/luqman-v1/9router-go/blob/main/LICENSE)
+[English](README.md) · [简体中文](README.zh-CN.md) · [Upstream README](UPSTREAM-README.md)
 
-[🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [⚙️ Setup](#-setup-guide) • [🌐 Upstream](https://github.com/decolua/9router)
+[🤔 What is this](#-what-is-this) • [⚡ Quick Start](#-quick-start) • [💡 What the module does](#-what-the-module-does) • [📖 FAQ](#-faq) • [🙏 Credits](#-credits)
 
 </div>
 
 ---
 
-## 🤔 Why 9router-go?
+## 🤔 What is this
 
-Same idea as [9Router](https://github.com/decolua/9router), minus the Node.js runtime: **one Go binary** serves the proxy APIs + an embedded Svelte dashboard.
+A Magisk / KernelSU module that does one thing: run [luqman-v1/9router-go](https://github.com/luqman-v1/9router-go) on your phone.
 
-**Stop wasting money, tokens and hitting limits:**
+So what is 9router? It's an AI gateway. It connects coding tools such as Claude Code, Cursor, Codex, Gemini, OpenCode, Cline, Copilot, Antigravity and OpenClaw to 40+ AI providers and 100+ models, and picks whichever one still has quota, costs less, or is free.
 
-- ❌ Subscription quota expires unused every month
-- ❌ Rate limits stop you mid-coding
-- ❌ Tool outputs (git diff, grep, ls...) burn tokens fast
-- ❌ Manual switching between providers
-
-**9router-go solves this:**
-
-- ✅ **RTK Token Saver** — auto-compress tool_result content, save 20-40% tokens
-- ✅ **Auto fallback** — Subscription → Cheap → Free, zero downtime
-- ✅ **Multi-account** — round-robin between accounts per provider
-- ✅ **Single binary** — Go + embedded dashboard, works with Claude Code, Codex, Cursor, Cline, any CLI tool
-
----
-
-## 🔄 How It Works
-
-```text
-┌─────────────┐
-│  Your CLI   │  (Claude Code, Codex, OpenClaw, Cursor, Cline...)
-│   Tool      │
-└──────┬──────┘
-       │ http://localhost:20130/v1
-       ↓
-┌─────────────────────────────────────────────┐
-│         9router-go (Smart Router)           │
-│  • RTK Token Saver (cut tool_result tokens) │
-│  • Format translation (OpenAI ↔ Claude)     │
-│  • Quota tracking                           │
-│  • Auto token refresh                       │
-└──────┬──────────────────────────────────────┘
-       │
-       ├─→ [Tier 1: SUBSCRIPTION] Claude Code, Codex, GitHub Copilot
-       │   ↓ quota exhausted
-       ├─→ [Tier 2: CHEAP] GLM ($0.6/1M), MiniMax ($0.2/1M)
-       │   ↓ budget limit
-       └─→ [Tier 3: FREE] Kiro, OpenCode Free, Vertex ($300 credits)
-
-Result: Never stop coding, minimal cost + 20-40% token savings via RTK
-```
-
----
+9router-go is the single-binary Go version of that gateway. No Node.js. It handles 5,920 requests per second against the original's 505, and uses 42MB of RAM against the original's 271MB. That is what makes running it on a phone realistic.
 
 ## ⚡ Quick Start
 
-**1. Install (one line):**
+You need an arm64 Android phone that is already rooted (KernelSU or Magisk).
 
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/luqman-v1/9router-go/main/install.sh | bash
-```
+1. Flash `9router-go-<version>-magisk.zip` in your manager, then reboot.
+2. Open `http://<phone-ip>:20130`. The password is `123456` — change it before anything else.
+3. Go to the Providers tab and connect one provider.
+4. Grab a key from the API Keys tab.
+5. Fill in three fields in your coding tool:
 
-```powershell
-# Windows (PowerShell, no admin needed)
-irm https://raw.githubusercontent.com/luqman-v1/9router-go/main/install.ps1 | iex
-```
+| Setting | Value |
+|---|---|
+| Endpoint | `http://<phone-ip>:20130/v1` |
+| API Key | the one from step 4 |
+| Model | a model your provider serves, with its prefix, e.g. `kr/claude-sonnet-4.5` |
 
-🎉 Then start it (defaults: port `20130`, data `~/.9router` — no flags needed):
+Claude Code differs in the endpoint only: `ANTHROPIC_BASE_URL=http://<phone-ip>:20130/v1`.
 
-```bash
-9router-go
-# dashboard: http://localhost:20130
-```
-
-> Already use upstream 9Router? Point Go at the same data dir — it opens the **same `DATA_DIR/db/data.sqlite`**: providers, connections, combos, and usage carry over. Details in [`DATABASE.md`](DATABASE.md).
-
-**2. Connect a FREE provider (no signup needed):**
-
-Dashboard → Providers → Connect **Kiro AI** (~50 credits/month free) or **OpenCode Free** (no auth) → Done!
-
-**3. Use in your CLI tool:**
-
-```text
-Claude Code / Codex / OpenClaw / Cursor / Cline Settings:
-  Endpoint: http://localhost:20130/v1
-  API Key:  [Settings → API Keys in the dashboard]
-  Model:    kr/claude-sonnet-4.5
-```
-
-**That's it!** Start coding with FREE AI models.
-
-**Alternatives:**
-
-```bash
-# Docker — no build needed
-docker run -d --name 9router-go --restart unless-stopped \
-  -p 20130:20130 -v "$HOME/.9router:/data" \
-  -e PORT=20130 -e DATA_DIR=/data \
-  luqmenul/9router-go:latest
-
-# Manual download — pick your file, no command line guesswork:
-# Windows → .exe | Mac M1+ → darwin-arm64 | Mac Intel → darwin-amd64
-# Linux VPS → linux-amd64 | Raspberry Pi → linux-arm64
-```
-
-📦 [All release binaries](https://github.com/luqman-v1/9router-go/releases/latest) • 🔨 [Build from source](#-setup-guide)
+> ⚠️ The default password is `123456`, and the engine listens on the whole LAN. Change the password right after flashing.
 
 ---
 
-## 💡 Key Features
+## 💡 What the module does
 
-- 🖥️ Native Svelte 5 dashboard: providers, OAuth, combos, proxy pools, API keys, usage, quota, settings
-- 🔌 OpenAI Chat, Claude Messages, Gemini, Ollama-compatible, Responses, embeddings, media, search, web tools
-- 🔁 Combos with fallback, round-robin, sticky routing, fusion, capability-aware reordering
-- 👥 Per-provider executors, OAuth refresh, reactive 401 retry
-- 📡 Live usage + console-log SSE streams, stall detection
-- 💾 SQLite WAL persistence, outbound proxy support, self-update, MITM commands, Docker, cross-compilation
+| Feature | What it does |
+|---|---|
+| 🚀 Starts on boot | Comes up by itself after a reboot, and waits for the network before starting. |
+| 🌐 Local DNS | Android has no `/etc/resolv.conf`, so the module ships a forwarder: it picks the fastest upstream for you, and steps aside when something else already serves DNS. |
+| 📊 Web panel | Open it from your manager to see status, memory use and service addresses, and to change the port, start or stop services, manage DNS and more. |
+| ⬆️ Updates in the panel | Both the engine and the module update from the panel. |
 
 ---
 
-## ⚙️ Setup Guide
-
-### Release binary
-
-Download from [GitHub Releases](https://github.com/luqman-v1/9router-go/releases/latest), verify against `SHA256SUMS.txt`.
-
-### Build from source
-
-Prerequisites: Go 1.27 and Bun 1.x (dashboard is embedded into the binary, so build web first):
-
-```bash
-git clone https://github.com/luqman-v1/9router-go.git
-cd 9router-go
-make web-build   # bun install --frozen-lockfile && bun run build
-make build       # embeds VERSION into the Go binary
-```
-
-### Run
-
-Defaults are enough for most people — plain `9router-go` listens on port `20130` with data in `~/.9router`:
-
-```bash
-9router-go
-curl http://localhost:20130/health
-./9router-go version
-```
-
-Only override when you need something different (`PORT`, `DATA_DIR`/`DB_PATH` — there are no `--port` flags):
-
-```bash
-PORT=20129 ./9router-go                        # different port
-DATA_DIR=/srv/9router ./9router-go              # different data dir
-DB_PATH=/srv/9router/data.sqlite ./9router-go   # explicit SQLite file
-HOST=127.0.0.1 ./9router-go                     # localhost only, behind a reverse proxy
-```
-
-First dashboard login uses the compatibility password until you set your own (remote fresh installs must change it or set `INITIAL_PASSWORD`).
-
-### Client example
-
-```bash
-curl http://localhost:20130/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-your-api-key' \
-  -d '{"model":"ag/gemini-3.8-flash-high","messages":[{"role":"user","content":"Hello"}],"stream":true}'
-```
-
-For Claude Messages clients: `ANTHROPIC_BASE_URL=http://localhost:20130/v1`.
+## 📖 FAQ
 
 <details>
-<summary><b>Advanced: environment variables, API surface, auth, database</b></summary>
+<summary><b>What phones does it work on?</b></summary>
 
-### Environment
+arm64 Android with KernelSU or Magisk. Other architectures cannot install: the installer checks and refuses, rather than leaving you with a module that quietly will not run.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PORT` | `20130` | HTTP port |
-| `HOST` / `BIND_ADDR` | all interfaces | Listener address |
-| `DATA_DIR` | `~/.9router` (`%APPDATA%/9router` on Windows) | Data root |
-| `DB_PATH` | `$DATA_DIR/db/data.sqlite` | SQLite file |
-| `INITIAL_PASSWORD` | unset (fallback `123456` locally) | First dashboard password |
-| `RTK_ENABLED` | `true` | RTK input compression |
-| `CAVEMAN_ENABLED` / `PONYTAIL_ENABLED` | `false` | Style savers |
-| `AUTO_UPDATE` | `false` | Background self-update |
-| `HTTP_PROXY` / `HTTPS_PROXY` | Go defaults | Upstream egress proxy |
-| `PPROF_ENABLED` | `false` | Expose `/debug/pprof/*` (keep off on untrusted networks) |
-| `TRUST_PROXY` / `TRUST_CLOUDFLARE` | unset | Trust forwarded client-IP headers |
+</details>
 
-`.env.example` documents the security-sensitive subset and OAuth overrides.
+<details>
+<summary><b>The engine is up, but no model connects.</b></summary>
 
-### API surface
+Check DNS first. Android has no `/etc/resolv.conf`, and the engine only looks for a resolver at `127.0.0.1:53`, so the module ships a forwarder to hold that port.
 
-```text
-POST /v1/chat/completions       OpenAI Chat Completions
-POST /v1/messages               Claude Messages
-POST /v1/responses              Responses API
-POST /v1/embeddings             Embeddings
-POST /api/chat                  Ollama-compatible chat
-GET  /v1/models                 Model catalog
-POST /v1/images/generations     Image generation
-POST /v1/videos/generations     Video generation
-POST /v1/audio/speech           Text to speech
-POST /v1/audio/transcriptions   Speech to text
-POST /v1/search                 Web search
-GET  /api/usage/stream          Live usage SSE
-GET  /health                    Liveness
-GET  /api/version               Version metadata
-```
+Open the DNS tab in the panel and confirm the forwarder is running. If the panel says 已让路 (yielded), another DNS service on your phone already owns that port and the engine's lookups go through it, which is normal. If you turn the forwarder off in the panel and nothing else serves `:53`, the panel warns you that models will stop connecting. When DNS resolution just will not work, you can also put your own resolver in the upstream list, for example `1.1.1.1` or `8.8.8.8`.
 
-### Authentication
+</details>
 
-- Public: `/health`, dashboard HTML/assets, `/login`, OAuth callbacks.
-- Proxy routes need an active client API key (`Authorization: Bearer` / `X-API-Key`).
-- Dashboard APIs need a session cookie, CLI token, or API key; destructive ops (shutdown, update, DB import) need a session or CLI token.
-- The API server defaults to all interfaces — bind localhost or protect the port outside trusted machines.
+<details>
+<summary><b>Where does my data live, and does uninstalling delete it?</b></summary>
 
-### Database compatibility
+All of it is in `/data/adb/9router-go/`: the database, DNS config, port setting and logs. Uninstalling the module leaves everything in place, so reinstalling picks up where you left off. Delete that directory by hand if you want it gone for good.
 
-Go reads/writes the upstream 9router table/JSON shapes and bootstraps the core schema on startup (creates the 11 tables when absent, backfills missing columns, seeds an empty settings row) — a fresh `DATA_DIR` just works, no upstream install needed. Existing databases are never modified beyond additive backfills. Full contract in [`DATABASE.md`](DATABASE.md), routing internals in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+</details>
+
+<details>
+<summary><b>How do I change the port?</b></summary>
+
+Panel → Overview → Engine port, then restart the engine. The default is 20130, same as upstream.
+
+</details>
+
+<details>
+<summary><b>Can a failed update brick the device?</b></summary>
+
+No. Everything is verified before install, and a bad download is rejected without touching the current files. If the engine fails to start after an update, it rolls back to the previous build.
+
+</details>
+
+<details>
+<summary><b>Is the default password 123456 safe?</b></summary>
+
+No, so change it first thing. The engine listens on every interface by default, which means your LAN can reach it. Do not put that port on the public internet; use a tunnel or a VPN if you need remote access.
 
 </details>
 
 ---
 
-## 📚 Docs
+## 🔗 Relationship to upstream
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — routing, providers, runtime layout
-- [`DATABASE.md`](DATABASE.md) — SQLite schema & operator contract
-- [`ROADMAP.md`](ROADMAP.md) — proposals only, not current behavior
-- [`CHANGELOG.md`](CHANGELOG.md) — release history (Go **v1.9.2**, upstream baseline `decolua/9router` v0.5.85)
+This repository is the upstream 9router-go source plus an Android layer. The engine stays untouched by default; we only patch it in place when an upstream bug blocks a feature, and every patch is recorded in [docs/adr/0003](docs/adr/0003-engine-parity-fix-exception.md).
 
-## Credits
+## 🙏 Credits
 
-- [9Router](https://github.com/decolua/9router) — original Next.js gateway & dashboard this Go port preserves compatibility with
+- [9router-go](https://github.com/luqman-v1/9router-go) — the engine this module runs: a single Go binary with a built-in dashboard
+- [9Router](https://github.com/decolua/9router) — the original Next.js project that 9router-go keeps compatibility with
