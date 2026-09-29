@@ -20,6 +20,9 @@
     editingCombo: Combo | null
     models: string[]
     isSaving?: boolean
+    /** Server-side refusal (e.g. the name collides with a combo, alias or
+     * custom model id). Shown inline so a 409 is never a silent no-op. */
+    saveError?: string
     onClose: () => void
     onSave: (name: string, models: string[]) => Promise<void> | void
     onOpenModelPicker: () => void
@@ -31,6 +34,7 @@
     editingCombo,
     models,
     isSaving = false,
+    saveError = '',
     onClose,
     onSave,
     onOpenModelPicker,
@@ -201,6 +205,10 @@
         <span>Add Model</span>
       </button>
     </div>
+
+    {#if saveError}
+      <p class="text-xs text-error break-words" role="alert">{saveError}</p>
+    {/if}
 
     <!-- Actions -->
     <div class="flex flex-col gap-2 pt-1 sm:flex-row">

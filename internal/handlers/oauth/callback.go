@@ -40,18 +40,18 @@ ol li{margin:4px 0}
 <div class="card">
 <h1>9router — OAuth callback</h1>
 <p class="sub" id="status">Memproses…</p>
-<textarea id="code" readonly placeholder="(tidak ada code di URL)"></textarea>
+<textarea id="code" readonly placeholder="(no code in URL)"></textarea>
 <div class="row">
 <button class="primary" id="copy">Copy</button>
 <button id="copied-url">Copy full URL</button>
 </div>
 <div id="meta"></div>
 <ol>
-<li>Klik Login di dashboard — koneksi tersambung <b>otomatis</b>, tab ini tertutup sendiri.</li>
-<li>Kalau auto-submit gagal: klik <b>Copy</b>, paste ke kolom callback di modal provider, klik <b>Connect</b>.</li>
-<li>Tab ini boleh ditutup setelah Connect sukses.</li>
+<li>Click Log in on the dashboard — the connection completes <b>automatically</b> and this tab closes itself.</li>
+<li>If auto-submit fails: click <b>Copy</b>, paste into the callback field in the provider modal, then click <b>Connect</b>.</li>
+<li>This tab can be closed once Connect succeeds.</li>
 </ol>
-<p class="hint">Token di URL ini = kredensial — jangan bagikan ke siapapun.</p>
+<p class="hint">The token in this URL is a credential — do not share it with anyone.</p>
 </div>
 <script>
 (function(){
@@ -80,10 +80,10 @@ ol li{margin:4px 0}
     }catch(e){}
   }
   if(err){
-    setStatus(false,"Login gagal: "+err+(errDesc?" — "+errDesc:""));
+    setStatus(false,"Login failed: "+err+(errDesc?" — "+errDesc:""));
     handOff({state:state,raw:"",error:err,errorDesc:errDesc,at:Date.now()});
   }else if(code){
-    setStatus(true,"Login berhasil! Mengirim ke dashboard — tab ini tertutup otomatis…");
+    setStatus(true,"Login successful! Sending to the dashboard — this tab closes automatically…");
     codeEl.value=code;
     var extra=[];
     if(state)extra.push("state: "+state);
@@ -96,10 +96,10 @@ ol li{margin:4px 0}
       }
     }catch(e){}
     handOff({state:state,raw:code,at:Date.now()});
-    // Auto-handoff: dashboard tab auto-submit; tutup tab ini (hanya berhasil
-    // bila tab dibuka via window.open — kalau tidak, user tutup manual).
+    // Auto-handoff: the dashboard tab auto-submits; this tab then closes (only
+    // reliable when it was opened via window.open — otherwise the user closes it).
     var n=3;
-    metaEl.textContent=(extra.length?extra.join(" · ")+" · ":"")+"Menutup dalam "+n+"…";
+    metaEl.textContent=(extra.length?extra.join(" · ")+" · ":"")+"Closing in "+n+"…";
     var timer=setInterval(function(){
       n-=1;
       if(n<=0){
@@ -107,11 +107,11 @@ ol li{margin:4px 0}
         try{window.close()}catch(e){}
         metaEl.textContent=(extra.length?extra.join(" · ")+" · ":"")+"Koneksi diproses di tab dashboard — tab ini boleh ditutup.";
       }else{
-        metaEl.textContent=(extra.length?extra.join(" · ")+" · ":"")+"Menutup dalam "+n+"…";
+        metaEl.textContent=(extra.length?extra.join(" · ")+" · ":"")+"Closing in "+n+"…";
       }
     },1000);
   }else{
-    setStatus(false,"Tidak ada code di URL ini. Ulangi Login dari dashboard lalu pastikan menempel URL lengkap.");
+    setStatus(false,"No code in this URL. Repeat the login from the dashboard and make sure you paste the full URL.");
   }
   function flash(btn,txt){var o=btn.textContent;btn.textContent=txt;setTimeout(function(){btn.textContent=o},1500)}
   $("copy").addEventListener("click",function(){

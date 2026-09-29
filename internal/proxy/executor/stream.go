@@ -480,6 +480,13 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 	created := time.Now().Unix()
 	state := &CodexStreamState{}
 
+	// A Responses client and a Responses endpoint already agree: relaying the
+	// body untouched keeps the fields the native API owns (previous_response_id,
+	// item ids, store) instead of round-tripping them through Chat Completions.
+	if translator.IsResponsesClient(req.Ctx) {
+		return passthroughResponses(w, req, upstream)
+	}
+
 	if req.IsStream {
 		hw := proxy.NewHeartbeatWriter(req.Ctx, w, 0)
 		defer hw.Close()

@@ -3,6 +3,7 @@ package usagetracker
 import (
 	json "encoding/json/v2"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,23 +106,25 @@ func (t *Tracker) TrackPending(model, provider, connectionID string, started boo
 		t.byModel[modelKey] = newModelCount
 	}
 
-	// Update byAccount
-	if connectionID != "" {
-		accountMap, ok := t.byAccount[connectionID]
-		if !ok && started {
-			accountMap = make(map[string]int)
-			t.byAccount[connectionID] = accountMap
-		}
-		if accountMap != nil {
-			newAccCount := accountMap[modelKey] + delta
-			if newAccCount <= 0 {
-				delete(accountMap, modelKey)
-				if len(accountMap) == 0 {
-					delete(t.byAccount, connectionID)
-				}
-			} else {
-				accountMap[modelKey] = newAccCount
+	// Update byAccount (track public/direct requests under "__direct__" so they are never dropped)
+	connKey := connectionID
+	if connKey == "" {
+		connKey = "__direct__"
+	}
+	accountMap, ok := t.byAccount[connKey]
+	if !ok && started {
+		accountMap = make(map[string]int)
+		t.byAccount[connKey] = accountMap
+	}
+	if accountMap != nil {
+		newAccCount := accountMap[modelKey] + delta
+		if newAccCount <= 0 {
+			delete(accountMap, modelKey)
+			if len(accountMap) == 0 {
+				delete(t.byAccount, connKey)
 			}
+		} else {
+			accountMap[modelKey] = newAccCount
 		}
 	}
 
@@ -193,9 +196,12 @@ func (t *Tracker) buildPayloadLocked(repo *db.Repo) StreamPayload {
 		}
 	}
 	var active []ActiveRequest
+	accountCountedModels := make(map[string]int)
 	for connID, models := range t.byAccount {
 		accName := connMap[connID]
-		if accName == "" {
+		if connID == "__direct__" || connID == "" {
+			accName = "Public / Direct"
+		} else if accName == "" {
 			if len(connID) > 8 {
 				accName = fmt.Sprintf("Account %s...", connID[:8])
 			} else {
@@ -205,6 +211,7 @@ func (t *Tracker) buildPayloadLocked(repo *db.Repo) StreamPayload {
 		for modelKey, count := range models {
 			if count > 0 {
 				mName, pName := parseModelKey(modelKey)
+				accountCountedModels[modelKey] += count
 				active = append(active, ActiveRequest{
 					Model:    mName,
 					Provider: pName,
@@ -215,18 +222,18 @@ func (t *Tracker) buildPayloadLocked(repo *db.Repo) StreamPayload {
 		}
 	}
 
-	// If byAccount was empty but byModel had items (e.g. no-auth/public requests)
-	if len(active) == 0 {
-		for modelKey, count := range t.byModel {
-			if count > 0 {
-				mName, pName := parseModelKey(modelKey)
-				active = append(active, ActiveRequest{
-					Model:    mName,
-					Provider: pName,
-					Account:  "Public / Direct",
-					Count:    count,
-				})
-			}
+	// If any active requests were in byModel but not captured in byAccount, include them as Public / Direct
+	for modelKey, totalCount := range t.byModel {
+		alreadyCounted := accountCountedModels[modelKey]
+		remaining := totalCount - alreadyCounted
+		if remaining > 0 {
+			mName, pName := parseModelKey(modelKey)
+			active = append(active, ActiveRequest{
+				Model:    mName,
+				Provider: pName,
+				Account:  "Public / Direct",
+				Count:    remaining,
+			})
 		}
 	}
 
@@ -303,10 +310,8 @@ func recentFromHistoryRow(rh db.UsageHistoryRow) RecentRequest {
 
 func parseModelKey(key string) (model, provider string) {
 	// key format: "modelName (providerName)"
-	var m, p string
-	if n, _ := fmt.Sscanf(key, "%s (%s)", &m, &p); n == 2 {
-		p = p[:len(p)-1] // remove trailing ')'
-		return m, p
+	if idx := strings.LastIndex(key, " ("); idx != -1 && strings.HasSuffix(key, ")") {
+		return key[:idx], key[idx+2 : len(key)-1]
 	}
 	return key, "unknown"
 }

@@ -125,7 +125,7 @@ func TestHandleSearch_Antigravity(t *testing.T) {
 		} `json:"usage"`
 		Metrics struct {
 			ResponseTimeMS        int64 `json:"response_time_ms"`
-			UpstreamLatencyMS    int64 `json:"upstream_latency_ms"`
+			UpstreamLatencyMS     int64 `json:"upstream_latency_ms"`
 			TotalResultsAvailable any   `json:"total_results_available"`
 		} `json:"metrics"`
 	}

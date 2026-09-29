@@ -1,8 +1,8 @@
 package log
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"log"
 	"strings"
 	"testing"

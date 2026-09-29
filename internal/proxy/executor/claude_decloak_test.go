@@ -41,11 +41,20 @@ func TestClaudeStreamDecloaker_BareAndSSEForms(t *testing.T) {
 		t.Fatalf("bare form not decloaked: %s", bare)
 	}
 
-	// Unknown / untracked names pass through untouched.
+	// A name the map missed still carries the cloak suffix, so the suffix itself
+	// is the fallback (upstream stripCloakSuffix, v0.5.91) — forwarding a
+	// "<tool>_ide" the client cannot resolve is the bug it fixes. A name with no
+	// suffix and no map entry is genuinely the model's own and passes through.
 	d3 := NewClaudeStreamDecloaker(m)
 	unknown := joinEvents(d3.Events([]byte(`{"type":"content_block_start","content_block":{"type":"tool_use","name":"other_ide","id":"i"}}`)))
-	if !strings.Contains(unknown, `"name":"other_ide"`) {
-		t.Fatalf("unknown name should pass through: %s", unknown)
+	if strings.Contains(unknown, "other_ide") || !strings.Contains(unknown, `"name":"other"`) {
+		t.Fatalf("untracked cloaked name not recovered from its suffix: %s", unknown)
+	}
+
+	d4 := NewClaudeStreamDecloaker(m)
+	plain := joinEvents(d4.Events([]byte(`{"type":"content_block_start","content_block":{"type":"tool_use","name":"not_ours","id":"i"}}`)))
+	if !strings.Contains(plain, `"name":"not_ours"`) {
+		t.Fatalf("a name with no suffix must pass through untouched: %s", plain)
 	}
 }
 

@@ -30,11 +30,24 @@ func TestInjectMimoMarker(t *testing.T) {
 		}
 	})
 
-	t.Run("already has marker unchanged", func(t *testing.T) {
+	t.Run("already has marker is not added twice", func(t *testing.T) {
+		// Asserted semantically, not byte-for-byte: injectMimoMarker re-marshals
+		// through a map, and Go randomises map key order per run, so comparing raw
+		// bytes failed this subtest on roughly one run in six for reasons that
+		// have nothing to do with the marker.
 		body := []byte(`{"messages":[{"role":"system","content":"` + marker + `"},{"role":"user","content":"hi"}]}`)
-		got := injectMimoMarker(body)
-		if string(got) != string(body) {
-			t.Errorf("expected unchanged body when marker present")
+		var parsed map[string]any
+		if err := json.Unmarshal(injectMimoMarker(body), &parsed); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		msgs, _ := parsed["messages"].([]any)
+		if len(msgs) != 2 {
+			t.Fatalf("marker was added again: expected 2 messages, got %d", len(msgs))
+		}
+		first, _ := msgs[0].(map[string]any)
+		content, _ := first["content"].(string)
+		if n := strings.Count(content, marker); n != 1 {
+			t.Errorf("marker should appear exactly once, got %d occurrences", n)
 		}
 	})
 

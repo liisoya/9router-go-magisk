@@ -20,12 +20,12 @@
     const parsed = parseCallbackURL(window.location.href)
     if (parsed.error) {
       status = 'error'
-      message = `Login gagal: ${parsed.error}${parsed.errorDesc ? ` — ${parsed.errorDesc}` : ''}`
+      message = `Login failed: ${parsed.error}${parsed.errorDesc ? ` — ${parsed.errorDesc}` : ''}`
       // Tetap teruskan ke dashboard agar modal menampilkan errornya.
       if (ls) writeCallback(ls, { state: parsed.state, raw: '', error: parsed.error, errorDesc: parsed.errorDesc })
     } else if (parsed.raw) {
       status = 'ok'
-      message = 'Login berhasil! Mengirim ke dashboard…'
+      message = 'Login successful! Sending to the dashboard…'
       raw = parsed.raw
       const payload = { state: parsed.state, raw: parsed.raw }
       if (ls) writeCallback(ls, payload)
@@ -34,7 +34,7 @@
         bc.postMessage({ ...payload, at: Date.now() })
         bc.close()
       } catch {
-        /* BroadcastChannel tidak tersedia — dashboard pakai polling/storage event */
+        /* BroadcastChannel unavailable — the dashboard falls back to polling/storage events */
       }
       if (window.opener) {
         const origins = [window.location.origin, 'http://localhost:1455']
@@ -49,7 +49,7 @@
           }
         }
       }
-      // Tab ini dibuka via window.open → boleh tutup sendiri.
+      // This tab was opened via window.open, so it may close itself.
       countdown = 3
       const timer = setInterval(() => {
         countdown -= 1
@@ -60,7 +60,7 @@
       }, 1000)
     } else {
       status = 'error'
-      message = 'Tidak ada code di URL ini. Ulangi Login dari dashboard.'
+      message = 'No code in this URL. Repeat the login from the dashboard.'
     }
   })
 
@@ -75,10 +75,10 @@
     {#if status === 'working'}
       <p class="text-text-muted">Memproses callback…</p>
     {:else if status === 'ok'}
-      <p class="text-lg font-semibold text-green-500">Login berhasil!</p>
+      <p class="text-lg font-semibold text-green-500">Login successful!</p>
       <p class="text-sm text-text-muted mt-2">{message}</p>
       <p class="text-xs text-text-muted mt-1">
-        Tab ini {countdown > 0 ? `tertutup otomatis dalam ${countdown}…` : 'bisa ditutup.'} Koneksi diproses otomatis di tab dashboard.
+        This tab {countdown > 0 ? `closes automatically in ${countdown}…` : 'can be closed.'} The connection is processed automatically in the dashboard tab.
       </p>
       {#if raw}
         <button
@@ -86,13 +86,13 @@
           onclick={copyRaw}
           class="mt-4 px-4 py-2 text-xs font-semibold rounded-lg bg-surface-2 hover:bg-surface-3 border border-border cursor-pointer"
         >
-          Copy manual (kalau auto-submit gagal)
+          Copy manually (if auto-submit fails)
         </button>
       {/if}
     {:else}
-      <p class="text-lg font-semibold text-red-500">Callback gagal</p>
+      <p class="text-lg font-semibold text-red-500">Callback failed</p>
       <p class="text-sm text-text-muted mt-2">{message}</p>
-      <p class="text-xs text-text-muted mt-1">Tutup tab ini dan ulangi Login dari dashboard.</p>
+      <p class="text-xs text-text-muted mt-1">Close this tab and repeat the login from the dashboard.</p>
     {/if}
   </div>
 </div>

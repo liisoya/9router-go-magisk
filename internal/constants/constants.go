@@ -9,13 +9,13 @@ const (
 
 // HTTP Headers
 const (
-	HeaderAuthorization   = "Authorization"
-	HeaderContentType     = "Content-Type"
-	HeaderCacheControl    = "Cache-Control"
-	HeaderConnection      = "Connection"
-	HeaderAccept          = "Accept"
-	HeaderXAPIKey         = "X-API-Key"
-	HeaderUserAgent       = "User-Agent"
+	HeaderAuthorization = "Authorization"
+	HeaderContentType   = "Content-Type"
+	HeaderCacheControl  = "Cache-Control"
+	HeaderConnection    = "Connection"
+	HeaderAccept        = "Accept"
+	HeaderXAPIKey       = "X-API-Key"
+	HeaderUserAgent     = "User-Agent"
 )
 
 // Auth token prefix for header value (includes trailing space)

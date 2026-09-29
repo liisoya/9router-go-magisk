@@ -2,6 +2,7 @@ package providers
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -251,4 +252,26 @@ func parseDigits(s string) (int, bool) {
 		n = n*10 + int(r-'0')
 	}
 	return n, true
+}
+
+// ClampDeepseekEffort maps a requested thinking level onto the effort vocabulary
+// that DeepSeek-shaped upstreams accept, downgrading "max" to "high" when the
+// model's declared levels do not include it.
+//
+// Port of the deepseek case in open-sse/translator/thinkingUnified.js applyFormat
+// (upstream 1b72f02e). Without it, mimo-v2.5-pro and v2.6 on the Go lane answer
+// 400 to reasoning_effort "max" — probed live upstream, while mimo-v2.5 accepts
+// the same value, so the clamp keys off the declared levels rather than the name.
+//
+// The rule is deliberately general: any level set omitting "max" would hit the
+// same rejection, and levelOpenAI (GPT-5.x, o-series) has no "max" either.
+func ClampDeepseekEffort(provider, model, level string) string {
+	want := "high"
+	if level == "xhigh" || level == "max" {
+		want = "max"
+	}
+	if want == "max" && !slices.Contains(GetThinkingLevels(provider, model), "max") {
+		return "high"
+	}
+	return want
 }

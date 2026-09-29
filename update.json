@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.4-r1",
-  "versionCode": 109040,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.4-r1/9router-go-1.9.4-r1-magisk.zip",
-  "changelog": "引擎基线升到上游 v1.9.4（Dashboard issue #24：连接重排改为服务端单事务原子化、轮询按连接持久化并跨重启保留、固定连接尊重禁用/模型锁、代理弹窗可滚动；另有 Gemini Live 实时语音转写、Claude session-id 与限速头 parity、完整上游定价表、Codex OAuth 回环修复、上游 v0.5.86–v0.5.91 同步）。修「面板概览读不出来」：上一版把 URL 常量收编进 upstream.js 时漏改一处裸引用，导致面板显示旧快照、服务地址与资源占用空白、点重启报 DEFAULT_MOD_UPDATE_URL is not defined —— 装了 v1.9.3-r1 的用户会遇到，本版已修。门禁：新增装配层冒烟（在桩 DOM 里跑真实 app.js）与 upstream.js 名字必须带 KU. 前缀的扫描，红灯自证两条都变红。保留两处引擎定点补丁（Dashboard 网页抓取端点、/api/health 与 SSO 回调）。验证：离线 11/11、真机 T*/A* 全绿、PARITY/UIPARITY 无新增缺口。"
+  "version": "v1.9.5-r1",
+  "versionCode": 109050,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.5-r1/9router-go-1.9.5-r1-magisk.zip",
+  "changelog": "引擎基线升到上游 v1.9.5：新增 /v1/responses 翻译器（Chat↔Responses 双向）；Dashboard 更新弹窗四个缺陷与备份流修复（#32/#34）、issue #27/#28、配额读取节流（#30）、mimo reasoning_effort 按模型级别降级、全仓 gofmt。模块层修 11 个缺陷：门禁入口严格模式空转（报成功却一条都没跑）、管理器「操作」按钮状态全空/端口串成整行、无守护时重启丢 DNS、引擎崩溃自愈退化到 60s、改端口谎报成功、回滚点缺失仍改写配置；装包门禁先于动作、start-user 如实自报、「回滚上一版」实际回到首版、热重载失败被吞、清选中假故障。生命周期守护改事件驱动：唤醒 17280→1440 次/天、崩溃恢复 ≤12s→1.2s，并记录引擎退出原因。验证：离线全绿（JS 128 / LIFECYCLE 56 / OPSSTATUS 14 / CHECKFLAGS 10 / INSTALLGATE 7）、真机 T*36 + A*7 全绿。"
 }

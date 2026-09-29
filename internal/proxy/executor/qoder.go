@@ -99,19 +99,37 @@ func qoderCosySigPath(requestURL string) string {
 	return strings.TrimPrefix(pathname, "/algo")
 }
 
-// BuildQoderCosyHeaders signs a Qoder request for any COSY path (chat and the
-// model list share the scheme). Exported for the dashboard key-validate probe.
-func BuildQoderCosyHeaders(body []byte, requestURL string, userID string, token string) (map[string]string, error) {
-	return buildQoderCosyHeaders(body, requestURL, userID, token)
+// QoderCosyCreds carries the identity a COSY signature is bound to. Mirrors
+// upstream's `creds` argument (open-sse/shared/qoder/cosy.js buildCosyHeaders).
+// UserID and MachineID come from the connection's providerSpecificData, not
+// from the request: Qoder rejects a signature made with any other account.
+type QoderCosyCreds struct {
+	UserID    string
+	AuthToken string
+	Name      string
+	Email     string
+	MachineID string
 }
 
-func buildQoderCosyHeaders(body []byte, requestURL string, userID string, token string) (map[string]string, error) {
-	if userID == "" {
-		userID = "user-" + uuid.New().String()[:8]
+// BuildQoderCosyHeaders signs a Qoder request for any COSY path (chat and the
+// model list share the scheme). Exported for the dashboard key-validate probe.
+func BuildQoderCosyHeaders(body []byte, requestURL string, creds QoderCosyCreds) (map[string]string, error) {
+	return buildQoderCosyHeaders(body, requestURL, creds)
+}
+
+func buildQoderCosyHeaders(body []byte, requestURL string, creds QoderCosyCreds) (map[string]string, error) {
+	// Upstream throws on a missing user id or token rather than inventing one:
+	// a signature over a made-up account is rejected with
+	// 403 {"code":"105","message":"Login expired"}, which reads as an expired
+	// login instead of the real problem (a connection that never stored its
+	// userId). Failing here names it.
+	if creds.UserID == "" {
+		return nil, fmt.Errorf("qoder: COSY signing needs the account user id — re-authorize this connection")
 	}
-	if token == "" {
-		token = "dt-" + uuid.New().String()
+	if creds.AuthToken == "" {
+		return nil, fmt.Errorf("qoder: COSY signing needs an auth token")
 	}
+	userID, token := creds.UserID, creds.AuthToken
 
 	aesKeyStr := uuid.New().String()[:16]
 	aesKey := []byte(aesKeyStr)
@@ -119,9 +137,9 @@ func buildQoderCosyHeaders(body []byte, requestURL string, userID string, token 
 	userInfoJSON, err := json.Marshal(map[string]string{
 		"uid":                  userID,
 		"security_oauth_token": token,
-		"name":                 "",
+		"name":                 creds.Name,
 		"aid":                  "",
-		"email":                "",
+		"email":                creds.Email,
 	})
 	if err != nil {
 		return nil, err
@@ -153,7 +171,12 @@ func buildQoderCosyHeaders(body []byte, requestURL string, userID string, token 
 	sigInput := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", payloadB64, cosyKeyB64, timestamp, string(body), sigPath)
 	sig := md5Hex([]byte(sigInput))
 
-	machineID := uuid.New().String()
+	// Upstream persists the machine UUID on the connection so every request
+	// from one auth presents the same machine (cosy.js generateMachineId).
+	machineID := creds.MachineID
+	if machineID == "" {
+		machineID = uuid.New().String()
+	}
 	bodyHash := md5Hex(body)
 	bodyLength := fmt.Sprintf("%d", len(body))
 
@@ -182,6 +205,31 @@ func buildQoderCosyHeaders(body []byte, requestURL string, userID string, token 
 	return headers, nil
 }
 
+// qoderCosyCreds reads the signing identity off the connection's
+// providerSpecificData. Upstream does the same (qoderModels.js
+// cosyCredsFromConnection), and the userId is not optional: it is the account
+// the signature is verified against, so a connection without one cannot sign
+// a usable request.
+func qoderCosyCreds(psd map[string]any, token string) QoderCosyCreds {
+	creds := QoderCosyCreds{AuthToken: token}
+	if psd == nil {
+		return creds
+	}
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if s, ok := psd[k].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+		return ""
+	}
+	creds.UserID = pick("userId", "user_id", "id")
+	creds.MachineID = pick("machineId", "machine_id")
+	creds.Name = pick("name", "displayName")
+	creds.Email = pick("email")
+	return creds
+}
+
 // ForwardQoder handles requests for Qoder using COSY signing. The chat
 // endpoint comes from the provider's own registry config, so Qoder and
 // Qoder CN each talk to their own gateway (upstream registry transport.baseUrl)
@@ -194,7 +242,7 @@ func ForwardQoder(w http.ResponseWriter, req *Request) error {
 	if endpoint == "" {
 		endpoint = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation"
 	}
-	headers, err := buildQoderCosyHeaders(req.Body, endpoint, "", req.APIKey)
+	headers, err := buildQoderCosyHeaders(req.Body, endpoint, qoderCosyCreds(req.ConnData, req.APIKey))
 	if err != nil {
 		return fmt.Errorf("build Qoder COSY headers: %w", err)
 	}

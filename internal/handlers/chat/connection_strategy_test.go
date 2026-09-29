@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
-	"strings"
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/models"

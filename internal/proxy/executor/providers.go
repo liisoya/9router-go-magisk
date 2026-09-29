@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/translator"
 )
@@ -51,16 +52,41 @@ func ForwardCodex(w http.ResponseWriter, req *Request) error {
 	if err != nil {
 		return fmt.Errorf("transform body: %w", err)
 	}
+	cfg, transformedBody := applyCodexCompact(req.Config, transformedBody)
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardCodex(ctx, req.Client, req.Config, req.APIKey, transformedBody, req.IsStream, req.ConnData)
+	resp, err := proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData)
 	if err != nil {
 		return fmt.Errorf("ForwardCodex: %w", err)
 	}
 	defer resp.Body.Close()
 	return handleCodexStream(w, req, resp.Body)
+}
+
+// applyCodexCompact routes a compaction request to the codex /compact endpoint
+// and strips the marker from the body, porting open-sse/executors/codex.js
+// transformRequest + buildUrl. Without it the flag would ride upstream as an
+// unknown field and the request would take the normal /responses path, so the
+// client would get an answer where it asked for a compacted transcript.
+func applyCodexCompact(cfg *providers.ProviderConfig, body []byte) (*providers.ProviderConfig, []byte) {
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return cfg, body
+	}
+	compact, ok := envelope["_compact"].(bool)
+	if !ok || !compact {
+		return cfg, body
+	}
+	delete(envelope, "_compact")
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		return cfg, body
+	}
+	cloned := *cfg
+	cloned.BaseURL = strings.TrimRight(cloned.BaseURL, "/") + "/compact"
+	return &cloned, out
 }
 
 // ForwardIflow forwards to iflow with HMAC-SHA256 signature.

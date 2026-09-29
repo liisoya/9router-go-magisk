@@ -70,7 +70,11 @@ func (h *DashboardHandler) HandleCreateCombo(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
-
+	// A combo name is addressed bare, so it must not be shadowed by a model
+	// alias (consulted first) or read as a custom model id in /v1/models.
+	if h.guardNameCollision(w, nsCombo, req.Name) {
+		return
+	}
 	if err := h.Repo.CreateCombo(req.ID, req.Name, req.Kind, modelsJSON, req.Strategy); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -140,7 +144,12 @@ func (h *DashboardHandler) HandleUpdateCombo(w http.ResponseWriter, r *http.Requ
 	if strategy == "" {
 		strategy = existing.Strategy
 	}
-
+	// Renaming a combo moves the bare name it answers to, so a rename gets the
+	// same check as a create. Leaving the name alone is unaffected: the guard
+	// skips the combo space when the caller is writing a combo.
+	if name != existing.Name && h.guardNameCollision(w, nsCombo, name) {
+		return
+	}
 	if err := h.Repo.UpdateCombo(id, name, kind, modelsJSON, strategy); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return

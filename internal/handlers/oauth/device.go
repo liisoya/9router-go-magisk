@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/proxy"
 )
 
 // deviceProviders lists providers supporting the device-code family.
@@ -40,6 +41,20 @@ func deviceCanonical(p string) string {
 
 var awsRegionPattern = regexp.MustCompile(`^[a-z]{2}-[a-z]+-\d{1,2}$`)
 
+// deviceClient is the HTTP client every device-code exchange uses.
+//
+// It wraps the environment transport in proxy.FallbackTransport for the same
+// reason the chat path does (internal/proxy/fallback_transport.go): a sandbox
+// or corporate HTTP(S)_PROXY refuses the CONNECT tunnel to provider hosts with
+// 403 Forbidden, and Go renders that as `Get "https://…": Forbidden` — a
+// transport error, not a status. A bare &http.Client{} has no direct-connection
+// retry, so a Qoder login could open the login page and then fail every poll
+// with exactly that message, leaving the modal stuck on "waiting".
+var deviceClient = &http.Client{
+	Transport: proxy.NewFallbackTransport(http.DefaultTransport),
+	Timeout:   15 * time.Second,
+}
+
 func postJSON(url string, body any, headers map[string]string) (map[string]any, int, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -54,8 +69,7 @@ func postJSON(url string, body any, headers map[string]string) (map[string]any, 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := deviceClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -81,8 +95,7 @@ func postForm(url string, form url.Values, headers map[string]string) (map[strin
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := deviceClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -107,8 +120,7 @@ func getJSON(url string, headers map[string]string) (map[string]any, int, error)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := deviceClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -543,8 +555,7 @@ func qoderPoll(provider string, session map[string]any, nonce string) (deviceTok
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "Go-http-client/2.0")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := deviceClient.Do(req)
 	if err != nil {
 		return t, fmt.Errorf("poll_failed: %v", err)
 	}
@@ -566,18 +577,30 @@ func qoderPoll(provider string, session map[string]any, nonce string) (deviceTok
 	}
 	t.access = token
 	t.refresh = strVal(data, "refresh_token")
+	// machineId is generated at start and persisted so every later request from
+	// this auth presents the same machine (upstream cosy.js generateMachineId).
 	t.extra = map[string]any{"machineId": machineID}
+	// The COSY signature is bound to the account's user id, so it must be
+	// persisted at login. Upstream stores it in providerSpecificData.userId
+	// (src/lib/oauth/providers/qoder.js mapTokens); without it every later
+	// request is signed with a placeholder and Qoder answers
+	// 403 {"code":"105","message":"Login expired"}.
+	uid := strVal(data, "user_id")
+	if uid != "" {
+		t.extra["userId"] = uid
+	}
 	if ui, _, _ := getJSON(openapi+"/api/v1/userinfo",
 		map[string]string{"Authorization": "Bearer " + token, "User-Agent": "Go-http-client/2.0"}); ui != nil {
 		t.name = strVal(ui, "name", "username")
 		t.email = strVal(ui, "email")
-		uid := strVal(data, "user_id")
-		if t.email == "" && uid != "" {
-			t.email = "qoder-user-" + uid
-		}
 		if oid := strVal(ui, "organization_id"); oid != "" {
 			t.extra["organizationId"] = oid
 		}
+	}
+	// Upstream falls back to a stable synthetic email so a re-login updates the
+	// existing row instead of piling up "Account N" duplicates.
+	if t.email == "" && uid != "" {
+		t.email = "qoder-user-" + uid
 	}
 	return t, nil
 }
@@ -586,8 +609,7 @@ func kilocodePoll(code string) (deviceTokens, error) {
 	var t deviceTokens
 	req, _ := http.NewRequest(http.MethodGet, "https://api.kilo.ai/api/device-auth/codes/"+code, nil)
 	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := deviceClient.Do(req)
 	if err != nil {
 		return t, fmt.Errorf("poll_failed: %v", err)
 	}
@@ -736,8 +758,7 @@ func kiroProfileArn(accessToken string) string {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := deviceClient.Do(req)
 	if err != nil {
 		return ""
 	}
@@ -801,8 +822,7 @@ func codebuddyPoll(provider, state string) (deviceTokens, error) {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := deviceClient.Do(req)
 	if err != nil {
 		return t, fmt.Errorf("poll_failed: %v", err)
 	}

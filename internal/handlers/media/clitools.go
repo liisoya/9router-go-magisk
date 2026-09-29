@@ -33,11 +33,11 @@ type toolDetector func(context.Context) (*cliStatus, error)
 // `cowork` checks Claude Desktop config dirs; `copilot` has no binary check
 // (reference hardcodes installed:true).
 type toolDef struct {
-	id        string
-	bin       string
-	hasVer    bool
-	dirCheck  func() bool
-	alwaysOn  bool
+	id       string
+	bin      string
+	hasVer   bool
+	dirCheck func() bool
+	alwaysOn bool
 }
 
 var cliTools = []toolDef{

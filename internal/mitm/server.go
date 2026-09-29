@@ -1,6 +1,7 @@
 package mitm
 
 import (
+	"9router/proxy/internal/log"
 	"bufio"
 	"crypto"
 	"crypto/tls"
@@ -8,8 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"9router/proxy/internal/log"
-		"net"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -49,8 +49,8 @@ type Server struct {
 	listener net.Listener
 	mu       sync.Mutex
 	running  bool
-	conns    sync.WaitGroup            // tracks in-flight handleConn goroutines
-	active   map[net.Conn]struct{}     // connections closed on Stop (guarded by mu)
+	conns    sync.WaitGroup        // tracks in-flight handleConn goroutines
+	active   map[net.Conn]struct{} // connections closed on Stop (guarded by mu)
 }
 
 // NewServer creates a MITM server with root CA in the given base directory.

@@ -67,11 +67,11 @@ func TestAssertPublicURL_IPv6(t *testing.T) {
 		"http://[fe80::1]/",
 		"http://[fc00::1]/",
 		"http://[fd00::1]/",
-		"http://[::ffff:127.0.0.1]/", // dotted IPv4-mapped
-		"http://[::ffff:7f00:1]/",   // hex IPv4-mapped -> 127.0.0.1
+		"http://[::ffff:127.0.0.1]/",   // dotted IPv4-mapped
+		"http://[::ffff:7f00:1]/",      // hex IPv4-mapped -> 127.0.0.1
 		"http://[64:ff9b::127.0.0.1]/", // NAT64
-		"http://[64:ff9b::7f00:1]/",   // NAT64 hex
-		"http://[::192.168.1.1]/", // IPv4-compatible
+		"http://[64:ff9b::7f00:1]/",    // NAT64 hex
+		"http://[::192.168.1.1]/",      // IPv4-compatible
 	}
 	for _, u := range blocked {
 		if err := AssertPublicURL(u); err == nil {

@@ -14,6 +14,7 @@ import (
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
+	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/proxy/oauth"
 	"9router/proxy/internal/translator"
 )
@@ -377,6 +378,13 @@ func (h *ChatHandler) handleGeminiStream(ctx context.Context, w http.ResponseWri
 	flusher := proxy.WriteSSEHeaders(hw)
 	geminiState := &translator.GeminiStreamState{}
 	start := time.Now()
+	// A /v1/responses client is one hop further out: Gemini events become
+	// OpenAI chunks here and those chunks become Responses events, so the
+	// bridge consumes this branch's output instead of the raw writer.
+	var bridge *executor.ResponsesBridge
+	if translator.NeedsResponsesBridge(ctx) {
+		bridge = newResponsesBridge(ctx, hw, flusher, metrics, start)
+	}
 	// One session per stream so the OpenAI→Claude translation state cannot
 	// collide across concurrent requests; always cleared on exit.
 	sessionKey := fmt.Sprintf("gemini-stream-%d", time.Now().UnixNano())
@@ -419,6 +427,12 @@ func (h *ChatHandler) handleGeminiStream(ctx context.Context, w http.ResponseWri
 		}
 		metrics.ResponseBuf.Write(openaiChunk)
 
+		if bridge != nil {
+			bridge.FeedFrames(openaiChunk)
+			totalBytesWritten += len(openaiChunk)
+			return
+		}
+
 		if translateResponse {
 			// openaiChunk may have multiple SSE lines -- split and translate each
 			for _, sse := range strings.Split(string(openaiChunk), "\n") {
@@ -445,7 +459,10 @@ func (h *ChatHandler) handleGeminiStream(ctx context.Context, w http.ResponseWri
 			flusher.Flush()
 		}
 	})
-	if !translateResponse {
+	if bridge != nil {
+		bridge.Close()
+	}
+	if !translateResponse && bridge == nil {
 		n, _ := hw.Write([]byte("data: [DONE]\n\n"))
 		totalBytesWritten += n
 		if flusher != nil {
@@ -488,6 +505,12 @@ func (h *ChatHandler) handleGeminiNonStream(ctx context.Context, w http.Response
 		w.WriteHeader(http.StatusOK)
 		w.Write(body)
 		return nil
+	}
+
+	if translator.NeedsResponsesBridge(ctx) {
+		// The body is already Chat Completions at this point, so it goes
+		// through the same converter the other non-streaming paths use.
+		return h.respondAsResponses(ctx, w, openaiResp)
 	}
 
 	if translateResp {

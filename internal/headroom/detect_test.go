@@ -32,14 +32,14 @@ func TestIsLoopbackHeadroomUrl(t *testing.T) {
 
 func TestRewriteDashboardHTML(t *testing.T) {
 	cases := map[string]string{
-		"fetch('/stats":                        "fetch('/api/headroom/proxy/stats",
-		"fetch('/health'":                      "fetch('/api/headroom/proxy/health'",
-		"fetch('/stats-history/recent":         "fetch('/api/headroom/proxy/stats-history/recent",
-		"fetch('/transformations/feed":         "fetch('/api/headroom/proxy/transformations/feed",
-		"fetch('/other":                        "fetch('/other",
-		"fetch('https://x.example/stats":       "fetch('https://x.example/stats", // absolute URL, not a local fetch
-		"fetch('/stats'); fetch('/health');":   "fetch('/api/headroom/proxy/stats'); fetch('/api/headroom/proxy/health');",
-		`fetch("/stats"):'`: `fetch("/stats"):'`, // double quotes untouched
+		"fetch('/stats":                      "fetch('/api/headroom/proxy/stats",
+		"fetch('/health'":                    "fetch('/api/headroom/proxy/health'",
+		"fetch('/stats-history/recent":       "fetch('/api/headroom/proxy/stats-history/recent",
+		"fetch('/transformations/feed":       "fetch('/api/headroom/proxy/transformations/feed",
+		"fetch('/other":                      "fetch('/other",
+		"fetch('https://x.example/stats":     "fetch('https://x.example/stats", // absolute URL, not a local fetch
+		"fetch('/stats'); fetch('/health');": "fetch('/api/headroom/proxy/stats'); fetch('/api/headroom/proxy/health');",
+		`fetch("/stats"):'`:                  `fetch("/stats"):'`, // double quotes untouched
 	}
 	for in, want := range cases {
 		if got := RewriteDashboardHTML(in); got != want {

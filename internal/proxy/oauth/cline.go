@@ -24,6 +24,7 @@ var directClineClient = &http.Client{
 	},
 	Timeout: 15 * time.Second,
 }
+
 // RefreshCline refreshes tokens using Cline's extension JSON contract.
 func RefreshCline(ctx context.Context, p *Params) (*TokenResult, error) {
 	prov := p.Provider

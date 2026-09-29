@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -128,5 +130,50 @@ func TestIsUsageEligibleConnection(t *testing.T) {
 		if got := isUsageEligibleConnection(conn); got != c.want {
 			t.Errorf("%s/%s: got %v want %v", c.provider, c.authType, got, c.want)
 		}
+	}
+}
+
+// Go's transport announces "Go-http-client/1.1", which the WAFs in front of
+// chatgpt.com, api.groq.com, api.deepseek.com, openapi.qoder.sh and
+// www.codebuddy.ai answer with a bare 403. That surfaced as an opaque
+// `Get "…": Forbidden` transport error on the whole quota tracker, so every
+// fetcher now announces a real User-Agent unless it sets its own.
+func TestUsageDo_SendsNonGoUserAgent(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{
+			name:    "defaults to the gateway UA",
+			headers: map[string]string{"Authorization": "Bearer k"},
+			want:    usageUserAgent,
+		},
+		{
+			name:    "a fetcher's own UA is preserved",
+			headers: map[string]string{"User-Agent": "grok_cli_rs/1.2.3"},
+			want:    "grok_cli_rs/1.2.3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotUA string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotUA = r.Header.Get("User-Agent")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			if _, _, _, err := usageGet(t.Context(), srv.URL, tt.headers); err != nil {
+				t.Fatalf("usageGet() error = %v", err)
+			}
+			if gotUA != tt.want {
+				t.Errorf("User-Agent = %q, want %q", gotUA, tt.want)
+			}
+			if strings.Contains(gotUA, "Go-http-client") {
+				t.Errorf("User-Agent = %q must not be the Go default", gotUA)
+			}
+		})
 	}
 }

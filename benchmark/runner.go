@@ -20,13 +20,13 @@ import (
 )
 
 type Config struct {
-	MockPort     int
-	ProxyPort    int
-	DBPath       string
-	APIKey       string
-	Concurrency  []int
-	Requests     int
-	DurationSec  int
+	MockPort    int
+	ProxyPort   int
+	DBPath      string
+	APIKey      string
+	Concurrency []int
+	Requests    int
+	DurationSec int
 }
 
 type BenchResult struct {

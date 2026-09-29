@@ -17,6 +17,7 @@ import (
 
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/translator"
 )
 
 // detectNewTurn reports whether the request body starts a new conversation
@@ -543,7 +544,8 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 					fwdErr = h.tryForwardWithConnection(forwardRequestParams{
 						Ctx: ctx, W: cw, Provider: modelInfo.Provider, Model: modelInfo.Model,
 						ConnectionID: connID, ConnData: connData, Body: upstreamJSON,
-						IsStream: isStream, TranslateResponse: translateResponse, Endpoint: "/v1/chat/completions",
+						IsStream: isStream, TranslateResponse: translateResponse,
+						Endpoint: forwardEndpoint(ctx, "/v1/chat/completions"),
 					})
 				}
 
@@ -733,7 +735,8 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 				fwdErr := h.tryForwardWithConnection(forwardRequestParams{
 					Ctx: ctx, W: cw, Provider: modelInfo.Provider, Model: modelInfo.Model,
 					ConnectionID: connID, ConnData: connData, Body: upstreamJSON,
-					IsStream: isStream, TranslateResponse: true, Endpoint: "/v1/messages",
+					IsStream: isStream, TranslateResponse: !translator.IsResponsesClient(ctx),
+					Endpoint: forwardEndpoint(ctx, "/v1/messages"),
 				})
 
 				if fwdErr != nil {

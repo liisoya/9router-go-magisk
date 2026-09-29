@@ -182,7 +182,7 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 						continue
 					}
 				}
-				if provider == "antigravity" && IsAntigravityModelBlocked(c.ID, model) {
+				if quotaCacheBlocked(provider, c.ID, model) {
 					continue
 				}
 			}
@@ -240,8 +240,8 @@ func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection
 			return true, "model lock " + model
 		}
 	}
-	if conn.Provider == "antigravity" && IsAntigravityModelBlocked(conn.ID, model) {
-		return true, "antigravity quota cache"
+	if quotaCacheBlocked(conn.Provider, conn.ID, model) {
+		return true, "quota cache"
 	}
 
 	settings, err := h.Repo.GetSettings()
@@ -253,6 +253,25 @@ func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection
 		return true, "strict model assignment"
 	}
 	return false, ""
+}
+
+// quotaCacheBlocked reports whether a provider's in-memory quota cache says
+// this connection must not serve the request. Each provider keeps its own
+// cache, so this dispatches per provider and never crosses them (AGENTS.md
+// §3.A strict provider isolation).
+//
+// Antigravity quota is per model, so it needs the model. Codex quota is
+// account-level — one 5h and one 7d window covers every model the account can
+// serve — so an exhausted window blocks the whole connection, not one model
+// on it.
+func quotaCacheBlocked(provider, connectionID, model string) bool {
+	switch provider {
+	case "antigravity":
+		return IsAntigravityModelBlocked(connectionID, model)
+	case "codex":
+		return IsCodexConnectionExhausted(connectionID)
+	}
+	return false
 }
 
 // GetProviderConfig returns the upstream configuration for a provider.

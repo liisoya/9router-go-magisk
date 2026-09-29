@@ -9,8 +9,6 @@ import (
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
-	"9router/proxy/internal/proxy/executor"
-	"9router/proxy/internal/translator"
 	"9router/proxy/internal/usagetracker"
 	"bytes"
 	"encoding/base64"
@@ -134,23 +132,6 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 		}
 		h.ChatH.LogUsage(logInfo, nil, latencyMs, body, nil)
 	}
-}
-
-// HandleResponses handles OpenAI Responses API (/v1/responses).
-func (h *MediaHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
-	h.forwardMediaRequest(w, r, body, "gpt-4o", "/responses")
-}
-
-// HandleResponsesCompact handles compact responses.
-func (h *MediaHandler) HandleResponsesCompact(w http.ResponseWriter, r *http.Request) {
-	h.HandleResponses(w, r)
 }
 
 // HandleImages handles /v1/images/generations.
@@ -864,62 +845,6 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		hasErr := fwdErr != nil
 		usagetracker.GetTracker().TrackPending(modelInfo.Model, modelInfo.Provider, connID, false, hasErr)
 	}()
-
-	if (endpoint == "/responses" || endpoint == "/v1/responses") && (modelInfo.Provider == "opencode" || modelInfo.Provider == "opencode-go" || modelInfo.Provider == "codex" || modelInfo.Provider == "grok-cli") {
-		exec := executor.Get(modelInfo.Provider)
-		if exec != nil {
-			var isStream bool
-			var checkStream struct {
-				Stream bool `json:"stream"`
-			}
-			if err := json.Unmarshal(body, &checkStream); err == nil {
-				isStream = checkStream.Stream
-			}
-			usageCtx := translator.WithUsageCapture(r.Context())
-			mediaReq := &executor.Request{
-				Ctx:           usageCtx,
-				Client:        client,
-				Config:        providerCfg,
-				APIKey:        apiKey,
-				Body:          finalBody,
-				ModelName:     modelInfo.Model,
-				IsStream:      isStream,
-				TranslateResp: false,
-				ConnectionID:  connID,
-				SessionID:     handlerutil.ExtractSessionID(r),
-				StartTime:     time.Now(),
-			}
-			if connData != nil && len(connData.ProviderSpecificData) > 0 {
-				mediaReq.ConnData = connData.ProviderSpecificData
-			}
-			if h.ChatH != nil && h.ChatH.Repo != nil {
-				mediaReq.Leases = h.ChatH.Repo
-			}
-			fwdErr = exec(w, mediaReq)
-			if fwdErr != nil {
-				log.Error("media", "executor request failed", "endpoint", endpoint, "provider", modelInfo.Provider, "model", modelInfo.Model, "error", fwdErr)
-				handlerutil.WriteJSONError(w, http.StatusBadGateway, fwdErr.Error())
-				return
-			}
-			if conn != nil {
-				h.Repo.UpdateConnectionLastUsed(conn.ID)
-			}
-			h.ChatH.LogUsage(
-				&shared.UsageLogInfo{
-					Provider:     modelInfo.Provider,
-					Model:        modelInfo.Model,
-					ConnectionID: connID,
-					APIKey:       apiKey,
-					Endpoint:     endpoint,
-				},
-				translator.GetAndClearUsage(usageCtx),
-				time.Since(mediaReq.StartTime).Milliseconds(),
-				body,
-				nil,
-			)
-			return
-		}
-	}
 
 	baseURL := strings.TrimRight(providerCfg.BaseURL, "/")
 	if connData != nil && connData.BaseURL != "" {

@@ -129,3 +129,49 @@ func TestRecentFromHistoryRow_LegacyCachedTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestTracker_ModelWithSpacesAndConcurrentDirectRequests(t *testing.T) {
+	tracker := NewTracker()
+
+	// Request 1: with spaces and parentheses in model name on connection
+	tracker.TrackPending("Grok CLI (Grok Build)", "grok-cli", "conn_1", true, false)
+	// Request 2: direct/no-auth request without connectionID
+	tracker.TrackPending("space-bunny-free", "opencode", "", true, false)
+	// Request 3: another model with spaces
+	tracker.TrackPending("Claude 3.5 Sonnet", "anthropic", "conn_2", true, false)
+
+	state := tracker.GetActiveState(nil)
+	if len(state.ActiveRequests) != 3 {
+		t.Fatalf("expected 3 active requests, got %d: %+v", len(state.ActiveRequests), state.ActiveRequests)
+	}
+
+	byProvider := make(map[string]ActiveRequest)
+	for _, r := range state.ActiveRequests {
+		byProvider[r.Provider] = r
+	}
+
+	grok, ok := byProvider["grok-cli"]
+	if !ok || grok.Model != "Grok CLI (Grok Build)" {
+		t.Errorf("grok-cli request incorrect: %+v", grok)
+	}
+
+	opencode, ok := byProvider["opencode"]
+	if !ok || opencode.Model != "space-bunny-free" || opencode.Account != "Public / Direct" {
+		t.Errorf("opencode direct request incorrect: %+v", opencode)
+	}
+
+	claude, ok := byProvider["anthropic"]
+	if !ok || claude.Model != "Claude 3.5 Sonnet" {
+		t.Errorf("anthropic request incorrect: %+v", claude)
+	}
+
+	// Clean up
+	tracker.TrackPending("Grok CLI (Grok Build)", "grok-cli", "conn_1", false, false)
+	tracker.TrackPending("space-bunny-free", "opencode", "", false, false)
+	tracker.TrackPending("Claude 3.5 Sonnet", "anthropic", "conn_2", false, false)
+
+	afterState := tracker.GetActiveState(nil)
+	if len(afterState.ActiveRequests) != 0 {
+		t.Errorf("expected 0 active requests after cleanup, got %d", len(afterState.ActiveRequests))
+	}
+}

@@ -107,7 +107,6 @@ func LoadConfigFromViper(v *viper.Viper) *Config {
 		host = strings.TrimSpace(v.GetString("BIND_ADDR"))
 	}
 
-
 	port := v.GetInt("PORT")
 	if port <= 0 {
 		port = 20130 // Default port (unified port)

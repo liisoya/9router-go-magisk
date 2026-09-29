@@ -54,6 +54,7 @@
   let editingCombo = $state<Combo | null>(null)
   let modalModels = $state<string[]>([])
   let isSavingCombo = $state(false)
+  let comboSaveError = $state('')
   let modalNameResetKey = $state(0)
 
   // Model Picker Modal state
@@ -137,21 +138,24 @@
   function openCreateModal() {
     editingCombo = null
     modalModels = []
+    comboSaveError = ''
     isCreatingOpen = true
   }
   function openEditModal(combo: Combo) {
     editingCombo = combo
     modalModels = [...getComboModels(combo)]
+    comboSaveError = ''
     isCreatingOpen = true
   }
   function closeModal() {
     isCreatingOpen = false
     editingCombo = null
-    modalModels = []
+    comboSaveError = ''
   }
 
   async function handleSaveCombo(name: string, models: string[]) {
     isSavingCombo = true
+    comboSaveError = ''
     try {
       if (editingCombo) {
         await api.updateCombo(editingCombo.id, { name, models })
@@ -161,6 +165,9 @@
       closeModal()
       onRefresh()
     } catch (e) {
+      // A refused write (the name already addresses a combo, a model alias or
+      // a custom model id) must be visible, or the guard looks inert.
+      comboSaveError = e instanceof Error ? e.message : String(e)
       console.error('Failed to save combo:', e)
     } finally {
       isSavingCombo = false
@@ -280,6 +287,7 @@
     {editingCombo}
     models={modalModels}
     isSaving={isSavingCombo}
+    saveError={comboSaveError}
     onClose={closeModal}
     onSave={handleSaveCombo}
     onOpenModelPicker={() => openModelPicker('combo')}

@@ -25,12 +25,12 @@ var blockedIPv4Ranges = []struct {
 	network uint32
 	mask    uint8
 }{
-	{ip4(0, 0, 0, 0), 8},     // Current network (0.0.0.0/8)
-	{ip4(10, 0, 0, 0), 8},    // RFC 1918
-	{ip4(100, 64, 0, 0), 10}, // CGNAT (RFC 6598) — also used by some cloud metadata proxies
-	{ip4(127, 0, 0, 0), 8},   // Loopback
+	{ip4(0, 0, 0, 0), 8},      // Current network (0.0.0.0/8)
+	{ip4(10, 0, 0, 0), 8},     // RFC 1918
+	{ip4(100, 64, 0, 0), 10},  // CGNAT (RFC 6598) — also used by some cloud metadata proxies
+	{ip4(127, 0, 0, 0), 8},    // Loopback
 	{ip4(169, 254, 0, 0), 16}, // Link-local (includes 169.254.169.254 cloud metadata)
-	{ip4(172, 16, 0, 0), 12}, // RFC 1918
+	{ip4(172, 16, 0, 0), 12},  // RFC 1918
 	{ip4(192, 168, 0, 0), 16}, // RFC 1918
 }
 

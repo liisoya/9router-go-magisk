@@ -9,13 +9,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/spf13/viper"
-	"go.uber.org/fx"
 	"9router/proxy/internal/app"
 	"9router/proxy/internal/config"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlers"
+	"github.com/go-chi/chi/v5"
+	"github.com/spf13/viper"
+	"go.uber.org/fx"
 	_ "modernc.org/sqlite"
 )
 

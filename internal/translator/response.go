@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+// extractReasoningText pulls reasoning out of a Chat delta across the three
+// shapes vendors use: reasoning_content, reasoning, and reasoning_details.
 func extractReasoningText(delta OpenAIDelta) string {
 	if delta.ReasoningContent != "" {
 		return delta.ReasoningContent
@@ -16,7 +18,17 @@ func extractReasoningText(delta OpenAIDelta) string {
 	if delta.Reasoning != "" {
 		return delta.Reasoning
 	}
-	return ""
+
+	var b strings.Builder
+	for _, detail := range delta.ReasoningDetails {
+		switch {
+		case detail.Text != "":
+			b.WriteString(detail.Text)
+		case detail.Content != "":
+			b.WriteString(detail.Content)
+		}
+	}
+	return b.String()
 }
 
 func formatSSE(event map[string]any) string {

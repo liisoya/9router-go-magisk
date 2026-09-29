@@ -1,14 +1,14 @@
 package executor
 
 import (
+	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy"
 	json "encoding/json/v2"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"9router/proxy/internal/providers"
-	"9router/proxy/internal/proxy"
 )
 
 func TestInjectReasoningContent(t *testing.T) {
@@ -225,7 +225,7 @@ func TestForwardOpencode_MuseSpark13_ResponsesRouting(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := &Request{
 		Client: srv.Client(), Config: cfg, APIKey: "",
-		Body: []byte(`{"model":"oc/muse-spark-1.3-contributor-free","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+		Body:     []byte(`{"model":"oc/muse-spark-1.3-contributor-free","messages":[{"role":"user","content":"hi"}],"stream":false}`),
 		IsStream: false, TranslateResp: false,
 	}
 	if err := ForwardOpencode(rec, req); err != nil {
@@ -249,7 +249,7 @@ func TestForwardOpencode_MuseSpark_OCPrefix(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := &Request{
 		Client: srv.Client(), Config: cfg, APIKey: "",
-		Body: []byte(`{"model":"oc/muse-spark-1.3-contributor-free","messages":[{"role":"user","content":"hi"}]}`),
+		Body:     []byte(`{"model":"oc/muse-spark-1.3-contributor-free","messages":[{"role":"user","content":"hi"}]}`),
 		IsStream: false, TranslateResp: false,
 	}
 	if err := ForwardOpencode(rec, req); err != nil {
@@ -378,10 +378,10 @@ func TestForwardOpencode_UnionAlpha_InjectsMaxTokens(t *testing.T) {
 	cfg := &providers.ProviderConfig{BaseURL: srv.URL + "/chat/completions"}
 	rec := httptest.NewRecorder()
 	req := &Request{
-		Client: srv.Client(),
-		Config: cfg,
-		APIKey: "test-key",
-		Body:   []byte(`{"model":"ag/union-alpha","messages":[{"role":"user","content":"hi"}]}`),
+		Client:   srv.Client(),
+		Config:   cfg,
+		APIKey:   "test-key",
+		Body:     []byte(`{"model":"ag/union-alpha","messages":[{"role":"user","content":"hi"}]}`),
 		IsStream: false,
 	}
 
@@ -606,7 +606,7 @@ func TestForwardOpencode_BigPickle_ForcesStreamAndAggregatesSSE(t *testing.T) {
 	msg := c0["message"].(map[string]any)
 	if msg["content"] != "pickle response" {
 		t.Errorf("expected 'pickle response', got %v", msg["content"])
-}
+	}
 }
 
 func TestBuildResponsesBody_StringInput(t *testing.T) {

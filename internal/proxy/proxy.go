@@ -42,6 +42,7 @@ func (e *UpstreamError) Error() string {
 	}
 	return fmt.Sprintf("upstream returned %d", e.StatusCode)
 }
+
 var directProxyClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy: nil, // direct connection to bypass proxy allowlist
@@ -106,4 +107,3 @@ func DoRequest(ctx context.Context, client *http.Client, method, url string, hea
 	}
 	return resp, nil
 }
-

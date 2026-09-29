@@ -345,7 +345,7 @@
     try {
       savePending(window.localStorage, { provider: providerId, ...p })
     } catch {
-      /* storage blocked — degradasi ke paste manual */
+      /* storage blocked — degrade to manual paste */
     }
   }
 
@@ -359,7 +359,7 @@
     }
     if (!cb || (!cb.raw && !cb.error)) return false
     if (cb.error) {
-      oauthError = `Login gagal: ${cb.error}${cb.errorDesc ? ` — ${cb.errorDesc}` : ''}`
+      oauthError = `Login failed: ${cb.error}${cb.errorDesc ? ` — ${cb.errorDesc}` : ''}`
       try {
         clearCallback(window.localStorage)
       } catch {
@@ -429,7 +429,7 @@
           errorDescription?: string
         }
         if (data.error) {
-          oauthError = `Login gagal: ${data.error}${data.errorDescription ? ` — ${data.errorDescription}` : ''}`
+          oauthError = `Login failed: ${data.error}${data.errorDescription ? ` — ${data.errorDescription}` : ''}`
           return
         }
         const raw = data.code || data.token || ''
@@ -447,7 +447,7 @@
         showOAuthModal = false
         onRefresh()
       } else if (e.data?.type === '9router-oauth-error' && e.data?.provider === 'antigravity') {
-        oauthError = `Login gagal: ${e.data.error || 'Unknown error'}`
+        oauthError = `Login failed: ${e.data.error || 'Unknown error'}`
       }
     }
     window.addEventListener('message', onWindowMessage)
@@ -461,7 +461,7 @@
           return
         }
         if (e.data?.provider === 'antigravity' && e.data?.error) {
-          oauthError = `Login gagal: ${e.data.error}`
+          oauthError = `Login failed: ${e.data.error}`
           return
         }
         consumeOAuthCallback()
@@ -794,15 +794,24 @@
       }
     }
 
-    // 2. Check live quota data for exhausted models (remaining <= 0) and resetAt
+    // 2. Check live quota data for exhausted models (remaining <= 0) and resetAt.
+    //    A pool with total <= 0 is not an exhausted pool — it means the account
+    //    has no allocation at all (Qoder credits report total 0, and its
+    //    "expiresAt" is a 9999-12-31 sentinel), so counting it produced
+    //    "Quota Exhausted (0%): Resets in 2912172d 1h" on a perfectly healthy
+    //    connection. Only a pool that was actually granted something can run
+    //    out of it.
     const usage = connectionQuotas[conn.id]
     if (usage?.quotas) {
       const quotaEntries = Object.entries(usage.quotas)
-      const exhausted = quotaEntries.filter(
-        ([_, q]) =>
-          (q.remainingPercentage !== undefined && q.remainingPercentage <= 0) ||
-          (q.remaining !== undefined && q.remaining <= 0)
-      )
+      const exhausted = quotaEntries.filter(([_, q]) => {
+        const total = Number(q.total)
+        if (!Number.isFinite(total) || total <= 0) return false
+        return (
+          (q.remainingPercentage !== undefined && Number(q.remainingPercentage) <= 0) ||
+          (q.remaining !== undefined && Number(q.remaining) <= 0)
+        )
+      })
       if (exhausted.length > 0) {
         let earliestReset = 0
         let resetModel = ''
@@ -1265,6 +1274,15 @@
       openCustomOAuth()
     } else if (providerId === 'kiro') {
       openKiroOAuth()
+    } else if (isDeviceOAuth) {
+      // Device-code providers (qoder, grok-cli, github, kilocode, kimi,
+      // codebuddy-*) have no authorize endpoint to redirect to: the backend
+      // mints a PKCE/nonce pair locally and hands back a verification URL to
+      // open, then polls for the token. Without this branch they fell through
+      // to openGenericOAuth and the user was asked to paste a token by hand
+      // instead of getting the login page — isDeviceOAuth was computed but
+      // never read, and openDeviceOAuth was never called.
+      openDeviceOAuth()
     } else if (isSpecialOAuth) {
       openSpecialOAuth()
     } else if (isOAuth) {
@@ -1734,7 +1752,7 @@
     try {
       const res = await api.cursorAutoImport()
       if (!res || (res as { error?: string })?.error || !(res as { success?: boolean })?.success) {
-        oauthError = (res as { error?: string })?.error || 'Auto-import gagal. Pastikan Cursor IDE terinstall & login di host ini.'
+        oauthError = (res as { error?: string })?.error || 'Auto-import failed. Make sure Cursor IDE is installed and signed in on this host.'
       } else {
         showOAuthModal = false
         onRefresh()
@@ -1752,8 +1770,8 @@
   }
 
   function openGenericOAuth() {
-    // Tidak ada authorize endpoint generik: JANGAN arahkan ke Google/Antigravity.
-    // Tampilkan modal dengan panduan import token manual.
+    // No generic authorize endpoint: never redirect to Google/Antigravity.
+    // Show the modal with manual-token import instructions instead.
     oauthError = null
     oauthAuthUrl = ''
     callbackInput = ''
@@ -1832,14 +1850,14 @@
             loadFreebuffSession()
             return
           } else if (res?.status === 'pending') {
-            oauthError = 'Status masih pending. Jika tab Freebuff terbuka di halaman /onboard, pastikan selesaikan langkah onboarding di tab tersebut, lalu klik Check & Connect lagi.'
+            oauthError = 'Status is still pending. If the Freebuff tab opened on the /onboard page, finish the onboarding step in that tab, then click Check & Connect again.'
           } else if (res?.status === 'expired') {
-            oauthError = 'Sesi otorisasi telah kedaluwarsa. Silakan tutup modal ini dan klik Authorize Freebuff CLI ulang.'
+            oauthError = 'The authorization session has expired. Close this modal and click Authorize Freebuff CLI again.'
           } else {
-            oauthError = `Status: ${res?.status || 'pending'}. Pastikan login di browser sudah selesai.`
+            oauthError = `Status: ${res?.status || 'pending'}. Make sure the browser login is complete.`
           }
         } else {
-          oauthError = 'Sesi Freebuff belum diinisiasi. Silakan klik Authorize Freebuff CLI ulang.'
+          oauthError = 'The Freebuff session has not been started yet. Click Authorize Freebuff CLI again.'
         }
         return
       }
@@ -1868,7 +1886,7 @@
       }
       if (isClineOAuth) {
         if (!clineCodeVerifier) {
-          oauthError = 'Sesi otorisasi belum diinisiasi. Tutup modal ini lalu klik Login ulang.'
+          oauthError = 'The authorization session has not been started yet. Close this modal and click Log in again.'
           return
         }
         try {
@@ -1886,7 +1904,7 @@
       }
       if (isPKCEOAuth) {
         if (!pkceCodeVerifier) {
-          oauthError = 'Sesi otorisasi belum diinisiasi. Tutup modal ini lalu klik Login ulang.'
+          oauthError = 'The authorization session has not been started yet. Close this modal and click Log in again.'
           return
         }
         try {
@@ -1960,7 +1978,7 @@
           let res: { success?: boolean; status?: string; error?: string } | null = null
           if (providerId === 'cursor') {
             if (!tok || !specialExtra.trim()) {
-              oauthError = 'Isi access token dan machine ID.'
+              oauthError = 'Enter the access token and machine ID.'
               return
             }
             res = await api.cursorImport(tok, specialExtra.trim())
@@ -1968,7 +1986,7 @@
             res = await api.kimchiExchange(tok)
           } else if (providerId === 'xiaomi-mimo') {
             if (!customVerifier) {
-              oauthError = 'Sesi otorisasi belum diinisiasi. Tutup modal ini lalu klik Login ulang.'
+              oauthError = 'The authorization session has not been started yet. Close this modal and click Log in again.'
               return
             }
             res = await api.mimoExchange(tok, customVerifier)
@@ -2016,13 +2034,13 @@
       }
       if (providerId !== 'antigravity') {
         if (raw.includes('code=') || raw.includes('http')) {
-          oauthError = `Login OAuth langsung belum didukung untuk ${providerName}. Tempel access token / refresh token sebagai gantinya.`
+          oauthError = `Direct OAuth login is not supported for ${providerName}. Paste an access token / refresh token instead.`
           return
         }
         try {
           const res = await api.importOAuthToken(providerId, raw)
           if (!res || (res as { error?: string })?.error) {
-            oauthError = (res as { error?: string })?.error || 'Import token gagal'
+            oauthError = (res as { error?: string })?.error || 'Token import failed'
           } else {
             showOAuthModal = false
             onRefresh()
@@ -2228,6 +2246,9 @@
       await refreshCompatibleModels()
       notifyCustomModelsChanged()
     } catch (err) {
+      // A refusal (the id already addresses a combo or a model alias) has to
+      // reach the user, like the other import paths on this page.
+      alert(err instanceof Error ? err.message : 'Failed to add model')
       console.error('Error adding model:', err)
     } finally {
       isAddingCompatibleModel = false
@@ -2309,6 +2330,24 @@
     } finally {
       isImportingCompatibleModels = false
     }
+  }
+
+  // Port of upstream ConnectionRow's secondaryDisplayName: the email when the
+  // stored name differs from it, otherwise the displayName when that differs.
+  // The Qoder device flow stores name === email, so the displayName ("Luqmanul
+  // Hakim") is what upstream shows underneath — the same reason our card used to
+  // show the email twice over.
+  function secondaryConnLabel(c: {
+    name?: string | null
+    email?: string | null
+    displayName?: string | null
+  }): string {
+    const name = c.name?.trim() ?? ''
+    const email = c.email?.trim() ?? ''
+    const display = c.displayName?.trim() ?? ''
+    if (name && email && name !== email) return email
+    if (name && display && name !== display) return display
+    return ''
   }
 
   async function handleImportLiveCatalogModels() {
@@ -2820,6 +2859,12 @@
                     <p class="text-sm font-medium truncate">
                       {conn.name || conn.email || (conn.authType === 'oauth' ? 'OAuth Account' : 'API Key Slot')}
                     </p>
+                    <!-- Secondary label: upstream ConnectionRow shows the email
+                         under a name, or the displayName when the stored name is
+                         the email (which is what the Qoder device flow writes). -->
+                    {#if secondaryConnLabel(conn)}
+                      <p class="truncate text-xs text-text-muted">{secondaryConnLabel(conn)}</p>
+                    {/if}
                     <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
                       <!-- Status badge (queued/testing/success/failed while a one-by-one run is in flight) -->
                       {#if status?.state === 'queued'}
@@ -3443,8 +3488,14 @@
           disabled={isImportingLiveCatalogModels}
           class="flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-surface-2 hover:bg-surface-3 px-3 py-2 text-xs text-text-main transition-colors sm:w-auto cursor-pointer disabled:opacity-50"
         >
-          <span class="material-symbols-outlined text-sm">download</span>
-          {isImportingLiveCatalogModels ? 'Fetching...' : 'Import from /models'}
+          <span class="material-symbols-outlined text-sm {isImportingLiveCatalogModels ? 'animate-spin' : ''}">
+            {isImportingLiveCatalogModels ? 'progress_activity' : 'download'}
+          </span>
+          {isImportingLiveCatalogModels
+            ? 'Fetching...'
+            : providerId === 'qoder' || providerId === 'qoder-cn'
+              ? 'Fetch Qoder Models'
+              : 'Import from /models'}
         </button>
       {/if}
     </div>
@@ -3679,7 +3730,7 @@
           {providerId === 'freebuff'
             ? 'Authorization link & manual check'
             : isClineOAuth
-              ? 'Login di Cline, lalu paste callback'
+              ? 'Log in via Cline, then paste the callback'
               : oauthAuthUrl
                 ? 'Or paste callback URL manually'
                 : 'Manual token import'}
@@ -3690,7 +3741,7 @@
       <div class="space-y-4">
         {#if providerId === 'cursor'}
           <div class="space-y-2 p-3 border border-border rounded-md bg-sidebar/50">
-            <p class="text-[11px] text-text-muted">Ambil dari <span class="font-mono">state.vscdb</span> Cursor IDE (<span class="font-mono">cursorAuth/accessToken</span> + <span class="font-mono">storage.serviceMachineId</span>):</p>
+            <p class="text-[11px] text-text-muted">Get it from Cursor IDE's <span class="font-mono">state.vscdb</span> (<span class="font-mono">cursorAuth/accessToken</span> + <span class="font-mono">storage.serviceMachineId</span>):</p>
             <input
               bind:value={specialToken}
               placeholder="Access token (cursorAuth/accessToken)"
@@ -3707,13 +3758,13 @@
               disabled={isConnecting}
               class="w-full py-1.5 text-xs font-semibold rounded-[8px] bg-surface-2 hover:bg-surface-3 text-text-main border border-border disabled:opacity-50 cursor-pointer"
             >
-              {isConnecting ? 'Reading…' : 'Auto-import dari Cursor di host ini'}
+              {isConnecting ? 'Reading…' : 'Auto-import from Cursor on this host'}
             </button>
           </div>
         {/if}
         {#if providerId === 'gitlab'}
           <div class="space-y-2 p-3 border border-border rounded-md bg-sidebar/50">
-            <p class="text-[11px] text-text-muted">Atau pakai Personal Access Token (disamping login OAuth di atas):</p>
+            <p class="text-[11px] text-text-muted">Or use a Personal Access Token (in addition to the OAuth login above):</p>
             <input
               bind:value={specialToken}
               type="password"
@@ -3729,17 +3780,17 @@
         {/if}
         {#if providerId === 'iflow'}
           <div class="space-y-2 p-3 border border-border rounded-md bg-sidebar/50">
-            <p class="text-[11px] text-text-muted">Atau pakai cookie platform.iflow.cn (disamping login OAuth di atas):</p>
+            <p class="text-[11px] text-text-muted">Or use a platform.iflow.cn cookie (in addition to the OAuth login above):</p>
             <input
               bind:value={specialToken}
-              placeholder="Cookie (harus mengandung BXAuth=...)"
+              placeholder="Cookie (must contain BXAuth=...)"
               class="w-full px-2.5 py-1.5 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary font-mono"
             />
           </div>
         {/if}
         {#if deviceUserCode}
           <div class="p-3 border border-border rounded-md bg-sidebar/50 text-center">
-            <p class="text-[11px] text-text-muted mb-1">Masukkan kode ini di halaman login yang terbuka:</p>
+            <p class="text-[11px] text-text-muted mb-1">Enter this code on the login page that opened:</p>
             <p class="text-2xl font-mono font-bold tracking-[0.3em] text-text-main select-all">{deviceUserCode}</p>
           </div>
         {/if}
@@ -3774,7 +3825,7 @@
 
         {#if providerId === 'gitlab'}
           <div class="grid grid-cols-1 gap-2 p-3 border border-border rounded-md bg-sidebar/50 mb-1">
-            <p class="text-[11px] text-text-muted">GitLab self-hosted / OAuth app sendiri (opsional — default gitlab.com tanpa client):</p>
+            <p class="text-[11px] text-text-muted">Self-hosted GitLab / own OAuth app (optional — defaults to gitlab.com without a client):</p>
             <input
               bind:value={gitlabBaseUrl}
               placeholder="Base URL (default https://gitlab.com)"
@@ -3798,28 +3849,28 @@
         <div>
           <p class="text-sm font-medium mb-1">
             {providerId === 'freebuff'
-              ? 'Step 2: Selesaikan di browser / paste URL / Code / Token'
+              ? 'Step 2: Finish in the browser / paste URL / Code / Token'
               : isClineOAuth
                 ? 'Step 2: Paste the callback URL here'
                 : oauthAuthUrl
                   ? 'Step 2: Paste the callback URL here'
-                  : 'Import token manual (belum ada login browser untuk provider ini)'}
+                  : 'Manual token import (no browser login for this provider)'}
           </p>
           <input
             bind:value={callbackInput}
             placeholder={providerId === 'freebuff'
-              ? 'https://freebuff.com/onboard?auth_code=... atau paste authToken'
+              ? 'https://freebuff.com/onboard?auth_code=... or paste authToken'
               : `${dashboardCallback()}?code=...&state=...`}
             class="w-full px-2.5 py-1.5 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary font-mono"
           />
           <p class="text-[11px] text-text-muted mt-1">
             {providerId === 'freebuff'
-              ? 'Jika browser diarahkan ke /onboard, selesaikan onboarding di tab Freebuff lalu paste URL di atas atau langsung klik Check & Connect.'
+              ? 'If the browser lands on /onboard, finish onboarding in the Freebuff tab, then paste the URL above or click Check & Connect.'
               : isClineOAuth
-                ? 'Login di tab Cline yang terbuka — koneksi tersambung otomatis. Kalau gagal, copy URL redirect (berisi code=...) ke sini dan klik Connect.'
+                ? 'Log in via the Cline tab that opened — the connection completes automatically. If it fails, copy the redirect URL (containing code=...) here and click Connect.'
                 : oauthAuthUrl
-                  ? 'Selesaikan login di tab browser — koneksi tersambung otomatis. Kalau gagal, copy full URL dari browser ke sini.'
-                  : 'Tempel access token di sini lalu klik Connect.'}
+                  ? 'Complete the login in the browser tab — the connection completes automatically. If it fails, copy the full URL from the browser here.'
+                  : 'Paste the access token here, then click Connect.'}
           </p>
         </div>
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"9router/proxy/internal/handlerutil"
 )
@@ -66,6 +67,21 @@ func (h *DashboardHandler) HandleSaveCustomModel(w http.ResponseWriter, r *http.
 
 	if key == "" {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing custom model key or id")
+		return
+	}
+
+	// The id is the segment a client sees as "<node-prefix>/<id>" and copies
+	// into its config, so it is the part that must not collide with a combo
+	// name or a model alias.
+	modelID, _ := data["id"].(string)
+	if modelID == "" {
+		if parts := strings.SplitN(key, "|", 3); len(parts) >= 2 {
+			modelID = parts[1]
+		} else {
+			modelID = key
+		}
+	}
+	if h.guardNameCollision(w, nsCustomModel, modelID) {
 		return
 	}
 
@@ -239,6 +255,10 @@ func (h *DashboardHandler) HandleSetModelAlias(w http.ResponseWriter, r *http.Re
 	}
 	if req.Model == "" || req.Alias == "" {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "model and alias required")
+		return
+	}
+
+	if h.guardNameCollision(w, nsModelAlias, req.Alias) {
 		return
 	}
 

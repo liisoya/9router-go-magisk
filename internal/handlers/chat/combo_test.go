@@ -690,6 +690,50 @@ func TestAugmentModelsWithCapacityAdapter(t *testing.T) {
 	})
 }
 
+// A combo whose own models cannot serve a request has the capacity-adapter
+// pool prepended to it. That pool must NOT be folded into the combo's own
+// rotation: with strategy round-robin it used to alternate every turn between
+// the combo's model and a provider that is not in the combo at all, which read
+// as traffic leaking out of the combo.
+func TestApplyCapacityAdapter_DoesNotFoldAdapterIntoComboRotation(t *testing.T) {
+	h := NewChatHandler(nil)
+	comboModels := []string{"oc/space-bunny-free"}
+
+	t.Run("vision turn is governed by the adapter strategy, not the combo's", func(t *testing.T) {
+		augmented, strategy := h.applyCapacityAdapter(comboModels, map[string]bool{"vision": true}, "round-robin", "combo-wombo")
+
+		if len(augmented) != 2 || augmented[0] != "ag/gemini-3.8-flash-high" {
+			t.Fatalf("expected the vision adapter model prepended, got %v", augmented)
+		}
+		if strategy == "round-robin" {
+			t.Fatalf("adapter model must not join the combo rotation, got strategy %q", strategy)
+		}
+
+		// Every turn must lead with the only model that can actually serve the
+		// request, and the combo's own model stays as the fallback.
+		for turn := range 4 {
+			rotated := h.applyComboStrategy(strategy, augmented, "combo-wombo", 1, true)
+			if rotated[0] != "ag/gemini-3.8-flash-high" {
+				t.Fatalf("turn %d served by %s, want ag/gemini-3.8-flash-high", turn, rotated[0])
+			}
+			if rotated[len(rotated)-1] != "oc/space-bunny-free" {
+				t.Fatalf("turn %d lost the combo fallback, got %v", turn, rotated)
+			}
+		}
+	})
+
+	t.Run("text-only turn keeps the combo's own strategy and list", func(t *testing.T) {
+		augmented, strategy := h.applyCapacityAdapter(comboModels, map[string]bool{"tools": true}, "round-robin", "combo-wombo")
+
+		if len(augmented) != 1 || augmented[0] != "oc/space-bunny-free" {
+			t.Fatalf("expected an untouched list, got %v", augmented)
+		}
+		if strategy != "round-robin" {
+			t.Fatalf("combo strategy must survive when nothing was injected, got %q", strategy)
+		}
+	})
+}
+
 func TestCollectPanel_CancelAbortsStragglers(t *testing.T) {
 	released := make(chan struct{}, 8)
 	block := func(ctx context.Context) *fusionResult {

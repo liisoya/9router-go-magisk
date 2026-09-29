@@ -6,8 +6,38 @@ import (
 	"net/http"
 	"time"
 
+	"9router/proxy/internal/fetchgate"
 	"9router/proxy/internal/handlerutil"
 )
+
+// quotaFetchGate paces every live quota read this handler makes (issue #30).
+//
+// The quota tracker refreshes every visible connection in one tick, so a user
+// with ten accounts behind one office IP fired ten quota reads within a few
+// milliseconds. Google answered 429, and the chat path reads a 429 as real
+// quota exhaustion — locking accounts whose tokens were still live, and taking
+// the paid combos down with them. Upstream decolua/9router has no throttle here
+// either, so this is a deliberate gap and not a parity regression.
+//
+// The floor is 250ms with up to 120ms of jitter on top: enough that a burst
+// stops looking like a fleet sharing one egress IP, cheap enough that ten
+// accounts still refresh inside a couple of seconds. Only the start of a
+// request is paced, so a single account's manual refresh is never delayed.
+var quotaFetchGate = fetchgate.New(250*time.Millisecond, 120*time.Millisecond)
+
+// acquireQuotaSlot blocks until this request may talk to the provider. It
+// returns false when the client gave up while queued — usually a dashboard
+// that navigated away mid-refresh — in which case the caller abandons the
+// fetch instead of spending an upstream request on a response nobody reads.
+func acquireQuotaSlot(w http.ResponseWriter, r *http.Request) bool {
+	if err := quotaFetchGate.Acquire(r.Context()); err != nil {
+		if r.Context().Err() == nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		}
+		return false
+	}
+	return true
+}
 
 // HandleGetConnectionUsage handles GET /api/usage/{connectionId}
 func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +67,10 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 
 	// Live provider quota fetchers (ports of open-sse/services/usage/*.js).
 	// Antigravity keeps its existing dedicated path below.
+	if !acquireQuotaSlot(w, r) {
+		return
+	}
+
 	if res, ok := fetchProviderUsage(r.Context(), conn.Provider, data); ok {
 		handlerutil.WriteJSON(w, http.StatusOK, res.toResponse())
 		return
@@ -48,6 +82,13 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 		accessToken, _ := data["accessToken"].(string)
 		projectID, _ := data["projectId"].(string)
 		if accessToken != "" {
+			if !acquireQuotaSlot(w, r) {
+				return
+			}
+
+			// The gate is paced on the request context, not this deadline, so a
+			// long queue cannot expire a fetch that has not started yet; the
+			// 30s budget covers the upstream call itself.
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()
 

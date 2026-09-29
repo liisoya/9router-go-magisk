@@ -4,6 +4,7 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 )
+
 // repairToolCallIDsInMap ensures every role: "tool" message has a valid tool_call_id (PR #4090).
 // Strict upstreams (NVIDIA, OpenAI, Antigravity) reject requests with HTTP 400 when tool_call_id is missing.
 func repairToolCallIDsInMap(body map[string]any) {

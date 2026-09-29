@@ -1,9 +1,9 @@
 package chat
 
 import (
+	json "encoding/json/v2"
 	"errors"
 	"io"
-	json "encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -105,7 +105,7 @@ func TestProcessCommandcodeEvent_ToolCall(t *testing.T) {
 func TestProcessCommandcodeEvent_FinishStep(t *testing.T) {
 	state := &executor.CommandcodeStreamState{ResponseID: "test-id", Created: 1000}
 	event := map[string]any{
-		"type":          "finish-step",
+		"type":         "finish-step",
 		"finishReason": "stop",
 	}
 	chunks := executor.ProcessCommandcodeEvent(event, "finish-step", state)

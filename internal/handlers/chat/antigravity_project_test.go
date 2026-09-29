@@ -51,17 +51,17 @@ func TestFetchAntigravityProjectID_outcomes(t *testing.T) {
 			// loadCodeAssist already said "no project for this token" (200, tiers
 			// only) — an onboardUser 429 afterwards doesn't change that verdict,
 			// so it's still cached as no-project.
-			name:        "onboard rate-limited after clean load",
-			loadAssist:  200,
-			loadBody:    `{"allowedTiers":[{"id":"standard-tier","isDefault":true}]}`,
-			onboard:     429,
-			wantNoProj:  true,
-			wantAuth:    false,
+			name:       "onboard rate-limited after clean load",
+			loadAssist: 200,
+			loadBody:   `{"allowedTiers":[{"id":"standard-tier","isDefault":true}]}`,
+			onboard:    429,
+			wantNoProj: true,
+			wantAuth:   false,
 		},
 		{
-			name:        "concurrent connection refused is transient",
-			loadAssist:  503,
-			wantNoProj:  false,
+			name:       "concurrent connection refused is transient",
+			loadAssist: 503,
+			wantNoProj: false,
 		},
 	}
 

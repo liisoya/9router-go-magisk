@@ -97,6 +97,23 @@ function groupByProviderStable<T extends ProviderConnectionLike>(connections: T[
   return Array.from(seen.values()).flat()
 }
 
+// Upstream emits Codex quota rows in this order. Unknown keys sort last but
+// keep a stable relative position, so a new window never displaces the known
+// ones.
+const CODEX_QUOTA_ORDER = [
+  'session',
+  'weekly',
+  'review_session',
+  'review_weekly',
+  'spark_session',
+  'spark_weekly',
+]
+
+function codexQuotaOrder(quotaType: string): number {
+  const idx = CODEX_QUOTA_ORDER.indexOf(quotaType)
+  return idx === -1 ? CODEX_QUOTA_ORDER.length : idx
+}
+
 export function getConnectionQuotaRemaining(
   connection: ProviderConnectionLike,
   quotaData: Record<string, QuotaEntry | undefined>,
@@ -565,24 +582,31 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
 
       case 'codex':
         if (d.quotas) {
-          Object.entries(d.quotas).forEach(([quotaType, quota]) => {
-            let displayName = quotaType
-            if (quotaType === 'spark_session') displayName = 'Spark (5h)'
-            else if (quotaType === 'spark_weekly') displayName = 'Spark (Weekly)'
-            else if (quotaType === 'session') displayName = '5h'
-            else if (quotaType === 'weekly') displayName = 'Weekly'
-            else if (quotaType === 'review_session') displayName = 'Review (5h)'
-            else if (quotaType === 'review_weekly') displayName = 'Review (Weekly)'
+          // The Go backend serializes quotas from a map, whose key order is
+          // not stable, so sort into the fixed upstream order rather than
+          // letting the rows reshuffle on every refresh.
+          Object.entries(d.quotas)
+            .sort(
+              (a, b) => codexQuotaOrder(a[0]) - codexQuotaOrder(b[0]),
+            )
+            .forEach(([quotaType, quota]) => {
+              let displayName = quotaType
+              if (quotaType === 'spark_session') displayName = 'Spark (5h)'
+              else if (quotaType === 'spark_weekly') displayName = 'Spark (Weekly)'
+              else if (quotaType === 'session') displayName = '5h'
+              else if (quotaType === 'weekly') displayName = 'Weekly'
+              else if (quotaType === 'review_session') displayName = 'Review (5h)'
+              else if (quotaType === 'review_weekly') displayName = 'Review (Weekly)'
 
-            normalizedQuotas.push({
-              name: displayName,
-              quotaType,
-              used: Number(quota.used) || 0,
-              total: Number(quota.total) || 0,
-              remaining: quota.remaining !== undefined ? Number(quota.remaining) : undefined,
-              resetAt: (quota.resetAt as string) || null,
+              normalizedQuotas.push({
+                name: displayName,
+                quotaType,
+                used: Number(quota.used) || 0,
+                total: Number(quota.total) || 0,
+                remaining: quota.remaining !== undefined ? Number(quota.remaining) : undefined,
+                resetAt: (quota.resetAt as string) || null,
+              })
             })
-          })
         }
         break
 

@@ -60,12 +60,12 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	requiredCaps := DetectRequiredCapabilities(body)
 
 	if len(modelInfo.ComboModels) > 0 {
-		augmented, _ := h.AugmentModelsWithCapacityAdapter(modelInfo.ComboModels, requiredCaps)
+		augmented, comboStrategy := h.applyCapacityAdapter(modelInfo.ComboModels, requiredCaps, modelInfo.Strategy, reqBody.Model)
 		if modelInfo.Strategy == "fusion" {
 			h.handleFusion(ctx, w, body, augmented, modelInfo.Strategy, reqBody.Stream, false, reqBody.Model, modelInfo.StickyLimit, modelInfo.JudgeModel)
 			return
 		}
-		h.handleComboFallback(ctx, w, body, augmented, modelInfo.Strategy, reqBody.Stream, false, reqBody.Model, modelInfo.StickyLimit)
+		h.handleComboFallback(ctx, w, body, augmented, comboStrategy, reqBody.Stream, false, reqBody.Model, modelInfo.StickyLimit)
 		return
 	}
 
@@ -82,6 +82,33 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	h.handleSingleModel(ctx, w, body, modelInfo, reqBody.Stream, false)
+}
+
+// applyCapacityAdapter augments a combo's model list with the capacity-adapter
+// pool and reports the strategy that must govern the resulting list.
+//
+// The pool exists precisely because none of the combo's own models can serve
+// the request (a text-only combo receiving an image, say), so it is prepended
+// and must be tried before the combo's own list. Handing the combo's own
+// strategy to the augmented list instead used to fold the adapter model into
+// the combo's rotation: with strategy round-robin, combo-wombo (whose only
+// entry is oc/space-bunny-free, which reports no vision) alternated every turn
+// between its own model and ag/gemini-3.8-flash-high, so traffic to a provider
+// absent from the combo appeared to leak out of it. An augmented list is
+// therefore governed by the adapter's own strategy; the combo's strategy
+// applies only when nothing was injected.
+func (h *ChatHandler) applyCapacityAdapter(comboModels []string, required map[string]bool, comboStrategy, requestedModel string) ([]string, string) {
+	augmented, adapterStrategy := h.AugmentModelsWithCapacityAdapter(comboModels, required)
+	if len(augmented) == len(comboModels) {
+		return augmented, comboStrategy
+	}
+	log.Info("chat", "capacity adapter auto-switch combo",
+		"target", requestedModel,
+		"switched_to", augmented[0],
+		"caps", keysString(required),
+		"comboStrategy", comboStrategy,
+		"adapterStrategy", adapterStrategy)
+	return augmented, adapterStrategy
 }
 
 // handleSingleModel resolves a single ModelInfo and forwards the request upstream.
@@ -184,7 +211,7 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	requiredCaps := DetectRequiredCapabilities(body)
 
 	if len(modelInfo.ComboModels) > 0 {
-		augmented, _ := h.AugmentModelsWithCapacityAdapter(modelInfo.ComboModels, requiredCaps)
+		augmented, comboStrategy := h.applyCapacityAdapter(modelInfo.ComboModels, requiredCaps, modelInfo.Strategy, reqBody.Model)
 		if modelInfo.Strategy == "fusion" {
 			bodyJSON, err := json.Marshal(workingBody)
 			if err != nil {
@@ -194,7 +221,7 @@ func (h *ChatHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 			h.handleFusion(ctx, w, bodyJSON, augmented, modelInfo.Strategy, reqBody.Stream, translateResponse, reqBody.Model, modelInfo.StickyLimit, modelInfo.JudgeModel)
 			return
 		}
-		h.handleMessagesComboFallback(ctx, w, workingBody, augmented, modelInfo.Strategy, reqBody.Stream, reqBody.Model, modelInfo.StickyLimit)
+		h.handleMessagesComboFallback(ctx, w, workingBody, augmented, comboStrategy, reqBody.Stream, reqBody.Model, modelInfo.StickyLimit)
 		return
 	}
 
@@ -362,13 +389,53 @@ func (h *ChatHandler) HandleTriggerUpdate(w http.ResponseWriter, r *http.Request
 	}()
 }
 
+// modelsListModeFromQuery reads the listing scope from the request. Absent
+// params keep the upstream default (modeListAll) so existing clients are
+// unaffected: `?connected=1` narrows to usable providers, `?all=1` forces the
+// full catalog.
+func modelsListModeFromQuery(r *http.Request) ModelsListMode {
+	q := r.URL.Query()
+	if queryFlagEnabled(q.Get("connected")) {
+		return modeListConnected
+	}
+	if queryFlagEnabled(q.Get("all")) {
+		return modeListCatalog
+	}
+	return modeListAll
+}
+
+// queryFlagEnabled treats an explicit "1"/"true" as on, matching the loose
+// boolean parsing the rest of the dashboard API uses. An absent value is off,
+// so `?all` alone (no value) also reads as false and the default applies.
+func queryFlagEnabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 // HandleModels responds with the list of available model identifiers.
+//
+// Scope is controlled by query parameters:
+//   - default        upstream behaviour: full static catalog on a fresh
+//     install, connection-scoped once connections exist
+//   - ?connected=1   only providers with an active connection, plus registry
+//     noAuth providers — the set a client can actually call
+//   - ?all=1         always the full static catalog, connections ignored
+//
+// The response always carries `mode` and `connections` so a caller can tell a
+// candidate catalog from a usable model list.
 func (h *ChatHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
-	data := h.buildModelsList(r.Context())
+	mode := modelsListModeFromQuery(r)
+	result := h.buildModelsListResult(r.Context(), mode)
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
-		"object": "list",
-		"data":   data,
-		"models": data,
+		"object":      "list",
+		"data":        result.Models,
+		"models":      result.Models,
+		"mode":        result.Mode,
+		"connections": result.Connections,
 	})
 }
 
@@ -542,13 +609,10 @@ func (h *ChatHandler) HandleModelLookup(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Otherwise treat as provider/model ID lookup
-	data := h.buildModelsList(r.Context())
-	for _, m := range data {
-		if m.ID == suffix {
-			handlerutil.WriteJSON(w, http.StatusOK, m)
-			return
-		}
+	// Otherwise treat as provider/model ID lookup.
+	if m, ok := h.findModelForLookup(r.Context(), suffix); ok {
+		handlerutil.WriteJSON(w, http.StatusOK, m)
+		return
 	}
 	// Also try without provider prefix? No, must be exact.
 
@@ -559,6 +623,35 @@ func (h *ChatHandler) HandleModelLookup(w http.ResponseWriter, r *http.Request) 
 			"code":    "model_not_found",
 		},
 	})
+}
+
+// findModelForLookup resolves a provider/model id against the default list,
+// then against the connected-mode list.
+//
+// The default list is connection-scoped as soon as any connection row exists,
+// so a registry noAuth model that /v1/models?connected=1 advertises would 404
+// here — the listing endpoint and the lookup endpoint would disagree about
+// whether the same model exists. Falling back keeps this route additive in both
+// directions: on a fresh install the default list is the full catalog, which
+// already contains everything connected mode offers, and on a configured
+// install connected mode is the superset. Replacing the lookup outright with
+// connected mode would instead make a fresh install stricter, turning the
+// credentialed-provider lookups that resolve today into 404s.
+func (h *ChatHandler) findModelForLookup(ctx context.Context, modelID string) (ModelInfoObject, bool) {
+	if m, ok := findModelByID(h.buildModelsList(ctx), modelID); ok {
+		return m, true
+	}
+	return findModelByID(h.buildModelsListResult(ctx, modeListConnected).Models, modelID)
+}
+
+// findModelByID scans the published list for an exact provider/model id.
+func findModelByID(data []ModelInfoObject, modelID string) (ModelInfoObject, bool) {
+	for _, m := range data {
+		if m.ID == modelID {
+			return m, true
+		}
+	}
+	return ModelInfoObject{}, false
 }
 
 // HandleAudioVoices lists available TTS voices for a provider.
@@ -760,8 +853,11 @@ func contentBlockChars(block any) int {
 	}
 }
 
-// HandleResponsesCompact forwards to chat handler with compact flag.
-// POST /v1/responses/compact
+// HandleResponsesCompact marks a Responses request as a compaction and runs it
+// down the same pipeline as /v1/responses, matching upstream's route, which
+// sets body._compact and reuses handleChat rather than picking another wire
+// format. Forcing the body through /v1/chat/completions instead would strip
+// the Responses format the client spoke.
 func (h *ChatHandler) HandleResponsesCompact(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -783,9 +879,9 @@ func (h *ChatHandler) HandleResponsesCompact(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	newReq, _ := http.NewRequestWithContext(r.Context(), "POST", "/v1/chat/completions", bytes.NewReader(body))
+	newReq, _ := http.NewRequestWithContext(r.Context(), "POST", responsesEndpoint, bytes.NewReader(body))
 	newReq.Header = r.Header
-	h.HandleChatCompletions(w, newReq)
+	h.HandleResponses(w, newReq)
 }
 
 // HandleOllamaChat handles Ollama-compatible /v1/api/chat endpoint.

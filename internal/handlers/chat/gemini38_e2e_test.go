@@ -102,8 +102,8 @@ func TestE2E_Gemini38_FlashHigh_NonStream_ToolCall(t *testing.T) {
 				},
 			},
 			"usageMetadata": map[string]any{
-				"promptTokenCount":     50,
-				"candidatesTokenCount": 20,
+				"promptTokenCount":        50,
+				"candidatesTokenCount":    20,
 				"cachedContentTokenCount": 5,
 			},
 		}
@@ -241,7 +241,7 @@ func TestE2E_Gemini38_FlashHigh_MultiTurn_ToolCall(t *testing.T) {
 				},
 			},
 			"usageMetadata": map[string]any{
-				"promptTokenCount": 80,
+				"promptTokenCount":     80,
 				"candidatesTokenCount": 15,
 			},
 		}
@@ -256,10 +256,10 @@ func TestE2E_Gemini38_FlashHigh_MultiTurn_ToolCall(t *testing.T) {
 	defer cleanup()
 
 	agData, _ := json.Marshal(map[string]any{
-		"apiKey":      "test-ag-key-38-multi",
-		"accessToken": "test-ag-key-38-multi",
-		"baseUrl":     upstream.URL,
-		"projectId":   "test-proj-38",
+		"apiKey":               "test-ag-key-38-multi",
+		"accessToken":          "test-ag-key-38-multi",
+		"baseUrl":              upstream.URL,
+		"projectId":            "test-proj-38",
 		"providerSpecificData": map[string]any{"projectId": "test-proj-38"},
 	})
 	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
@@ -423,10 +423,10 @@ func TestE2E_Gemini38_FlashHigh_Stream_ToolCall(t *testing.T) {
 	defer cleanup()
 
 	agData, _ := json.Marshal(map[string]any{
-		"apiKey":      "test-ag-key-38-stream",
-		"accessToken": "test-ag-key-38-stream",
-		"baseUrl":     upstream.URL,
-		"projectId":   "test-proj-38",
+		"apiKey":               "test-ag-key-38-stream",
+		"accessToken":          "test-ag-key-38-stream",
+		"baseUrl":              upstream.URL,
+		"projectId":            "test-proj-38",
 		"providerSpecificData": map[string]any{"projectId": "test-proj-38"},
 	})
 	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES

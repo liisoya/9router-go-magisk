@@ -1,9 +1,9 @@
 package mitm
 
 import (
-	"fmt"
 	"9router/proxy/internal/log"
-		"os"
+	"fmt"
+	"os"
 	"path/filepath"
 )
 

@@ -422,29 +422,6 @@ func TestHandleOllamaChat(t *testing.T) {
 	}
 }
 
-func TestHandleResponsesCompact(t *testing.T) {
-	upstream := setupFakeOpenAIUpstream(t)
-	defer upstream.Close()
-
-	database, cleanup := setupMultimodalTestDB(t)
-	defer cleanup()
-	seedOpenAIConn(t, database, upstream.URL)
-
-	repo := db.NewRepo(database)
-	handler := newTestMediaHandler(repo)
-
-	body := `{"model":"openai/gpt-4","messages":[{"role":"user","content":"compact this"}],"stream":false}`
-	req := httptest.NewRequest("POST", "/v1/responses/compact", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handler.HandleResponsesCompact(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
 // setupFakeOpenAIUpstream creates a test upstream that returns a valid OpenAI response.
 func setupFakeOpenAIUpstream(t *testing.T) *httptest.Server {
 	t.Helper()

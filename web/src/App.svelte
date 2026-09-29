@@ -29,6 +29,8 @@
   import SkillsView from './components/SkillsView.svelte'
   import SettingsView from './components/SettingsView.svelte'
   import Sidebar from './components/Sidebar.svelte'
+  import UpdateModal from './components/UpdateModal.svelte'
+  import type { SystemVersionInfo } from './api/client'
   import Toasts from './lib/ui/Toasts.svelte'
   import TerminalView from './components/TerminalView.svelte'
   import TokenSaverView from './components/TokenSaverView.svelte'
@@ -251,6 +253,9 @@
     navigate('combos')
     isCreateComboOpen = true
   }
+  let isUpdateModalOpen = $state(false)
+  let systemUpdateInfo = $state<SystemVersionInfo | null>(null)
+  let systemVersion = $state('')
 </script>
 
 {#if isOAuthCallback}
@@ -301,8 +306,18 @@
         activeConnections={activeConnectionsCount}
         totalConnections={connections.length}
         onClose={() => (isMobileMenuOpen = false)}
+        bind:showUpdateModal={isUpdateModalOpen}
+        bind:updateInfo={systemUpdateInfo}
+        bind:version={systemVersion}
       />
     </div>
+
+    <!-- Global Update Modal & Disconnected Overlay outside of transform containers -->
+    <UpdateModal
+      bind:isOpen={isUpdateModalOpen}
+      updateInfo={systemUpdateInfo}
+      currentVersion={systemVersion}
+    />
 
     <!-- Main Viewport (TopBar + Scrollable Canvas) -->
     <div class="flex-1 flex flex-col min-w-0 h-full relative isolate">

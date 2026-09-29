@@ -134,10 +134,7 @@ func BlockAntigravityModelUntil(connectionID, model string, resetAt time.Time) {
 			ResetAt:             resetAt,
 		}
 	}
-	shortConn := connectionID
-	if len(shortConn) > 8 {
-		shortConn = shortConn[:8]
-	}
+	shortConn := shortConnID(connectionID)
 	log.Warn("ag_quota", "model locked until reset", "connection", shortConn, "model", model, "resetAt", resetAt.Format(time.RFC3339))
 }
 
@@ -391,10 +388,7 @@ func HandleAntigravityQuotaError(p AntigravityQuotaError) *time.Time {
 		return nil
 	}
 
-	shortConn := p.ConnectionID
-	if len(shortConn) > 8 {
-		shortConn = shortConn[:8]
-	}
+	shortConn := shortConnID(p.ConnectionID)
 	log.Info("ag_quota", "refreshing quota on error", "connection", shortConn, "status", p.Status, "model", p.Model)
 
 	quotas, err := RefreshAntigravityQuota(p.Ctx, p.Client, p.ConnectionID, p.AccessToken, p.ProjectID)

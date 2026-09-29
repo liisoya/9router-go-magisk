@@ -72,8 +72,18 @@
       const res = await api.getUsageStats(targetPeriod)
       if (res) {
         stats = res
-        if (!lastProvider && Array.isArray(res.recentRequests) && res.recentRequests.length > 0) {
-          lastProvider = res.recentRequests[0].provider || ''
+        if (Array.isArray(res.activeRequests)) {
+          activeRequests = res.activeRequests
+        }
+        if (!lastProvider) {
+          if (Array.isArray(res.activeRequests) && res.activeRequests.length > 0 && res.activeRequests[0].provider) {
+            lastProvider = res.activeRequests[0].provider
+          } else if (Array.isArray(res.recentRequests) && res.recentRequests.length > 0) {
+            lastProvider = res.recentRequests[0].provider || ''
+          }
+        }
+        if (res.errorProvider) {
+          errorProvider = res.errorProvider
         }
       }
     } catch (err) {
@@ -237,56 +247,61 @@
 
   let topologyProviders = $derived.by(() => {
     const seen = new Set<string>()
-    const list: { id: string; name: string; color?: string; type: string }[] = []
+    const list: { id: string; alias?: string; name: string; color?: string; type: string }[] = []
 
+    const addProvider = (provId: string, type: string, customName?: string) => {
+      if (!provId) return
+      const canonical = provId.toLowerCase().trim()
+      const cat = PROVIDER_CATALOG.find((p) => p.id.toLowerCase() === canonical || (p.alias && p.alias.toLowerCase() === canonical))
+      const targetId = cat?.id || canonical
+      if (seen.has(targetId)) return
+      seen.add(targetId)
+      if (cat?.alias) seen.add(cat.alias.toLowerCase())
+      seen.add(canonical)
+
+      list.push({
+        id: targetId,
+        alias: cat?.alias,
+        name: topologyName(targetId, customName),
+        color: cat?.color || '#3B82F6',
+        type
+      })
+    }
+
+    // 1. Prioritize active & live providers so lines to models in use never get dropped
+    for (const r of activeRequests) {
+      if (r.provider) addProvider(r.provider, 'active')
+    }
+    if (pulseProvider) addProvider(pulseProvider, 'active')
+    if (lastProvider) addProvider(lastProvider, 'recent')
+    if (errorProvider) addProvider(errorProvider, 'error')
+
+    // 2. Add recent requests
+    for (const r of stats.recentRequests || []) {
+      if (r.provider) addProvider(r.provider, 'recent')
+    }
+
+    // 3. Add active user-configured connections
     for (const c of connections) {
-      if (c.isActive !== 0 && c.provider && !seen.has(c.provider)) {
-        seen.add(c.provider)
-        const cat = PROVIDER_CATALOG.find((p) => p.id === c.provider || p.alias === c.provider)
-        list.push({
-          id: c.provider,
-          name: topologyName(c.provider, c.name || undefined),
-          color: cat?.color || '#3B82F6',
-          type: 'connection'
-        })
+      if (c.isActive !== 0 && c.provider) {
+        addProvider(c.provider, 'connection', c.name || undefined)
       }
     }
 
+    // 4. Add historical providers with usage
     if (stats.byProvider) {
       for (const prov of Object.keys(stats.byProvider)) {
-        if (!seen.has(prov)) {
-          seen.add(prov)
-          const cat = PROVIDER_CATALOG.find((p) => p.id === prov || p.alias === prov)
-          list.push({
-            id: prov,
-            name: topologyName(prov),
-            color: cat?.color || '#10B981',
-            type: 'active'
-          })
-        }
-      }
-    }
-    // Always include key free/noAuth providers if not yet listed
-    const FREE_DEFAULTS = [
-      { id: 'antigravity', name: 'Antigravity', color: '#F59E0B' },
-      { id: 'opencode', name: 'OpenCode Free', color: '#3B82F6' },
-      { id: 'nvidia', name: 'NVIDIA NIM', color: '#76B900' },
-      { id: 'openrouter', name: 'OpenRouter', color: '#6366F1' },
-      { id: 'clinepass', name: 'ClinePass', color: '#8B5CF6' }
-    ]
-    for (const f of FREE_DEFAULTS) {
-      if (!seen.has(f.id)) {
-        seen.add(f.id)
-        list.push({
-          id: f.id,
-          name: f.name,
-          color: f.color,
-          type: 'default'
-        })
+        addProvider(prov, 'stats')
       }
     }
 
-    return list.slice(0, 14)
+    // 5. Ensure core free/no-auth defaults are present
+    const FREE_DEFAULTS = ['antigravity', 'opencode', 'nvidia', 'openrouter', 'clinepass']
+    for (const f of FREE_DEFAULTS) {
+      addProvider(f, 'default')
+    }
+
+    return list
   })
 </script>
 

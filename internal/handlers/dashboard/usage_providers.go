@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"9router/proxy/internal/proxy"
 )
 
 // Provider usage fetchers for GET /api/usage/{connectionId}.
@@ -85,6 +87,8 @@ func fetchProviderUsage(ctx context.Context, provider string, data map[string]an
 		return fetchKiroUsage(ctx, accessToken, psd), true
 	case "grok-cli":
 		return fetchGrokCliUsage(ctx, accessToken, psd), true
+	case "codex":
+		return fetchCodexUsage(ctx, firstNonEmptyStr(accessToken, apiKey)), true
 	default:
 		return usageResult{}, false
 	}
@@ -126,6 +130,23 @@ func usagePost(ctx context.Context, rawURL string, payload map[string]any, heade
 	return status, usageJSON(out), nil
 }
 
+// usageHTTPClient is the shared sender for every dashboard usage fetch.
+//
+// It wraps the environment transport in proxy.FallbackTransport for the same
+// reason the chat path does (internal/proxy/fallback_transport.go): a sandbox
+// or corporate HTTP(S)_PROXY refuses the CONNECT tunnel to several provider
+// hosts with 403 Forbidden, and Go renders that refusal as a transport error
+// (`Get "https://…": Forbidden`) rather than a status code. Bare
+// http.DefaultClient has no direct-connection fallback, so those fetchers failed
+// on hosts that chat traffic reaches fine. Sharing one client fixes them all at
+// the sender instead of one provider at a time.
+var usageHTTPClient = &http.Client{Transport: proxy.NewFallbackTransport(http.DefaultTransport)}
+
+// usageUserAgent is sent when a fetcher does not set its own, so a request does
+// not announce Go's default "Go-http-client/1.1" to WAF-fronted hosts. Fetchers
+// that already set one (grok-cli, antigravity) keep theirs.
+const usageUserAgent = "9router-go"
+
 func usageDo(ctx context.Context, method, rawURL string, headers map[string]string, body []byte) (int, http.Header, []byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, usageHTTPTimeout)
 	defer cancel()
@@ -140,7 +161,10 @@ func usageDo(ctx context.Context, method, rawURL string, headers map[string]stri
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", usageUserAgent)
+	}
+	resp, err := usageHTTPClient.Do(req)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -576,14 +600,68 @@ func fetchCommandCodeUsage(ctx context.Context, apiKey string) usageResult {
 
 // ---------- ollama cloud: GET /api/usage + POST /api/me ----------
 
-func ollamaRatioQuota(ratio float64) map[string]any {
-	ratio = math.Max(0, math.Min(1, ratio))
-	used := math.Round(ratio * 100)
-	return map[string]any{
-		"used": used, "total": 100, "remainingPercentage": 100 - used,
+// ollamaRatioQuota mirrors upstream ratioQuota: `usage` is a 0..1 ratio, and
+// no absolute `remaining` is set because the UI reads remainingPercentage.
+func ollamaRatioQuota(ratio float64, resetAt string) map[string]any {
+	used := math.Round(math.Max(0, math.Min(1, ratio)) * 100)
+	quota := map[string]any{
+		"used": used, "total": float64(100), "remainingPercentage": 100 - used,
 		"resetAt": nil, "unlimited": false,
 	}
+	if resetAt != "" {
+		quota["resetAt"] = resetAt
+	}
+	return quota
 }
+
+// ollamaLimitWindows mirrors upstream OLLAMA_LIMIT_WINDOWS. The monthly entry
+// is not optional: a free Ollama account reports `limits.monthly` and nothing
+// else, so a port that only reads session/weekly reports "no usage limits" for
+// exactly the accounts that do have a quota.
+var ollamaLimitWindows = []struct{ Key, Label string }{
+	{"session", "Session (5h)"},
+	{"weekly", "Weekly (7d)"},
+	{"monthly", "Monthly"},
+}
+
+// nextMonthlyResetFromSignup mirrors upstream nextMonthlyResetFromSignup:
+// "usage resets monthly from the date you signed up" (ollama.com/pricing).
+func nextMonthlyResetFromSignup(createdAt string, now time.Time) string {
+	anchor, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return ""
+	}
+	anchor = anchor.UTC()
+	elapsed := (now.Year()-anchor.Year())*12 + int(now.Month()) - int(anchor.Month())
+	for i := max(elapsed, 0); i <= elapsed+1; i++ {
+		candidate := addUTCMonths(anchor, i)
+		if candidate.After(now) {
+			return candidate.Format(time.RFC3339)
+		}
+	}
+	return ""
+}
+
+// addUTCMonths clamps the day to the target month's length (Jan 31 + 1 month
+// is Feb 28/29), matching upstream addUtcMonths.
+func addUTCMonths(t time.Time, months int) time.Time {
+	total := int(t.Month()) - 1 + months
+	year := t.Year() + total/12
+	month := time.Month(total%12 + 1)
+	if total%12 < 0 {
+		year = t.Year() + (total-11)/12
+		month = time.Month(total%12 + 13)
+	}
+	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	return time.Date(year, month, min(t.Day(), lastDay), t.Hour(), t.Minute(), t.Second(), 0, time.UTC)
+}
+
+// Ollama Cloud endpoints. Vars, not consts, so tests can point them at a
+// local server.
+var (
+	ollamaUsageURL = "https://ollama.com/api/usage"
+	ollamaMeURL    = "https://ollama.com/api/me"
+)
 
 func fetchOllamaUsage(ctx context.Context, apiKey string) usageResult {
 	if strings.TrimSpace(apiKey) == "" {
@@ -593,7 +671,7 @@ func fetchOllamaUsage(ctx context.Context, apiKey string) usageResult {
 		"Authorization": "Bearer " + strings.TrimSpace(apiKey),
 		"Accept":        "application/json",
 	}
-	status, _, out, err := usageGet(ctx, "https://ollama.com/api/usage", headers)
+	status, _, out, err := usageGet(ctx, ollamaUsageURL, headers)
 	if err != nil {
 		return usageResult{message: fmt.Sprintf("Ollama Cloud error: %v", err)}
 	}
@@ -609,45 +687,53 @@ func fetchOllamaUsage(ctx context.Context, apiKey string) usageResult {
 	}
 	plan := "Ollama Cloud"
 	meHeaders := map[string]string{
-		"Authorization": "Bearer " + strings.TrimSpace(apiKey),
-		"Accept":        "application/json",
+		"Authorization":  "Bearer " + strings.TrimSpace(apiKey),
+		"Accept":         "application/json",
 		"Content-Length": "0",
 	}
-	if s, _, meOut, meErr := usageDo(ctx, http.MethodPost, "https://ollama.com/api/me", meHeaders, nil); meErr == nil && s >= 200 && s < 300 {
+	// /api/me also carries the raw plan name and signup date. The free plan
+	// resets monthly from signup, and Ollama exposes no reset timestamp, so this
+	// is the only source for the monthly row's reset.
+	mePlanRaw, meCreatedAt := "", ""
+	if s, _, meOut, meErr := usageDo(ctx, http.MethodPost, ollamaMeURL, meHeaders, nil); meErr == nil && s >= 200 && s < 300 {
 		if me := usageJSON(meOut); me != nil {
-			if p, _ := me["Plan"].(string); strings.TrimSpace(p) != "" {
-				plan = strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
+			mePlanRaw = strings.TrimSpace(usageStr(me["Plan"]))
+			meCreatedAt = usageStr(me["CreatedAt"])
+			if mePlanRaw != "" {
+				plan = strings.ToUpper(mePlanRaw[:1]) + strings.ToLower(mePlanRaw[1:])
 			}
 		}
+	}
+	monthlyResetAt := ""
+	if strings.EqualFold(mePlanRaw, "free") && meCreatedAt != "" {
+		monthlyResetAt = nextMonthlyResetFromSignup(meCreatedAt, time.Now().UTC())
 	}
 	var limits map[string]any
 	if l, ok := data["limits"].(map[string]any); ok {
 		limits = l
 	}
-	sessionQuota, weeklyQuota := map[string]any(nil), map[string]any(nil)
-	if s, ok := limits["session"].(map[string]any); ok {
-		if u, present := s["usage"]; present {
-			if f, ok2 := usageNumOK(u); ok2 {
-				sessionQuota = ollamaRatioQuota(f)
-			}
+	quotas := make(map[string]any, len(ollamaLimitWindows))
+	for _, window := range ollamaLimitWindows {
+		entry, ok := limits[window.Key].(map[string]any)
+		if !ok {
+			continue
 		}
-	}
-	if w, ok := limits["weekly"].(map[string]any); ok {
-		if u, present := w["usage"]; present {
-			if f, ok2 := usageNumOK(u); ok2 {
-				weeklyQuota = ollamaRatioQuota(f)
-			}
+		raw, present := entry["usage"]
+		if !present || raw == nil {
+			continue
 		}
+		ratio, ok := usageNumOK(raw)
+		if !ok {
+			continue
+		}
+		resetAt := ""
+		if window.Key == "monthly" {
+			resetAt = monthlyResetAt
+		}
+		quotas[window.Label] = ollamaRatioQuota(ratio, resetAt)
 	}
-	if sessionQuota == nil && weeklyQuota == nil {
+	if len(quotas) == 0 {
 		return usageResult{plan: plan, message: "Ollama Cloud connected. No usage limits reported.", quotas: map[string]any{}}
-	}
-	quotas := map[string]any{}
-	if sessionQuota != nil {
-		quotas["Session (5h)"] = sessionQuota
-	}
-	if weeklyQuota != nil {
-		quotas["Weekly (7d)"] = weeklyQuota
 	}
 	return usageResult{plan: plan, quotas: quotas}
 }
@@ -686,6 +772,17 @@ func fetchQoderUsageAt(ctx context.Context, accessToken, usageURL string) usageR
 	})
 	if err != nil {
 		return usageResult{message: fmt.Sprintf("Qoder connected. Unable to fetch usage: %v", err), bare: true}
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		// The token is dead, not rate-limited. Qoder device tokens cannot be
+		// refreshed — center.qoder.sh answers 403 for device tokens, which
+		// upstream's own shared/qoder/constants.js documents — so re-authorizing
+		// is the only way back. Say that instead of leaving a bare status code.
+		return usageResult{
+			plan:    "Qoder",
+			message: "Qoder authentication expired. Please re-authorize this connection.",
+			bare:    true,
+		}
 	}
 	if status < 200 || status >= 300 {
 		return usageResult{message: fmt.Sprintf("Qoder connected. Usage fetch returned %d.", status), bare: true}
@@ -737,14 +834,14 @@ func fetchQoderUsageAt(ctx context.Context, accessToken, usageURL string) usageR
 // ---------- codebuddy-intl: POST billing meter ----------
 
 var codebuddyIntlHeaders = map[string]string{
-	"User-Agent":         "IDE/2.108.1 CodeBuddy/2.108.1",
-	"X-Product":          "SaaS",
-	"X-IDE-Type":         "IDE",
-	"X-IDE-Name":         "IDE",
-	"X-Requested-With":   "XMLHttpRequest",
+	"User-Agent":          "IDE/2.108.1 CodeBuddy/2.108.1",
+	"X-Product":           "SaaS",
+	"X-IDE-Type":          "IDE",
+	"X-IDE-Name":          "IDE",
+	"X-Requested-With":    "XMLHttpRequest",
 	"X-Codebuddy-Request": "1",
-	"Content-Type":       "application/json",
-	"Accept":             "application/json",
+	"Content-Type":        "application/json",
+	"Accept":              "application/json",
 }
 
 func codebuddyNum(precise, plain any) float64 {
@@ -859,17 +956,17 @@ func fetchCodeBuddyIntlUsage(ctx context.Context, accessToken, apiKey string) us
 			name = fmt.Sprintf("%s %d", base, seen[base])
 		}
 		quotas[name] = map[string]any{
-			"used": codebuddyNum(acc["CycleCapacityUsedPrecise"], acc["CycleCapacityUsed"]),
-			"total": codebuddyNum(acc["CycleCapacitySizePrecise"], acc["CycleCapacitySize"]),
-			"resetAt": usageResetTimeToNil(acc["CycleEndTime"]),
+			"used":      codebuddyNum(acc["CycleCapacityUsedPrecise"], acc["CycleCapacityUsed"]),
+			"total":     codebuddyNum(acc["CycleCapacitySizePrecise"], acc["CycleCapacitySize"]),
+			"resetAt":   usageResetTimeToNil(acc["CycleEndTime"]),
 			"unlimited": false, "recurring": true,
 		}
 	}
 	for i, acc := range bonuses {
 		quotas[fmt.Sprintf("Bonus Pack %d", i+1)] = map[string]any{
-			"used": codebuddyNum(acc["CapacityUsedPrecise"], acc["CapacityUsed"]),
-			"total": codebuddyNum(acc["CapacitySizePrecise"], acc["CapacitySize"]),
-			"resetAt": usageResetTimeToNil(acc["CycleEndTime"]),
+			"used":      codebuddyNum(acc["CapacityUsedPrecise"], acc["CapacityUsed"]),
+			"total":     codebuddyNum(acc["CapacitySizePrecise"], acc["CapacitySize"]),
+			"resetAt":   usageResetTimeToNil(acc["CycleEndTime"]),
 			"unlimited": false, "recurring": false,
 		}
 	}
@@ -893,9 +990,9 @@ func fetchCodeBuddyIntlUsage(ctx context.Context, accessToken, apiKey string) us
 // ---------- kiro: codewhisperer getUsageLimits (3 attempts) ----------
 
 const (
-	kiroCwHost      = "https://codewhisperer.us-east-1.amazonaws.com"
-	kiroQHost       = "https://q.us-east-1.amazonaws.com"
-	kiroLimitsPath  = "/getUsageLimits"
+	kiroCwHost            = "https://codewhisperer.us-east-1.amazonaws.com"
+	kiroQHost             = "https://q.us-east-1.amazonaws.com"
+	kiroLimitsPath        = "/getUsageLimits"
 	kiroProfileARNBuilder = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
 	kiroProfileARNSocial  = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"
 )
@@ -981,11 +1078,11 @@ func fetchKiroUsage(ctx context.Context, accessToken string, psd map[string]any)
 	}
 	params := url.Values{"isEmailRequired": {"true"}, "origin": {"AI_EDITOR"}, "resourceType": {"AGENTIC_REQUEST"}}
 	type attempt struct {
-		name        string
-		method      string
-		url         string
-		headers     map[string]string
-		body        []byte
+		name    string
+		method  string
+		url     string
+		headers map[string]string
+		body    []byte
 	}
 	postBody := map[string]any{"origin": "AI_EDITOR", "resourceType": "AGENTIC_REQUEST"}
 	if profileARN != "" {
@@ -1075,18 +1172,18 @@ func fetchKiroUsage(ctx context.Context, accessToken string, psd map[string]any)
 // ---------- grok-cli: billing + user ----------
 
 const (
-	grokCliVersion           = "0.2.99"
-	grokCliClientIdentifier  = "grok-shell"
-	grokCliUserAgent         = "grok-shell/0.2.99 (linux; x86_64)"
-	grokCliBillingURL        = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
-	grokCliUserURL           = "https://cli-chat-proxy.grok.com/v1/user?include=subscription"
+	grokCliVersion          = "0.2.99"
+	grokCliClientIdentifier = "grok-shell"
+	grokCliUserAgent        = "grok-shell/0.2.99 (linux; x86_64)"
+	grokCliBillingURL       = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+	grokCliUserURL          = "https://cli-chat-proxy.grok.com/v1/user?include=subscription"
 )
 
 func grokCliHeaders(accessToken string, psd map[string]any) map[string]string {
 	h := map[string]string{
-		"Authorization": "Bearer " + accessToken,
-		"Accept":        "application/json",
-		"User-Agent":    grokCliUserAgent,
+		"Authorization":            "Bearer " + accessToken,
+		"Accept":                   "application/json",
+		"User-Agent":               grokCliUserAgent,
 		"x-xai-token-auth":         "xai-grok-cli",
 		"x-grok-client-identifier": grokCliClientIdentifier,
 		"x-grok-client-version":    grokCliVersion,
@@ -1108,7 +1205,7 @@ func grokMakeQuota(used, total float64, resetAt string) map[string]any {
 		return map[string]any{
 			"used": math.Max(0, used), "total": 0,
 			"remainingPercentage": 100,
-			"resetAt": nil, "unlimited": true,
+			"resetAt":             nil, "unlimited": true,
 		}
 	}
 	return usageQuota(used, total, resetAt)
@@ -1403,7 +1500,7 @@ var antigravityImportantModels = map[string]bool{
 	"gemini-3.5-flash-low": true, "gemini-3.5-flash-extra-low": true,
 	"gemini-pro-agent": true, "gemini-3.1-pro-low": true,
 	"claude-sonnet-4-6": true, "claude-opus-4-6-thinking": true,
-	"gpt-oss-120b-medium": true,
+	"gpt-oss-120b-medium":    true,
 	"gemini-3.1-flash-image": true,
 }
 
@@ -1655,6 +1752,7 @@ func fetchAntigravityDashboardWeekly(ctx context.Context, accessToken, projectID
 	}
 	return result
 }
+
 // antigravityProjectID mirrors chat.extractProjectID (unexported there):
 // cloudaicompanionProject arrives as a string id or an {id} object.
 func antigravityProjectID(val any) string {

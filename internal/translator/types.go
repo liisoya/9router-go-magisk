@@ -2,6 +2,8 @@ package translator
 
 import (
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
+	"fmt"
 	"time"
 )
 
@@ -108,13 +110,46 @@ type OpenAIRespMsg struct {
 	ToolCalls        []OpenAIToolCallStream `json:"tool_calls"`
 }
 
+// OpenAIReasoningDetail is one entry of reasoning_details. Vendors disagree on
+// the shape: some send a bare string, others an object carrying text or content.
+type OpenAIReasoningDetail struct {
+	Text    string
+	Content string
+}
+
+// UnmarshalJSON accepts both the bare-string and the object shape.
+func (d *OpenAIReasoningDetail) UnmarshalJSON(b []byte) error {
+	var raw any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("OpenAIReasoningDetail.UnmarshalJSON: %w", err)
+	}
+	switch v := raw.(type) {
+	case string:
+		d.Text = v
+	case map[string]any:
+		d.Text, _ = v["text"].(string)
+		d.Content, _ = v["content"].(string)
+	}
+	return nil
+}
+
+// MarshalJSON emits the bare string when the entry carries nothing but text, so
+// a translated request round-trips back to the shape the vendor expects.
+func (d OpenAIReasoningDetail) MarshalJSON() ([]byte, error) {
+	if d.Content == "" {
+		return json.Marshal(d.Text)
+	}
+	return json.Marshal(map[string]string{"text": d.Text, "content": d.Content})
+}
+
 // OpenAIDelta holds the per-chunk delta in an OpenAI stream.
 type OpenAIDelta struct {
-	Role             string                 `json:"role"`
-	Content          string                 `json:"content"`
-	ReasoningContent string                 `json:"reasoning_content"`
-	Reasoning        string                 `json:"reasoning"`
-	ToolCalls        []OpenAIToolCallStream `json:"tool_calls"`
+	Role             string                  `json:"role"`
+	Content          string                  `json:"content"`
+	ReasoningContent string                  `json:"reasoning_content"`
+	Reasoning        string                  `json:"reasoning"`
+	ReasoningDetails []OpenAIReasoningDetail `json:"reasoning_details,omitempty"`
+	ToolCalls        []OpenAIToolCallStream  `json:"tool_calls"`
 }
 
 // OpenAIToolCallStream holds a streaming tool call fragment.

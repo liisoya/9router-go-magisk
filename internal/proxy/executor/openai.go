@@ -93,6 +93,16 @@ func sseStream(o sseStreamOpts) error {
 	translate, startTime := o.Translate, o.StartTime
 	ttft, buf := o.TTFT, o.Buf
 	ctx, toolNameMap := o.Ctx, o.ToolNameMap
+
+	// A /v1/responses client on a Chat Completions upstream needs the answer
+	// replayed as Responses events. The branch sits ahead of the header write
+	// because the bridge owns its own writer, and ahead of the Claude branch
+	// because translateResponse describes a Claude client, which a Responses
+	// client never sets.
+	if translator.NeedsResponsesBridge(ctx) {
+		return streamChatToResponses(o)
+	}
+
 	hw := proxy.NewHeartbeatWriter(ctx, w, 0)
 	defer hw.Close()
 	flusher := proxy.WriteSSEHeaders(hw)
@@ -246,6 +256,14 @@ func jsonResponse(ctx context.Context, w http.ResponseWriter, upstream io.Reader
 
 	if buf != nil {
 		buf.Write(body)
+	}
+
+	// A /v1/responses client on a Chat Completions upstream needs the answer in
+	// the Responses shape; translate marks a Claude client, which it is not.
+	// The raw Chat body still went to the log buffer and to usage parsing,
+	// exactly as it does for the Claude path.
+	if translator.NeedsResponsesBridge(ctx) {
+		return jsonResponseAsResponses(ctx, w, body)
 	}
 
 	if translate {

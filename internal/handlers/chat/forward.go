@@ -16,6 +16,7 @@ import (
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/providers"
 	internalproxy "9router/proxy/internal/proxy"
+	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/shutdown"
 	"9router/proxy/internal/translator"
 )
@@ -95,6 +96,13 @@ func (h *ChatHandler) forwardRequest(
 
 // handleStreamResponse pipes SSE chunks from upstream to the client.
 func (h *ChatHandler) handleStreamResponse(ctx context.Context, w http.ResponseWriter, upstream io.Reader, translate bool, startTime time.Time, metrics *streamMetrics) error {
+	// A /v1/responses client needs Responses events, and translate marks a
+	// Claude client, so this branch is decided by the client format alone. It
+	// runs before the header write because the bridge owns its own writer.
+	if translator.NeedsResponsesBridge(ctx) {
+		return executor.StreamChatToResponses(ctx, w, upstream, startTime, &metrics.TTFT, &metrics.ResponseBuf)
+	}
+
 	hw := internalproxy.NewHeartbeatWriter(ctx, w, 0)
 	defer hw.Close()
 	flusher := internalproxy.WriteSSEHeaders(hw)
@@ -346,6 +354,12 @@ func (h *ChatHandler) handleJSONResponse(ctx context.Context, w http.ResponseWri
 		metrics.ResponseBuf.Write(body)
 	}
 
+	// A /v1/responses client on a Chat Completions upstream needs the answer in
+	// the Responses shape; translate marks a Claude client, which it is not.
+	if translator.NeedsResponsesBridge(ctx) {
+		return h.respondAsResponses(ctx, w, body)
+	}
+
 	if !translate {
 		// The !translate path serves both OpenAI bodies (/v1/chat/completions,
 		// translateResponse hardcoded false) and Claude bodies (claude/anthropic
@@ -395,5 +409,33 @@ func (h *ChatHandler) handleJSONResponse(ctx context.Context, w http.ResponseWri
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(translated)
+	return nil
+}
+
+// respondAsResponses writes a non-streaming Chat Completions body to a
+// /v1/responses client in the Response shape it expects. A body the converter
+// rejects is relayed unchanged rather than dropped: a body in the wrong shape
+// still lets the client report the failure, an empty 200 tells it nothing.
+func (h *ChatHandler) respondAsResponses(ctx context.Context, w http.ResponseWriter, body []byte) error {
+	// A Responses client that asked for a single JSON can still be handed an
+	// SSE stream when the provider forces one (Codex does). Aggregate it
+	// first rather than answering a client that expects JSON with a stream.
+	if isSSEBody(body) {
+		if aggregated, ok := sseToClaudeJSON(body); ok {
+			body = aggregated
+		}
+	}
+	converted, err := translator.ChatResponseToResponses(body)
+	if err == nil {
+		if usage := translator.ParseResponseUsage(body); usage != nil {
+			translator.SetUsage(ctx, usage)
+		}
+		body = converted
+	} else {
+		log.Error("chat", "responses json translate error", "error", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
 	return nil
 }

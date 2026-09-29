@@ -336,9 +336,9 @@ func TestSettingsRaw(t *testing.T) {
 
 	// UpdateSettingsRaw initial insert
 	initial := map[string]any{
-		"password":     "hashed_pwd",
+		"password":      "hashed_pwd",
 		"requireApiKey": true,
-		"rtkEnabled":   true,
+		"rtkEnabled":    true,
 	}
 	err = repo.UpdateSettingsRaw(initial)
 	if err != nil {

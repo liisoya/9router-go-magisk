@@ -1,0 +1,239 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"9router/proxy/internal/constants"
+	"9router/proxy/internal/log"
+	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy"
+	"9router/proxy/internal/translator"
+)
+
+// UpstreamSpeaksResponses reports whether the request is served by an OpenAI
+// Responses endpoint, in which case a /v1/responses client and the upstream
+// already agree on the wire format and neither direction may be translated.
+// Upstream makes the same call by comparing the source format against the
+// transport's own format (chatCore resolveTransport + translateRequest).
+//
+// Two shapes count as Responses-native, both read off data the gateway already
+// carries rather than a new table:
+//
+//   - a base URL that is the /responses endpoint itself (codex, grok-cli,
+//     perplexity-agent) — the same test the opencode executors use before
+//     appending /responses to their chat base URL;
+//   - an opencode model the opencode executors serve from /responses instead of
+//     /chat/completions (muse-spark, grok-4.6, gpt-5.6-luna).
+func UpstreamSpeaksResponses(provider, model string, cfg *providers.ProviderConfig) bool {
+	if cfg != nil && strings.HasSuffix(strings.TrimRight(cfg.BaseURL, "/"), "/responses") {
+		return true
+	}
+	switch provider {
+	case "opencode", "opencode-go":
+		return isOpencodeResponsesModel(cleanResponsesModel(model))
+	default:
+		return false
+	}
+}
+
+// ResponsesBridge replays an upstream Chat Completions stream as the Responses
+// events a /v1/responses client expects. It accepts both a single SSE payload
+// and a buffer of ready-made "data: {...}" frames, so it can sit behind any
+// Chat producer — the plain OpenAI stream, the Claude-to-OpenAI translation, or
+// the Gemini-to-OpenAI translation — without any of them knowing it exists.
+type ResponsesBridge struct {
+	state    *translator.ResponsesState
+	write    func([]byte) error
+	finished bool
+	err      error
+}
+
+// NewResponsesBridge builds a bridge that writes Responses SSE frames through
+// write. customToolNames marks the tools the client declared as freeform custom
+// tools so their call arguments replay as custom_tool_call_input rather than as
+// JSON arguments.
+func NewResponsesBridge(model string, customToolNames []string, write func([]byte) error) *ResponsesBridge {
+	state := translator.InitResponsesState(model, true)
+	state.SetCustomToolNames(customToolNames)
+	return &ResponsesBridge{state: state, write: write}
+}
+
+// Feed translates one upstream Chat Completions SSE payload. A payload that
+// carries no JSON still has to reach the translator, because the terminal null
+// chunk is what closes the open items and emits response.completed.
+func (b *ResponsesBridge) Feed(payload []byte) {
+	if b.err != nil || b.finished {
+		return
+	}
+	if err := b.writeEvents(translator.TranslateOpenAIToResponses(parseChatChunk(payload), b.state)); err != nil {
+		b.err = err
+		return
+	}
+	b.finished = b.state.Completed
+}
+
+// FeedFrames translates a buffer of ready-made Chat Completions SSE frames
+// ("data: {...}\n\n", possibly several back to back). The Claude translation
+// emits its output in that shape rather than one payload at a time, so the
+// bridge accepts both framings instead of each producer re-implementing it.
+func (b *ResponsesBridge) FeedFrames(frames []byte) {
+	for _, frame := range bytes.Split(frames, []byte("\n\n")) {
+		frame = bytes.TrimSpace(frame)
+		if len(frame) == 0 {
+			continue
+		}
+		b.Feed(bytes.TrimSpace(bytes.TrimPrefix(frame, []byte("data:"))))
+	}
+}
+
+// Close flushes whatever the upstream left open. A truncated stream must not
+// swallow response.completed: without a terminal event the client waits forever
+// for a turn that already ended.
+func (b *ResponsesBridge) Close() {
+	if b.err != nil || b.finished {
+		return
+	}
+	b.finished = true
+	if err := b.writeEvents(translator.FlushResponses(b.state)); err != nil {
+		b.err = err
+	}
+}
+
+func (b *ResponsesBridge) writeEvents(events []translator.ResponsesEvent) error {
+	frame := make([]byte, 0, 512)
+	for _, ev := range events {
+		frame = append(frame, translator.FormatResponsesSSE(ev)...)
+	}
+	if len(frame) == 0 {
+		return nil
+	}
+	return b.write(frame)
+}
+
+// Err reports the write error that stopped the bridge, if any. A producer that
+// keeps feeding after a failed write would otherwise spin until the upstream
+// stream ends.
+func (b *ResponsesBridge) Err() error {
+	return b.err
+}
+
+// parseChatChunk decodes one upstream SSE data payload.
+func parseChatChunk(payload []byte) *translator.OpenAIChunk {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
+		return nil
+	}
+	var chunk translator.OpenAIChunk
+	if err := json.Unmarshal(trimmed, &chunk); err != nil {
+		log.Warn("responses bridge", "skip unparsable chat chunk", "error", err)
+		return nil
+	}
+	return &chunk
+}
+
+// streamChatToResponses pipes an upstream Chat Completions stream to a
+// /v1/responses client as Responses events. It is the OpenAI-shaped twin of
+// the Claude translation branch in sseStream: same plumbing, same buffering
+// and TTFT bookkeeping, different wire format out.
+func streamChatToResponses(o sseStreamOpts) error {
+	return StreamChatToResponses(o.Ctx, o.W, o.Upstream, o.StartTime, o.TTFT, o.Buf)
+}
+
+// StreamChatToResponses pipes an upstream Chat Completions stream to a
+// /v1/responses client as Responses events. Providers without a registered
+// executor stream through the chat handler's own forwarder rather than sseStream,
+// so the entry point is exported rather than reachable from one package only.
+func StreamChatToResponses(ctx context.Context, w http.ResponseWriter, upstream io.Reader, startTime time.Time, ttft *int64, buf io.Writer) error {
+	if startTime.IsZero() {
+		startTime = time.Now()
+	}
+	hw := proxy.NewHeartbeatWriter(ctx, w, 0)
+	defer hw.Close()
+	flusher := proxy.WriteSSEHeaders(hw)
+
+	bridge := NewResponsesBridge(
+		translator.RequestedModelFromContext(ctx),
+		translator.CustomToolNamesFrom(ctx),
+		responsesWriter(sseStreamOpts{TTFT: ttft, Buf: buf}, hw, flusher, startTime),
+	)
+	err := proxy.ScanStream(upstream, bridge.Feed)
+	bridge.Close()
+	if bridge.err != nil {
+		return fmt.Errorf("write to client: %w", bridge.err)
+	}
+	return err
+}
+
+// responsesWriter wraps the client writer with the bookkeeping every translated
+// stream does: stamp TTFT on the first frame, keep the response log buffer in
+// step, and flush per event so the client sees them as they arrive.
+func responsesWriter(o sseStreamOpts, hw *proxy.HeartbeatWriter, flusher http.Flusher, startTime time.Time) func([]byte) error {
+	return func(frame []byte) error {
+		if o.TTFT != nil && *o.TTFT == 0 {
+			*o.TTFT = time.Since(startTime).Milliseconds()
+		}
+		if o.Buf != nil {
+			o.Buf.Write(frame)
+		}
+		if _, err := hw.Write(frame); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
+}
+
+// passthroughResponses relays an upstream Responses body untouched to a client
+// that already speaks Responses. Translating it would be a round trip through
+// Chat Completions that loses exactly the fields the native endpoint needs —
+// previous_response_id, reasoning item ids, store — so the body is copied
+// byte for byte instead.
+func passthroughResponses(w http.ResponseWriter, req *Request, upstream io.Reader) error {
+	if req.IsStream {
+		return sseStream(sseStreamOpts{
+			W: w, Upstream: upstream, Translate: false,
+			StartTime: req.StartTime, TTFT: req.TTFT, Buf: req.ResponseBuf, Ctx: req.Ctx,
+		})
+	}
+	body, err := io.ReadAll(io.LimitReader(upstream, constants.MaxUpstreamBodyBytes))
+	if err != nil {
+		return fmt.Errorf("read responses body: %w", err)
+	}
+	if req.ResponseBuf != nil {
+		req.ResponseBuf.Write(body)
+	}
+	translator.SetUsage(req.Ctx, translator.ParseResponsesUsage(body))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
+	return nil
+}
+
+// jsonResponseAsResponses writes a non-streaming Chat Completions body to a
+// /v1/responses client in the Response shape it expects. A body the converter
+// rejects is relayed unchanged rather than dropped: a body in the wrong shape
+// still lets the client report the failure, an empty 200 tells it nothing.
+func jsonResponseAsResponses(ctx context.Context, w http.ResponseWriter, body []byte) error {
+	converted, err := translator.ChatResponseToResponses(body)
+	if err == nil {
+		if usage := translator.ParseResponseUsage(body); usage != nil {
+			translator.SetUsage(ctx, usage)
+		}
+		body = converted
+	} else {
+		log.Error("executor", "responses json translate error", "error", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
+	return nil
+}

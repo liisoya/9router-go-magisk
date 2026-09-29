@@ -8,6 +8,7 @@
     name: string
     color?: string
     type?: string
+    alias?: string
   }
 
   interface Props {
@@ -39,16 +40,17 @@
   ]
 
   let displayProviders = $derived(
-    providers.length > 0 ? providers.slice(0, 14) : FALLBACK_PROVIDERS
+    providers.length > 0 ? providers : FALLBACK_PROVIDERS
   )
 
-  let activeProviderIds = $derived(
-    new Set(
-      activeRequests
-        .map((r) => r.provider?.toLowerCase())
-        .filter((p): p is string => Boolean(p))
-    )
-  )
+  let activeProviderIds = $derived.by(() => {
+    const set = new Set<string>()
+    for (const r of activeRequests) {
+      const p = r.provider?.toLowerCase().trim()
+      if (p) set.add(p)
+    }
+    return set
+  })
 
   let hasPulse = $derived(Boolean(pulseProvider))
   let activeCount = $derived(
@@ -83,14 +85,22 @@
       const x = rx * Math.cos(angle)
       const y = ry * Math.sin(angle)
 
-      const pid = p.id.toLowerCase()
-      const pname = (p.name || '').toLowerCase()
+      const pid = p.id.toLowerCase().trim()
+      const pname = (p.name || '').toLowerCase().trim()
+      const palias = (p.alias || '').toLowerCase().trim()
+      const isProviderMatch = (target: string) => {
+        if (!target) return false
+        const t = target.toLowerCase().trim()
+        return t === pid || t === pname || (Boolean(palias) && t === palias)
+      }
+
       const isActive =
         activeProviderIds.has(pid) ||
         activeProviderIds.has(pname) ||
-        (hasPulse && (pulseProvider.toLowerCase() === pid || pulseProvider.toLowerCase() === pname))
-      const isLast = !isActive && Boolean(lastProvider) && (lastProvider.toLowerCase() === pid || lastProvider.toLowerCase() === pname)
-      const isError = !isActive && Boolean(errorProvider) && (errorProvider.toLowerCase() === pid || errorProvider.toLowerCase() === pname)
+        (Boolean(palias) && activeProviderIds.has(palias)) ||
+        (hasPulse && isProviderMatch(pulseProvider))
+      const isLast = !isActive && Boolean(lastProvider) && isProviderMatch(lastProvider)
+      const isError = !isActive && Boolean(errorProvider) && isProviderMatch(errorProvider)
       // Edge handle coordinates based on angle
       let sourceX = 0
       let sourceY = 0
@@ -164,11 +174,19 @@
     const requiredHeight = 2 * geometry.ry + 120
     const scaleX = (containerWidth - 32) / requiredWidth
     const scaleY = (containerHeight - 32) / requiredHeight
-    zoom = Math.min(1.05, Math.max(0.3, Math.min(scaleX, scaleY)))
+    zoom = Math.min(1.05, Math.max(0.15, Math.min(scaleX, scaleY)))
     panX = 0
     panY = 0
   }
 
+  let prevNodeCount = 0
+  $effect(() => {
+    const count = geometry.nodes.length
+    if (count !== prevNodeCount) {
+      prevNodeCount = count
+      fitView()
+    }
+  })
   function handlePointerDown(e: PointerEvent) {
     if ((e.target as HTMLElement).closest('button')) return
     isDragging = true
@@ -231,7 +249,7 @@
     <!-- SVG Layer for Bezier Edges -->
     <svg class="absolute inset-0 overflow-visible pointer-events-none" style="transform: translate(0, 0);">
       <defs>
-        <filter id="topo-electric" x="-30%" y="-30%" width="160%" height="160%">
+        <filter id="topo-electric" filterUnits="userSpaceOnUse" x="-5000" y="-5000" width="10000" height="10000">
           <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="1" seed="2" result="noise">
             <animate attributeName="baseFrequency" values="0.8;1.3;0.8" dur="0.25s" repeatCount="indefinite" />
           </feTurbulence>

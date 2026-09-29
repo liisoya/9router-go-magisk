@@ -1,8 +1,8 @@
 package proxy_test
 
 import (
-	"testing"
 	"9router/proxy/internal/proxy"
+	"testing"
 )
 
 func TestShouldBypassNoProxy(t *testing.T) {

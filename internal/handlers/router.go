@@ -66,8 +66,11 @@ func SetupRoutes(r interface {
 
 	// Media, Audio, Video & Web Tools Domain
 	r.Post("/embeddings", mediaH.HandleEmbeddings)
-	r.Post("/responses", mediaH.HandleResponses)
-	r.Post("/responses/compact", mediaH.HandleResponsesCompact)
+	// /v1/responses needs model resolution, combos, account fallback and usage
+	// logging, none of which the media passthrough has, so it lives with the
+	// chat handlers — the same place /v1/messages does.
+	r.Post("/responses", chatH.HandleResponses)
+	r.Post("/responses/compact", chatH.HandleResponsesCompact)
 	r.Post("/images/generations", mediaH.HandleImages)
 	r.Post("/audio/speech", mediaH.HandleAudioSpeech)
 	r.Get("/audio/voices", mediaH.HandleAudioVoices)

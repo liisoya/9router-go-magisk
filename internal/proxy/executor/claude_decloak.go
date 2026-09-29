@@ -36,12 +36,29 @@ func isDecoyTool(name string) bool {
 	return ccDecoySet[name]
 }
 
+// claudeToolSuffix is appended to client tool names by the cloak so the request
+// looks like a Claude Code session. It mirrors the chat-side constant; the
+// executor package cannot import chat without a cycle.
+const claudeToolSuffix = "_ide"
+
+// stripCloakSuffix recovers a tool name from a cloaked one when the map misses
+// it — the map is built per request, so a retry or a reconnect can lose it and
+// leave the client holding an unresolvable "<tool>_ide". Decoy names are
+// exempt: those are meant to reach the client unresolved so the caller can see
+// "tool unavailable" rather than a silent no-op.
+func stripCloakSuffix(name string) (string, bool) {
+	if !strings.HasSuffix(name, claudeToolSuffix) || isDecoyTool(name) {
+		return "", false
+	}
+	original := strings.TrimSuffix(name, claudeToolSuffix)
+	return original, original != ""
+}
+
 // DecloakClaudeResponseBody restores original tool names in a non-streaming
 // Claude response body.
 func DecloakClaudeResponseBody(body []byte, toolNameMap map[string]string) []byte {
-	if len(toolNameMap) == 0 {
-		return body
-	}
+	// An empty map is not a reason to give up: the suffix fallback below can
+	// still recover the name, which is what makes a retry or a reconnect safe.
 	var resp map[string]any
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return body
@@ -70,6 +87,12 @@ func DecloakClaudeResponseBody(body []byte, toolNameMap map[string]string) []byt
 				delete(block, "input")
 				delete(block, "id")
 				sawDecoy = true
+				changed = true
+			} else if stripped, ok := stripCloakSuffix(name); ok {
+				// toolNameMap missed (lost across a retry) — strip the literal
+				// suffix rather than forwarding an unresolvable "<tool>_ide".
+				block["name"] = stripped
+				hasValidTools = true
 				changed = true
 			} else {
 				hasValidTools = true
@@ -100,8 +123,13 @@ type ClaudeStreamDecloaker struct {
 	sawDecoy      bool
 }
 
+// NewClaudeStreamDecloaker returns nil only when no cloaking was applied at all
+// (a nil map) — stripping a suffix then would be wrong, since the names were
+// never suffixed. A non-nil but empty map means the map was lost across a retry
+// or reconnect, and the suffix fallback still has work to do, so the decloaker
+// is built anyway.
 func NewClaudeStreamDecloaker(toolNameMap map[string]string) *ClaudeStreamDecloaker {
-	if len(toolNameMap) == 0 {
+	if toolNameMap == nil {
 		return nil
 	}
 	return &ClaudeStreamDecloaker{
@@ -216,6 +244,12 @@ func (d *ClaudeStreamDecloaker) Events(chunk []byte) []SSEEvent {
 					delete(block, "name")
 					delete(block, "input")
 					delete(block, "id")
+					changed = true
+				} else if stripped, ok := stripCloakSuffix(name); ok {
+					// toolNameMap missed (lost across a retry) — strip the literal
+					// suffix rather than forwarding an unresolvable "<tool>_ide".
+					block["name"] = stripped
+					d.hasValidTools = true
 					changed = true
 				} else {
 					d.hasValidTools = true

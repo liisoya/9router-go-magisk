@@ -304,7 +304,6 @@ func TestLiveE2E_Cline_SmartCombo(t *testing.T) {
 	}
 }
 
-
 func TestLiveE2E_Antigravity_MultiToolCall(t *testing.T) {
 	repo, cleanup := getRealUserDB(t)
 	defer cleanup()

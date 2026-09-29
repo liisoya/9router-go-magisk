@@ -16,6 +16,7 @@ import (
 	"9router/proxy/internal/app"
 	"9router/proxy/internal/updater"
 )
+
 func main() {
 	app := &cli.App{
 		Name:  "9router-go",
@@ -159,4 +160,3 @@ func runServer(cCtx *cli.Context) error {
 	defer stopCancel()
 	return fxApp.Stop(stopCtx)
 }
-

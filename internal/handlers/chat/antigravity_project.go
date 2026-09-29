@@ -110,6 +110,7 @@ func cacheProjectMissing(connID string) {
 //     must NOT trigger redundant refreshes.
 //   - noProject:   Google definitively said "no project for this token" (200
 //     with nothing mapped). Safe to cache so we stop hammering the RPCs.
+//
 // FetchAntigravityProjectID probes Google's onboarding RPCs for a projectID.
 func FetchAntigravityProjectID(ctx context.Context, client *http.Client, accessToken string) (pid string, authFailed, noProject bool) {
 	return fetchAntigravityProjectID(ctx, client, accessToken)

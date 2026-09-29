@@ -30,22 +30,22 @@ type CapacityAdapterEntry struct {
 
 // SettingsData represents token saver, combo routing, and general settings stored in the settings table.
 type SettingsData struct {
-	RTKEnabled                 bool                        `json:"rtkEnabled"`
-	CavemanEnabled             bool                        `json:"cavemanEnabled"`
-	CavemanLevel               string                      `json:"cavemanLevel"`
-	PonytailEnabled            bool                        `json:"ponytailEnabled"`
-	PonytailLevel              string                      `json:"ponytailLevel"`
-	HeadroomUrl                string                      `json:"headroomUrl"`
-	HeadroomCodeAware          bool                        `json:"headroomCodeAware"`
-	HeadroomKompress           bool                        `json:"headroomKompress"`
-	HeadroomTimeoutMs          int                         `json:"headroomTimeoutMs"`
-	AutoUpdate                 bool                        `json:"autoUpdate"`
-	FallbackStrategy           string                      `json:"fallbackStrategy,omitempty"`
-	StickyRoundRobinLimit      int                         `json:"stickyRoundRobinLimit,omitempty"`
-	ComboStrategy              string                      `json:"comboStrategy,omitempty"`
-	ComboStickyRoundRobinLimit int                         `json:"comboStickyRoundRobinLimit,omitempty"`
-	ComboStrategies            map[string]ComboStrategy    `json:"comboStrategies,omitempty"`
-	ProviderStrategies         map[string]ProviderStrategy    `json:"providerStrategies,omitempty"`
+	RTKEnabled                 bool                            `json:"rtkEnabled"`
+	CavemanEnabled             bool                            `json:"cavemanEnabled"`
+	CavemanLevel               string                          `json:"cavemanLevel"`
+	PonytailEnabled            bool                            `json:"ponytailEnabled"`
+	PonytailLevel              string                          `json:"ponytailLevel"`
+	HeadroomUrl                string                          `json:"headroomUrl"`
+	HeadroomCodeAware          bool                            `json:"headroomCodeAware"`
+	HeadroomKompress           bool                            `json:"headroomKompress"`
+	HeadroomTimeoutMs          int                             `json:"headroomTimeoutMs"`
+	AutoUpdate                 bool                            `json:"autoUpdate"`
+	FallbackStrategy           string                          `json:"fallbackStrategy,omitempty"`
+	StickyRoundRobinLimit      int                             `json:"stickyRoundRobinLimit,omitempty"`
+	ComboStrategy              string                          `json:"comboStrategy,omitempty"`
+	ComboStickyRoundRobinLimit int                             `json:"comboStickyRoundRobinLimit,omitempty"`
+	ComboStrategies            map[string]ComboStrategy        `json:"comboStrategies,omitempty"`
+	ProviderStrategies         map[string]ProviderStrategy     `json:"providerStrategies,omitempty"`
 	CapacityAdapter            map[string]CapacityAdapterEntry `json:"capacityAdapter,omitempty"`
 }
 

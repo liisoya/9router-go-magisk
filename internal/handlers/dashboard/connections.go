@@ -961,6 +961,25 @@ func (h *DashboardHandler) HandleGetConnectionModels(w http.ResponseWriter, r *h
 		})
 		return
 	}
+	// Qoder's catalogue lives behind a COSY-signed gateway endpoint rather than
+	// a plain /models URL, so it needs its own branch.
+	if conn.Provider == "qoder" || conn.Provider == "qoder-cn" {
+		token := connData.APIKey
+		if token == "" {
+			token = connData.AccessToken
+		}
+		qoderModels, err := fetchQoderCatalogModels(r.Context(), conn.Provider, token, connData.ProviderSpecificData)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to fetch Qoder models: "+err.Error())
+			return
+		}
+		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+			"provider":     conn.Provider,
+			"connectionId": conn.ID,
+			"models":       qoderModels,
+		})
+		return
+	}
 
 	// OpenAI-compatible aggregators with a live /v1/models catalogue. The
 	// connection's key is the only credential these need.

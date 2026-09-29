@@ -51,6 +51,22 @@ func handleClaudeMessagesStream(w http.ResponseWriter, req *Request, upstream io
 	defer hw.Close()
 	flusher := proxy.WriteSSEHeaders(hw)
 
+	// A /v1/responses client is one hop further out: the Claude events become
+	// OpenAI chunks here and those chunks become Responses events, so the
+	// bridge consumes this branch's output instead of the raw writer.
+	var bridge *ResponsesBridge
+	if translator.NeedsResponsesBridge(req.Ctx) {
+		startTime := req.StartTime
+		if startTime.IsZero() {
+			startTime = time.Now()
+		}
+		bridge = NewResponsesBridge(
+			translator.RequestedModelFromContext(req.Ctx),
+			translator.CustomToolNamesFrom(req.Ctx),
+			responsesWriter(sseStreamOpts{TTFT: req.TTFT, Buf: req.ResponseBuf}, hw, flusher, startTime),
+		)
+	}
+
 	state := &translator.ClaudeToOpenAIStreamState{}
 	doneSeen := false
 	sawTerminal := false // saw message_delta (with stop_reason) or message_stop
@@ -76,6 +92,14 @@ func handleClaudeMessagesStream(w http.ResponseWriter, req *Request, upstream io
 		out, terr := translator.TranslateClaudeChunkToOpenAI(payload, state)
 		if terr != nil {
 			log.Error("executor", "translate claude chunk to openai", "error", terr)
+			return
+		}
+
+		if bridge != nil {
+			bridge.FeedFrames(out)
+			if bridge.err != nil {
+				writeErr = bridge.err
+			}
 			return
 		}
 		if len(out) == 0 {
@@ -122,6 +146,13 @@ func handleClaudeMessagesStream(w http.ResponseWriter, req *Request, upstream io
 	}
 	if writeErr != nil {
 		return fmt.Errorf("write to client: %w", writeErr)
+	}
+
+	// A Responses client waits for response.completed, not [DONE], so the bridge
+	// closes before the fallback below can call the stream unfinished.
+	if bridge != nil {
+		bridge.Close()
+		doneSeen = true
 	}
 
 	if !doneSeen {
