@@ -128,22 +128,19 @@ test('A5c reloadDns：热重载失败必须报出来（四个调用点全传 sil
     `配置已写盘却不生效，界面必须说清，实际文案：「${els.get('toast').textContent}」`);
 });
 
-test('B5b 清除选中：必须显式传「直连」，不得无参去读那个刚被删掉的文件', () => {
-  // **为什么是源码级断言（接缝缺口的如实记录）**：
-  // 本来想断言 DOM 文案，但当前的桩跑不通 `KB.readFile` 那条路径（桥要先做执行模式探测，
-  // 桩只答了 `panel/rm`，读文件命令根本没发出去）→ 无参版本在这套桩下**渲染不出**「未知（读取失败）」，
-  // 断言于是永远为真（我实测踩了一次假绿：变异代码下仍 pass）。没有能变红的接缝时，
-  // 正确做法是记下缺口 + 换成形状可机械判定的断言（同 .prev 那条）。
-  // 缺口本身：`app-harness` 需要让 `readFile` 的探测/读取可桩（后续若有人补，这条可升级成 DOM 断言）。
-  const fs = require('node:fs');
-  const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'page-update.js'), 'utf8');
-  const i = src.indexOf('async function clearAccel()');
-  assert.ok(i > 0, '没找到 clearAccel');
-  const seg = src.slice(i, src.indexOf('\n}', i));
-  assert.ok(/renderAccelCur\(''\)/.test(seg),
-    'clearAccel 必须显式告诉界面“已直连”；无参调用会去读刚被删掉的选中文件，' +
-    '而"文件不存在"与"读失败"在 readFile 里是同一个 ok:false → 显示成「未知（读取失败）」');
+test('B5b 清除选中：必须显示「直连 GitHub」，不得渲染成「未知（读取失败）」', async () => {
+  // 这条曾经是**源码级扫描**，理由写在 FIXPLAN 34.1 里：「桩跑不通 KB.readFile，
+  // 断言永远为真」。2026-09-29 复核证明那个理由是**误判** —— 桩确实会把
+  // `cat '<path>' 2>/dev/null && echo __READ_OK__` 发出去（实测命令日志可见），
+  // 真正导致假绿的是**异步渲染没等到拍**（renderAccelCur() 的调用点不 await 它）。
+  // 现在改成真 DOM 断言，并已被判定性实验证明能红：把 clearAccel 变异成无参版后，
+  // 这里渲染出的是「未知（读取失败）」（"文件不存在"与"读失败"在 readFile 里是同一个
+  // ok:false）→ 断言精确报出该文案。
+  const { els } = boot({ backup: true });
+  await els.get('btn-accel-clear').onclick();
+  await tick(); await tick(); await tick();   // 等 async 渲染落地（否则断言跑在它前面）
+  assert.equal(els.get('accel-cur').textContent, '直连 GitHub',
+    '清除选中后应显示「直连 GitHub」；无参去读刚被删掉的文件会渲染成「未知（读取失败）」');
 });
 
 test('B1b 源码顺序：optimize 必须先删旧 .prev 再备份（否则“回滚上一版”永远回到首版）', () => {

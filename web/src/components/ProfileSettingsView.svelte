@@ -209,10 +209,18 @@
   }
 
   // ── 备份 / 恢复（上游 parity：都先弹层输密码，请求形状见 lib/db-backup.ts）──
+  // 在途判定只有这一个出口：Modal 的 Escape / 点击遮罩 / ✕ 全走 onClose={closeDbAuth}，
+  // 而**导入是破坏性的**（覆盖数据库）。不拦的后果（上游 #34 第二条缺陷，实测复现过）：
+  // 用户按 Esc 以为取消了，POST 照跑 → 跑完 alert 成功并刷新 → 数据库已被覆盖。
+  function dbRequestInFlight() {
+    return isDownloadingBackup || isImportingBackup
+  }
   function openDbAuth(mode: 'export' | 'import') {
+    if (dbRequestInFlight()) return // 入口再校验：另一个请求在途时不得切换任务
     dbAuth = { open: true, mode, password: '' }
   }
   function closeDbAuth() {
+    if (dbRequestInFlight()) return // 关闭路径一律到此为止（唯一的取消语义）
     dbAuth = { open: false, mode: '', password: '' }
   }
   function handleDownloadBackup() {
@@ -418,7 +426,7 @@
         <div class="flex items-center justify-between">
           <div>
             <p class="font-semibold text-text-main">Require Password on Localhost</p>
-            <p class="text-[11px] text-text-subtle">Default password is <code class="font-mono text-brand-500">Mantep210</code></p>
+            <p class="text-[11px] text-text-subtle">Default password is <code class="font-mono text-brand-500">123456</code></p>
           </div>
         </div>
 
@@ -466,7 +474,7 @@
                   id="curr-pwd"
                   type="password"
                   bind:value={currentPassword}
-                  placeholder="Mantep210"
+                  placeholder="123456"
                   class="w-full px-3 py-1.5 rounded-lg bg-bg border border-border text-xs font-mono text-text-main focus:outline-none focus:border-brand-500"
                   required
                 />

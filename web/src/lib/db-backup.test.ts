@@ -41,4 +41,39 @@ describe('db-backup 请求形状（上游 parity）', () => {
       'Failed to export database'
     )
   })
+
+  // 上游 #34 的第一条缺陷（2026-09-29 复核 v1.9.5 时发现我们这边**也是**同根因）：
+  // /api/settings/database 在 IsAlwaysProtectedPath 里 → 无会话请求被 RequireDashboardAuth
+  // 用 handlerutil.WriteJSONError 拒绝，而它写的是**嵌套** envelope：
+  //   {"error":{"message":"Unauthorized: admin session or CLI token required","type":…,"code":…}}
+  // 旧的 responseErrorMessage 只认扁平 {"error":"…"} → typeof data.error === 'string' 不成立
+  // → 一律回落成 "Failed to export database"，**真实原因（会话/密码问题）被吞掉**。
+  it('嵌套 envelope（中间件拒绝形状）也要解出文案，不能吞成通用提示', async () => {
+    const res = new Response(
+      JSON.stringify({
+        error: {
+          message: 'Unauthorized: admin session or CLI token required',
+          type: 'invalid_request_error',
+          code: '401'
+        }
+      }),
+      { status: 401 }
+    )
+    expect(await responseErrorMessage(res, 'Failed to export database')).toBe(
+      'Unauthorized: admin session or CLI token required'
+    )
+  })
+
+  it('没有可读文案的结构化响应一律回落 fallback（别把 JSON 吐给用户）', async () => {
+    const empty = new Response('{}', { status: 500 })
+    expect(await responseErrorMessage(empty, 'Failed to import database')).toBe(
+      'Failed to import database'
+    )
+    const noMsg = new Response(JSON.stringify({ error: { type: 'x', code: '500' } }), {
+      status: 500
+    })
+    expect(await responseErrorMessage(noMsg, 'Failed to import database')).toBe(
+      'Failed to import database'
+    )
+  })
 })

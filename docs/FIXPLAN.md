@@ -947,10 +947,12 @@
   （往候选列表加项不影响当前选中）。**门禁**：源码级断言。
 - [x] **I7 测试自身的假绿：L7g 把"跳过"记成 PASS**：本机观察不到僵尸窗口时它调 `ok()` —— 未执行的断言
   被计成通过。修法：新增 `skp()` 与 `SKIP` 计数（汇总打印"跳过 N"），L7g 改用 `skp`。
-- [ ] **接缝缺口（留给下次，已如实记录）**：① `app-harness` 的桩跑不通 `KB.readFile` 路径（桥要先做执行
-  模式探测，桩只答了 `panel`/`rm`）→ 凡"读文件后渲染"的断言在桩下**无法变红**（本轮实测踩到一次：
-  变异代码下仍 pass）。修 I6/I3 时因此改用源码级断言。② 想给 I5 做真回归需要"并发扫描"的时序桩。
-  两条都属于"架构挡住了锁死这个 bug"，是下一轮值得补的测试基建。
+- [x] ~~**接缝缺口（留给下次，已如实记录）**：① `app-harness` 的桩跑不通 `KB.readFile` 路径（桥要先做执行
+  模式探测，桩只答了 `panel`/`rm`）~~ → ❌ **① 是误判，已在 Phase 35.1 纠正**：桩**确实**把
+  `cat '<path>' 2>/dev/null && echo __READ_OK__` 发出去（实测命令日志可见），假绿的真因是
+  **异步渲染没等到拍**（`renderAccelCur()` 的调用点不 await 它；同上 §34.1 里 `tick()` 那段注释
+  记的正是同一件事）。B5b 已从源码扫描升级为真 DOM 断言，并经变异实验证明能精确变红。
+- [ ] ② 想给 I5 做真回归需要"并发扫描"的时序桩 —— 这条**仍然成立**，属下一轮测试基建。
 
 ## Phase 35 · 上游同步 v1.9.4 → v1.9.5 + 发布 v1.9.5-r1 ✅ 2026-09-29
 
@@ -963,16 +965,61 @@
   `/api/health` + SSO 501 仍在本仓、上游未吸收）。
 - **冲突（§7.3，仅 3 处）**：`README.md` → 按 §10.2 取我们的；`CHANGELOG.md` → 取我们的（含模块段）
   并把上游 `[v1.9.5]` 小节插回；`web/src/components/ProfileSettingsView.svelte` → 取我们的
-  （密码弹层备份交互）——**上游本版也改了这个文件（备份流四缺陷 #32/#34）→ 待复核是否适用于我们的交互**。
+  （密码弹层备份交互）——**上游本版也改了这个文件（备份流四缺陷 #32/#34）→ ✅ 已复核，结论见 Phase 35.1**
+  （缺 (b) 取消守卫，同根因的 (a) 解嵌套也缺）。
 - **门禁（§7.4–7.6）**：`gen-schema --check` ✅ 一致；`check-parity` ✅ 无新增缺口（基线 131 条）；
   离线档 **16/16**（一次运行出现"失败 1"，随后两次复跑均 0 失败 → 记为**抖动**，待观察）；
   `build.sh` 七步绿；真机用**我们自己的入口** `ops.sh install-module` 装包成功：
   `module_version=v1.9.5-r1 / versioncode=109050 / engine_version=1.9.5 / engine=up dns=up watchdog=up / health=200`，
   并看到"每小时内存基线"在真机线上生效（`引擎内存 26148kB … 已运行 7240s`）。
 - **版本物料**：`module/module.prop` v1.9.5-r1 / 109050；`update.json` 同步；`VERSION` 随上游为 `1.9.5`。
-- [ ] **待办**：推送（本环境无凭据，见交接）+ 打 `v1.9.5-r1` tag 与 GitHub Release（附
-  `dist/9router-go-1.9.5-r1-magisk.zip`；注意 `.github/workflows/release.yml` 是**上游继承**的引擎发布流，
-  触发 `v*` 只产出引擎二进制，模块 zip 需手工附加）。
+- [x] **发布完成（2026-09-29）**：经 `ALL_PROXY=socks5h://127.0.0.1:7890`（本机代理让**代理侧做 DNS**，
+  绕开污染；`gh` token 由一次性 credential helper 注入，未落盘）推送 33 个提交 + `v1.9.5-r1` tag，
+  GitHub Release 已附 `9router-go-1.9.5-r1-magisk.zip`；并用 `update.json` 里那个 `zipUrl` 实测
+  **HTTP 200**（模块更新器的下载路径打通）。
+- 注意：`.github/workflows/release.yml` 是**上游继承**的引擎发布流，触发 `v*` 只产出引擎二进制，
+  模块 zip 必须手工附加（本次即如此）。
+
+### Phase 35.1 · 发布后复核：svelte 备份流 + 测试基建误判纠正 ✅ 2026-09-29
+
+> 起因：用户问"第 1、3 点（svelte 待复核 / 接缝缺口）应该怎么修最好"。两条都先取证再动手：
+> 第 1 条用 `git show <上游提交>` 逐条比对语义（**不是数标记** —— 见下），第 3 条先写探针实测。
+
+- [x] **1 · 备份流复核（对上游 #32/#34 逐条比对语义）**：结论是**四缺陷里我们已修三条、缺一条**：
+  - **(c) 两动作互斥** ✅ 已有（两按钮互相 disable）+ 密码在首个 await 前快照 ✅ 已有。
+  - **(d) 服务端 contract 测试** ✅ 已在（`TestHandleImportDatabase_ClientContract`）。
+  - **(a) 错误文案被吞** ❌ **我们也有同根因（症状不同）**：`/api/settings/database` 在
+    `IsAlwaysProtectedPath` 里 → 无会话请求由 `RequireDashboardAuth` 用
+    `handlerutil.WriteJSONError` 拒绝，而它写的是**嵌套** envelope
+    `{"error":{"message":…,"type":…,"code":…}}`；而 `db-backup.ts` 的 `responseErrorMessage`
+    只认扁平 `{"error":"…"}` → `typeof data.error === 'string'` 不成立 → **一律回落成
+    "Failed to export database"，真实原因（会话/密码）被吞**。修法：解包交给 `formatApiError`
+    （递归取 message/error/detail…），保留"非 JSON / 无可读文案 → fallback"两条口径。
+    **回归**：`web/src/lib/db-backup.test.ts` 新增嵌套 envelope 用例（修复前**必红**，已实测）。
+  - **(b) 取消不生效（破坏性）** ❌ **我们缺这条**：`Modal` 的 Escape / 遮罩 / ✕ 全接
+    `onClose={closeDbAuth}`，而我们原来的 `closeDbAuth()` 只是清状态 —— 用户在导入途中按 Esc
+    以为取消，POST 照跑、跑完 alert 成功并刷新 → **数据库已被覆盖**。修法：新增唯一在途判定
+    `dbRequestInFlight()`，`closeDbAuth()`/`openDbAuth()` 都在它面前止步（关闭路径唯一）。
+  - **顺带 backport**：上游 `851070e`（**晚于 v1.9.5**，不在本次同步范围）把界面里显示的
+    "真实默认密码" `Mantep210` 换成文档值 —— 我们这版同样写着 `Mantep210`（提示 + 当前密码
+    placeholder），而**我们自己的文档与面板其它处一律是 `123456`**（README/MAGISK.md/CONTEXT.md），
+    照抄上游默认密码既误导用户又在公开仓库里泄露它 → 2 行改为 `123456`。
+  - **教训**：**复核上游修复不能数标记**。我们文件里 `closeDbAuth` / `responseErrorMessage` /
+    `isDownloadingBackup || isImportingBackup` 全都在（名字都在！），但 `closeDbAuth` 少了
+    "拒绝在途请求"这半句语义、`responseErrorMessage` 少了"解嵌套"这半句 —— 按名字比对会得出
+    "四条都已修复"的错误结论。
+- [x] **3 · 测试基建误判纠正（原"接缝缺口 ①"）**：
+  - 探针实测：桩**会**发出 `cat '<path>' 2>/dev/null && echo __READ_OK__`（命令日志可见），
+    与 34.1 记的"读文件命令根本没发出去"相反。
+  - 判定性实验：把 `clearAccel` 变异成无参 `renderAccelCur()` → DOM 断言**精确失败**并报出
+    `「未知（读取失败）」`；正确代码下绿。→ 断言从来就是有效的，**假绿的真因是缺一拍 `tick()`**。
+  - 修法：`page-flows.test.js` 的 B5b 由源码扫描升级为真 DOM 断言（含"为什么升级"的注释）；
+    34.1 那条误判已就地划掉并指向本节；harness 本身**无需改动**。
+- **门禁**：`bun test`（Dashboard 纯函数）**100/100**（新增 2 条，其中嵌套 envelope 一条修复前红）；
+  面板 `node --test` **128/128**；面板 JSTYPES **0 错**；`tsc -b`（Dashboard）**0 错**；
+  LIFECYCLE **55/0（+1 跳过）**。
+- [ ] **待定**：本轮改了 `web/src`（Dashboard 源码）→ 要真机生效需 `bun run build` 重建 `web/dist`
+  并重打引擎二进制与模块 zip（即 **v1.9.5-r2**）。是否现在发，由用户决定。
 
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 

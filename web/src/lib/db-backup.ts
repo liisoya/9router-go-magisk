@@ -14,6 +14,8 @@
  * 做成纯函数是为了**离线可断言**：bun:test 直接断言"导出请求带 x-9r-password"，
  * 并让 build.sh 在构建产物上再验一次（避免"改了源码忘了重建 dist"这类静默回归）。
  */
+import { formatApiError } from '../api/client'
+
 export const DB_BACKUP_URL = '/api/settings/database'
 export const DB_BACKUP_PASSWORD_HEADER = 'x-9r-password'
 
@@ -43,15 +45,27 @@ export function buildImportRequest(
   }
 }
 
-// 服务端错误体统一是 { error: "..." }（Next parity）→ 取出来当用户可见文案
+// 服务端错误体**两种形状都真实存在**，所以解包规则要写在这里（唯一所有者）：
+//   扁平  {"error":"Invalid password"}                     ← handler 自己写（settings.go）
+//   嵌套  {"error":{"message":"Unauthorized: …","type":…,"code":…}}  ← 中间件拒绝
+//         （handlerutil.WriteJSONError；/api/settings/database 在 IsAlwaysProtectedPath 里，
+//          无会话请求必然走它 —— 上游 #34 的第一条缺陷就是它，2026-09-29 复核证实我们同根因：
+//          旧实现只认扁平串 → 一律回落成 "Failed to export database"，**真实原因被吞掉**）
+// 所以把解包交给 formatApiError（它按 message/error/detail… 递归取，两种都出得来文案）；
+// 但"非 JSON"与"有 JSON 却没有可读文案"（{} / 纯结构）仍回落 fallback —— 别把 JSON 吐给用户。
 export async function responseErrorMessage(res: Response, fallback: string): Promise<string> {
   try {
-    const data = (await res.json()) as { error?: unknown }
-    if (data && typeof data.error === 'string' && data.error) return data.error
+    const data = (await res.json()) as unknown
+    const unwrapped =
+      data && typeof data === 'object' && 'error' in data
+        ? (data as Record<string, unknown>).error
+        : data
+    const msg = formatApiError(unwrapped, '')
+    // 形如 {…} / […] 的返回值说明没取到人话（只是把结构 stringify 了）→ 用 fallback
+    return msg && !/^[[{]/.test(msg) ? msg : fallback
   } catch {
-    /* 非 JSON 响应体：用 fallback */
+    return fallback
   }
-  return fallback
 }
 
 // 浏览器侧下载（DOM 相关，故不在单元测试里覆盖；测试只覆盖纯函数）
