@@ -1,3 +1,4 @@
+// @ts-check
 /* parsers.js — 纯函数解析层（无 DOM / 无 shell 副作用）
  *
  * 深模块：把所有"环境差异敏感"的解析收敛到这里，接口是一组纯函数，
@@ -8,7 +9,10 @@
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.KParsers = factory();
-})(typeof self !== 'undefined' ? self : this, function () {
+  // 类型闸说明：`this` 分支要转成 any —— 本文件带了 module.exports，TS 因而按 CJS 模块处理，
+  // 顶层 `this` 的类型是"模块导出对象"，而浏览器分支要的是宿主全局。这是 UMD 的真实动态边界，
+  // 在这里显式转换；工厂函数内部与跨文件引用仍然是**被检查**的（转换只覆盖这一处）。
+})(typeof self !== 'undefined' ? self : /** @type {any} */ (this), function () {
   'use strict';
 
   // ── 通用 ──
@@ -254,6 +258,76 @@
     return { ran, blockedBy: null };
   }
 
+  // 按阶段求值（planSteps 的安全形态）：只求值 id === phase 的那一道门禁。
+  // 为什么存在：调用方在每个阶段只持有该阶段的 fact，而 planSteps 的"缺 fact = 拒绝"
+  // 意味着"传整计划"必然在下一道门禁处假拦 —— scanOrphans/optimize/engUpdate 三次
+  // 同构事故（2026-09-28，其中两个是走查发现的活体）全部源于此。
+  // 跨阶段顺序仍由唯一计划常量承载：各阶段按计划顺序各自调 planGate，顺序不变量
+  // 不回到调用方手里。
+  function planGate(plan, phase, fact) {
+    const step = (plan || []).find(s => s.id === phase);
+    if (!step || !step.gate) return { ok: true, reason: '' };  // 非门禁阶段不拦
+    if (!fact || fact.ok !== true) {
+      return { ok: false, reason: (fact && fact.reason) || `门禁 ${phase} 未通过` };
+    }
+    return { ok: true, reason: '' };
+  }
+
+  // ── 孤儿扫描输出 → { live, aliases }（纯函数）──
+  // 无 '|' 行 = 存活（providerNodes.id / providerConnections.provider）；
+  // 有 '|' 行的首段 = 模型别名。fixture 可离线断言（曾因执行层标记行无 '|'
+  // 被误算进存活 —— 环境噪音必须由产出方剥净，这里只认干净输出）。
+  function parseScanLines(lines) {
+    const live = new Set(), aliases = extractAliases(lines);
+    for (const raw of lines) {
+      const l = stripCr(raw).trim();
+      if (l && !l.includes('|')) live.add(l);
+    }
+    return { live, aliases };
+  }
+
+  // ── 凭据扫描输出 → 缺凭据的活跃连接（纯函数）──
+  // 行形如 id|provider|authType|apiKey|accessToken|refreshToken（COALESCE 成 'null'）
+  function parseCredScan(text) {
+    const rows = [];
+    for (const line of stripCr(text).split('\n').map(s => s.trim()).filter(Boolean)) {
+      const p = line.split('|');
+      if (p.length < 6) continue;
+      const [, provider, authType, apiKey, accessToken, refreshToken] = p;
+      const hasKey = apiKey && apiKey !== 'null';
+      const hasTok = (accessToken && accessToken !== 'null') || (refreshToken && refreshToken !== 'null');
+      if (!(authType === 'oauth' ? hasTok : hasKey)) rows.push({ provider, authType });
+    }
+    return rows;
+  }
+
+  // ── 批量测速输出 → [{ i, node, ok, ms, err }]（纯函数）──
+  // 行形如 `3\thttps://x/\t200 0.123` 或失败时 `3\thttps://x/\t000 3.001 Could not resolve host: …`
+  // （索引 / 节点 / curl 的 -w 结果三段，制表符分隔；第三段是 `<http_code> <time_total> [errormsg]`）。
+  // **必须带索引**：`cat *.out` 的 glob 是字典序（tag-10 会排在 tag-2 前面），
+  // 靠行序映射回节点会错位 —— 所以索引写在行里，这里按索引排序还原。
+  // 失败原因（err）带出来给界面显示：只说"不可用"没法排查，说了"resolve/超时/证书"才有用。
+  function parseCurlTimings(text) {
+    const rows = [];
+    for (const line of stripCr(text).split('\n')) {
+      if (!line.trim()) continue;
+      const parts = line.split('\t');
+      if (parts.length < 3) continue;
+      const i = parseInt(parts[0], 10);
+      const node = parts[1];
+      if (!Number.isFinite(i) || !node) continue;
+      const m = parts[2].trim().match(/^(\d{3})\s+([0-9.]+)\s*(.*)$/);
+      rows.push({
+        i, node,
+        ok: !!(m && m[1] === '200'),
+        ms: m ? parseFloat(m[2]) * 1000 : 0,
+        err: m ? (m[3] || '').trim() : ''
+      });
+    }
+    rows.sort((a, b) => a.i - b.i);
+    return rows;
+  }
+
   return {
     stripCr, parseProp, cmpVer,
     parseOpsStatus, parseMeminfo, parseProcRss, FAKEIP_RE,
@@ -261,6 +335,7 @@
     normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans,
     ELF_MAGIC, ENGINE_MIN_BYTES, engineFileGate, checksumGate,
     LIFECYCLE_STATES, TONE_COLORS, stateLabel, engineVersionSourceLabel,
-    ENGINE_UPDATE_PLAN, MODULE_UPDATE_PLAN, ORPHAN_CLEAN_PLAN, DNS_OPTIMIZE_PLAN, planSteps
+    ENGINE_UPDATE_PLAN, MODULE_UPDATE_PLAN, ORPHAN_CLEAN_PLAN, DNS_OPTIMIZE_PLAN, planSteps, planGate,
+    parseScanLines, parseCredScan, parseCurlTimings,
   };
 });

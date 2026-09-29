@@ -100,10 +100,11 @@ find "$STAGING/module/bin" -type f -exec chmod 0755 {} +
 step "7/7 打包 + 校验"
 mkdir -p "$OUT_DIR"
 rm -f "${OUT_DIR}/${ZIP_NAME}"
-# 纯净发布：webroot/test（离线测试）不随模块分发，仅保留在仓库供回归
+# 纯净发布：webroot/test（离线测试）、webroot/types + tsconfig.json（类型闸开发专用）
+# 都不随模块分发，仅保留在仓库供回归/门禁
 (cd "$STAGING/module" && zip -r9 "${OLDPWD}/${OUT_DIR}/${ZIP_NAME}" \
   module.prop customize.sh service.sh action.sh uninstall.sh lib webroot etc bin \
-  -x 'bin/*.o' 'webroot/test/*' > /dev/null)
+  -x 'bin/*.o' 'webroot/test/*' 'webroot/types/*' 'webroot/tsconfig.json' > /dev/null)
 
 verify_zip() {
   local zip_path="$1"
@@ -119,9 +120,20 @@ verify_zip() {
   [ -f "$ex/lib/watchdog.sh" ] || die "zip 缺 lib/watchdog.sh（生命周期守护）"
   [ -f "$ex/service.sh" ] || die "zip 缺 service.sh"
   [ -f "$ex/webroot/index.html" ] || die "zip 缺 webroot/index.html"
+  # index.html 声明的每个脚本都必须真的在包里（Phase 27.6 事故：新增 upstream.js 忘了推送，
+  # 真机表现是 window.KUpstream undefined、面板整页失效）。清单唯一来源 = index.html 自己。
+  for _src in $(grep -o '<script[^>]*src="[^"]*"' "$ex/webroot/index.html" 2>/dev/null \
+                | sed 's/.*src="//; s/"$//' || true); do
+    case "$_src" in http://*|https://*) continue ;; esac
+    [ -f "$ex/webroot/$_src" ] || die "index.html 引用了 webroot/$_src，但包里没有这个文件"
+  done
   grep -q "^version=${MOD_VERSION}$" "$ex/module.prop" \
     || die "module.prop 版本与预期不符（期望 ${MOD_VERSION}）"
   grep -rq "__MOD_ID__" "$ex/webroot" && die "webroot 有未注入的 __MOD_ID__ 占位符"
+  # 纯净发布：开发专用文件不许混进发布包（类型闸的 tsconfig/types 对设备毫无用处，只会让
+  # "设备上是不是新代码"这类排查多出噪音）
+  [ ! -e "$ex/webroot/tsconfig.json" ] || die "发布包混进了 webroot/tsconfig.json（类型闸开发专用文件）"
+  [ ! -d "$ex/webroot/types" ] || die "发布包混进了 webroot/types/（类型声明开发专用目录）"
   if [ "${CLIPBOARD_PATCH:-1}" = "1" ]; then
     grep -q "clipboard polyfill" "$ex/bin/9router-go" \
       || die "引擎二进制未包含 polyfill 注入标记（web/dist 可能是旧的，用 FORCE=1 重建）"

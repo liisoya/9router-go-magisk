@@ -34,8 +34,9 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | ID | 断言 | 命令 | 前置 | 失败意味着 |
 |---|---|---|---|---|
 | JS-SYNTAX | 全部 shell 脚本语法正确 | `sh -n module/**/*.sh tools/**/*.sh` | sh | 设备上脚本直接不可执行（**mksh 与 dash 有差异，真机断言仍是最终判据**） |
-| JS-UNIT | 模块 WebUI 回归（当前 **86 例 / 6 文件**；清单由 **glob 全量**展开，不手写文件名）。含**装配层冒烟**：在桩 DOM + 桩 `ksu.exec` 里跑真实的 `app.js` | `node --test module/webroot/test/*.test.js` | node | 解析层/命令构造器/键契约/上游地址契约回归，以及装配层"跑到底"的回归。**为什么必须 glob**：此前手写 3 个文件，候选 5 新增的 `engine-spec-contract.test.js` 因此成了「存在、能被跑、但唯一入口从不跑它」的门禁孤儿（2026-09-27 修正） |
+| JS-UNIT | 模块 WebUI 回归（当前 **128 例 / 10 文件**；文件清单由 **glob 全量**展开，不手写文件名；**加载哪些脚本、按什么顺序，由 `index.html` 的 `<script src>` 清单派生**）。含**装配层冒烟**（在桩 DOM + 桩 `ksu.exec` 里按清单顺序跑真实面板脚本）与 **DOMID 契约**（见 §3） | `node --test module/webroot/test/*.test.js` | node | 解析层/命令构造器/键契约/上游地址契约/DOM id 契约回归，以及装配层"跑到底"的回归。**为什么必须 glob + 清单派生**：此前手写文件名，`engine-spec-contract.test.js` 成了「存在、能被跑、但唯一入口从不跑它」的门禁孤儿（2026-09-27 修正）；把扫描目标按文件名写死时，面板拆成多文件后新增页面会**静默失去覆盖**（2026-09-29 修正） |
 | BUN-UNIT | 引擎 Dashboard 纯函数回归 **82 例**（10 文件） | `bun test web/src` | bun | Dashboard 逻辑回归（请求形状、供应商解析、导入导出等） |
+| JSTYPES | 面板脚本类型闸（**棘轮两层**：`checkJs:false` → 只有顶部写了 `// @ts-check` 的文件被检查；严格度取"零注释成本"档）。拦的是 TS2304 找不到名字 / TS2554 参数个数 / TS2339·TS2551 属性拼错 / TS2300·TS2451 **跨文件顶层重名**（经典脚本共享一个词法作用域，重名 = 整页 SyntaxError） | `web/node_modules/.bin/tsc -p module/webroot/tsconfig.json` | `web/node_modules`（缺则 SKIP） | 面板在真机上"整页失效 / 点按钮报 undefined"（2026-09-27 事故：收编常量时漏改一处裸引用 → 面板只显示 localStorage 旧快照）。**为什么不直接上 strict**：先量过后定档 —— 仅 `parsers.js` 在 strict 下就有 41 条，**全是** `noImplicitAny`（缺 JSDoc 参数标注）、没有一条真 bug；一次补几百处标注会把"拦 bug"变成"补注释" |
 | GO-BUILD | 引擎可编译 | `go build ./...` | go | 引擎源码编译失败 |
 | GO-TEST | Go 单元测试（排除外网/真机依赖用例） | `go test ./... -skip '<见 §4>'` | go | 引擎侧回归 |
 | TSC | Dashboard 类型检查 | `npx tsc -b` | node_modules | 类型错误（构建前提前拦） |
@@ -43,6 +44,10 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | PY-UNIT | 棘轮 module（基线／豁免／只拦新增／收紧）的接口级单测 | `python3 -m unittest discover -s tools -p 'test_*.py'` | python3 | 三个门禁共用的棘轮语义坏了（PARITY/UIPARITY/DEADH 会一起失真） |
 | INJECT | `__MOD_ID__` 注入器（全树注入 + 零残留 + 不可读拒绝） | `sh tools/test-inject-mod-id.sh` | sh | 打包/直推两条路径的注入实现漂移（上线后设备上才看到占位符 → 面板取不到信息） |
 | WAIT | 「等就绪 / 等消失」原语（`lib/wait.sh`：零等待/如实失败/非法次数拒绝/pid 消失判定） | `sh tools/test-wait-lib.sh` | sh | 轮询语义坏了 → 会谎报"拉起成功"或白等满超时（ADR-0004 那类误报） |
+| LIFECYCLE | `lib/lifecycle.sh` 可离线断言的部分（当前 **56 例**；含 **L12 `life_restart_all`**：停 → 引擎 → DNS 三件齐备且有序 —— 无守护分支曾漏掉 DNS，导致域名解析静默全挂）：`life_boot` **不丢弃**守护启动判据且失败重试一次；守护身份按 cmdline 认（pidfile 号被无关进程复用时必须判「不在」）；`life_oom_protect` / `life_rss_kb` 的参数护栏（非法参数绝不写 `/proc`）；**热路径改写后的语义锁定**（L7：活/已退出/空/缺/非数字/**僵尸态**/多行 pidfile，且失败时**完全静默** —— 真机事故：重定向顺序写反会让 `can't open /proc/<pid>/stat` 混进 `panel` 的键值输出）；**退出原因解码**（L9：128+N → 信号名）；**通知安全性**（L10：pidfile 陈旧时绝不向非守护进程发 USR1 —— 默认动作是终止，会误杀无辜进程）；**内存策略用秒记账**（L8）；**意图先于动作的顺序**（L11：断言"动作发生那一刻意图是否已可见"） | `sh tools/test-lifecycle-lib.sh` | sh | 开机守护起不来却**日志无痕**（2026-09-29 真机事故：`life_boot` 把 `start-failed` 丢进 `/dev/null`）；把无关进程当成守护 → 面板永久误报 `up` 且永不拉起；僵尸态被当成"活着" → **引擎崩了却永不拉起**；误向无关进程发 USR1 → **杀掉无辜进程**；"先停后写意图" → 守护把用户刚停掉的服务复活（Phase 33.14） |
+| CHECKFLAGS | 门禁入口自身：档位选择（无参/单档/全档）+ **严格模式必须同时选档** + 无设备时「非严格 SKIP / 严格必红」的对照（并且"跑不起来"不算"拦住了"） | `sh tools/test-check-flags.sh` | sh | 严格模式空转 → CI 报成功却一条 `T*`/`A*`/parity 都没跑（2026-09-29 走查 A1，最高级别假绿） |
+| OPSSTATUS | `ops.sh` 的单行契约（`status`/`panel` 各一行、token 全为 `k=v`）+ 键访问器 `get <key>`（行首键/中间键/多键/缺键/非法键名）+ `action.sh` 端到端值与 `status` 对齐 | `sh tools/test-ops-get.sh` | sh | 管理器「操作」按钮状态全空、端口串成整行残余（2026-09-29 走查 A4：`action.sh` 自己重写了"怎么解析这一行"） |
+| INSTALLGATE | 装包**门禁先于动作**：坏包/截断包必须被挡在 `life_stop_all` 之前（断言 pidfile 仍在 = 服务没被停）、文件缺失仍回 `no-src`；成功路径用"门禁行早于 stop_all"的顺序断言兜住（测试里绝不真装包） | `sh tools/test-install-gate.sh` | sh | 装个坏包先把引擎/DNS 停掉，守护未武装时服务**永不回来**（2026-09-29 第二轮诊断 I1） |
 
 ### 2.3 真机断言（`tools/check.sh --device`）
 
@@ -51,7 +56,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | ID | 断言 | 失败意味着 |
 |---|---|---|
 | T1 | 守护在场（`watchdog=up`） | 引擎死后没人拉起 |
-| T2 | `kill -9` 引擎后 40s 内自愈（新 PID + `/health` 200） | 被杀即永久停机 |
+| T2 | `kill -9` 引擎后 40s 内自愈（新 PID + `/health` 200）。**判据守的是"必须自愈"，不是"必须多快"** —— 事件驱动（Phase 33.13）后实测约 **1.2s**，40s 仍作为上限 | 被杀即永久停机 |
 | T3 | 在管理器应用 cgroup 内启动仍能脱组（cgroup=`/`） | 会随管理器应用被系统清理而连坐（ADR-0004） |
 | T4 | `stop-user` 后状态如实为 `engine=stopped` 且 30s 内不被复活；`start-user` 能恢复 | 用户停服意图不被尊重 |
 | T5 | 维护窗口（hold）内不插手、窗口到期后自愈 | 维护期被守护干扰 |
@@ -63,6 +68,8 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | T11a–c | 「等就绪/等消失」原语本身（`wait_for` 真/假两判、次数非法即拒绝、`wait_gone` 真消失且不谎报） | 轮询语义坏了 → 会谎报"拉起成功"或白等满超时 |
 | T12a–e | 运行期引擎版本自愈 + 来源自检：整包更新后（记录落后）自愈 / 自检字段如实（来源=包内·刚自愈）/ 稳态不重复自愈（来源=运行期记录）/ 同版本重装（靠 mtime）自愈 / 运行期更新不被包内旧值覆盖 / 文件缺失从包内补齐 | 面板谎报旧版本 → 用户看到「假更新」（引擎其实已是新的）；或自检字段说谎 |
 | T13a–b | 引擎更新链路（**只读**）：用设备自己的加速节点走「版本清单 → `SHA256SUMS.txt` → arm64 资产」，断言 sha256 与 `SHA256SUMS` 一致、且过 `engine_src_ok` 的体积+ELF 判据。**不执行 install-engine、不改引擎版本**（引擎已是最新时同样能跑） | 地址契约坏了（tag 缺 v → 404；`fetch` 缺 `-L` → 302 空正文）→ 面板点下载必失败（2026-09-27 用户实测） |
+| T14a–e | 守护「必然在跑」三要素：`oom_score_adj=-1000`（**显式**策略，不再靠从启动者继承）/ 身份可按 cmdline 认出 / 面板 `watchdog=up` 不误判 / 守护日志有**引导证据行**（区分「没被执行」与「在 source 里就死」）/ 开机判据 `boot: watchdog=` 已入日志（未重启过则 SKIP，不假绿） | 守护被杀或起不来 → 整机失去自愈能力（引擎任何死因都不会再被拉起 = 用户"跑一段时间就挂，要手动开"）；OOM 保护若靠继承，换个启动路径就变成可杀 |
+| T15 | 快路径前提校正：**停服 → 启服**（新引擎不再是守护子进程）→ `kill -9` → 要求 **≤30s** 自愈（修好走 10s 兜底 ≈20s；没修则退回 60s 长周期、最多 2×60=120s）。实测 13s | `eng_ours` 陈旧 → 收不到 CHLD 且停在长周期 → 自愈从秒级退化成最多 60s（2026-09-29 走查 A2，本轮新代码的洞） |
 
 `tools/device/test-dashboard-api.sh` —— 仪表盘 API 功能（撤补丁后的"功能确实可用"证明）：
 
@@ -87,12 +94,16 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 
 | 位置 | 规模 | 覆盖 |
 |---|---|---|
-| `module/webroot/test/parsers.test.js` | 40 | 解析层：`status/panel` 输出、meminfo/RSS、DNS 探测与评分、上游行归一、孤儿判定、**装前门禁**（404 正文/HTML/探针失败/真品）、「先门禁后动作」计划求值 |
-| `module/webroot/test/bridge-commands.test.js` | 19 | 命令构造器：引号转义、base64 写文件、备份/恢复、`download` 必带 `-f`、`fetch` 必带 `-L`、`sqlSnapshot` 成败判据、`promiseWrap`、`fileSize`/`elfMagic` |
-| `module/webroot/test/contract-keys.test.js` | 6 | 键契约：shell `emit` 键集合 ↔ `app.js` 消费键；状态词值枚举双向对齐 |
+| `module/webroot/test/parsers.test.js` | 51 | 解析层：`status/panel` 输出、meminfo/RSS、DNS 探测与评分、上游行归一、孤儿判定、**装前门禁**（404 正文/HTML/探针失败/真品）、「先门禁后动作」计划求值、**批量测速输出解析**（按行内索引还原、失败不冒充、**失败原因透出**） |
+| `module/webroot/test/bridge-commands.test.js` | 27 | 命令构造器：引号转义、base64 写文件、备份/恢复、`download` 必带 `-f`、`fetch` 必带 `-L`、`sqlSnapshot` 成败判据、`promiseWrap`、`fileSize`/`elfMagic`、**`curlTimingBatch`**（并发在 shell 内部 + 每节点独立文件 + `-w` 契约） |
+| `module/webroot/test/contract-keys.test.js` | 6 | 键契约：shell `emit` 键集合 ↔ **全部面板脚本**的消费键（扫描目标从 `index.html` 清单派生，不按文件名写死）；状态词值枚举双向对齐 |
 | `module/webroot/test/engine-spec-contract.test.js` | 5 | 「什么算一个引擎」两侧缝死（常量/魔数字面量/检查项存在性/边界语义） |
-| `module/webroot/test/upstream.test.js` | 14 | 上游 release 地址契约：tag 缺 v 必须补（原故障复现）、资产与校验和同 tag、加速前缀只加 GitHub 域、`SHA256SUMS` 整词解析、与 `checksumGate` 的 fail-closed 联动、**两道回潮扫描**（不许再手写 release 地址；`upstream.js` 拥有的名字必须带 `KU.` 前缀） |
-| `module/webroot/test/app-wiring.test.js` | 2 | **装配层冒烟**：在桩 DOM + 桩 `ksu.exec`（cb3 形态 + 命中形态缓存）里跑真实的 `app.js` —— ① 初始化链无 unhandledRejection、`renderPanel` **后半段**与链尾 `renderAccelCur` 都渲染到了、② 每个 `btn-*` 都真的绑上了处理函数。2026-09-27「面板读不出来」事故的回归 |
+| `module/webroot/test/upstream.test.js` | 14 | 上游 release 地址契约：tag 缺 v 必须补（原故障复现）、资产与校验和同 tag、加速前缀只加 GitHub 域、`SHA256SUMS` 整词解析、与 `checksumGate` 的 fail-closed 联动、**两道回潮扫描**（不许再手写 release 地址；`upstream.js` 拥有的名字必须带 `KU.` 前缀，扫描目标同样从清单派生）+ 清单顺序断言（`upstream.js` 必须是清单里第一个） |
+| `module/webroot/test/app-wiring.test.js` | 4 | **装配层冒烟**：在桩 DOM + 桩 `ksu.exec`（cb3 形态 + 命中形态缓存）里按清单顺序跑真实面板脚本 —— ① 初始化链无 unhandledRejection、`renderPanel` **后半段**与链尾 `renderAccelCur` 都渲染到了（2026-09-27「面板读不出来」事故的回归）、② 每个 `btn-*` 都真的绑上了处理函数、③ **清单双向闭合**：声明的脚本必须存在（漏推送），存在的 `.js` 必须被声明（死文件） |
+| `module/webroot/test/gate-flows.test.js` | 4 | 「先门禁后动作」的**流程级**回归：DNS 优选全链可达（探测→Top5→备份→写配置→热重载）、引擎更新全链可达（下载→体积/ELF→SHA256→install-engine）、门禁不过时 install 不可达、**测速结束自动选中最快节点**（A5） |
+| `module/webroot/test/orphan-scan.test.js` | 4 | 孤儿扫描/清理流程级回归：健康扫描必须列出孤儿且**不显示警告**（`planSteps` 部分求值假拦的回归）、不可信扫描必须中止判定、快照 SQL 不得翻倍引号、复查读失败必须中止删除 |
+| `module/webroot/test/lib/app-harness.js` | — | **桩具唯一一份**（此前 app-wiring / orphan-scan 各复制一份）：宿主全局 + 最小 DOM + **按 realm** 建 exec 桩（回调名在「发起该命令的那个 realm」解析）+ 按 `index.html` 清单顺序加载脚本 + `recordRejections()` |
+| `module/webroot/test/dom-id-contract.test.js` | 4 | **DOM id 契约（三个方向）**：① 脚本请求的每个 id 都必须在 `index.html` 里存在（拼错 → 真机整页死）② `index.html` 里每个 `btn-*` 都必须被绑定（死按钮 —— 这是 app-wiring 那条的**另一半**：桩会为拼错的 id 凭空造元素并绑上，所以只有这条能发现"HTML 里没那个按钮"）③ nav 的 `data-page` 必须指向存在的 id。加 ④ 非空转自检（两侧解析结果都必须有量）。**为什么需要**：桩 DOM 的 `getElementById` 永远返回元素 → 这一类错误离线完全看不见 |
 | `web/src/**/*.test.ts`（10 文件） | 91 | Dashboard：请求形状（`db-backup`）、供应商/路由解析、批量添加、代理导入、OAuth 交接、登录态收敛、analytics 类型等 |
 | Go `./...`（约 28 包） | — | 引擎侧；外网/真机依赖用例见 §4 |
 
@@ -120,6 +131,23 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | 2026-09-26 | 修改 | SCHEMA | 上游 v1.9.2 起不再文档化索引/部分列 → 校验收敛为"表与列"，登记有依据的超集列（Phase 23.3） | c31d681 |
 | 2026-09-26 | 新增 | JS-UNIT（+9） | 装前门禁用例：404 正文/HTML 错误页/探针失败判死、校验和缺失必须拒绝 | b231232 |
 | 2026-09-26 | 新增 | BUILD-3① | 构建产物必须含 `x-9r-password`（Phase 20） | 6a98e6d |
+| 2026-09-29 | 新增 | LIFECYCLE | 开机守护起不来却日志无痕（`life_boot` 丢弃判据）；守护身份校验与 OOM 策略参数护栏 | 见本次提交 |
+| 2026-09-29 | 修改 | LIFECYCLE（19 → 55） | 守护事件驱动的前置：热路径改写（内建 `read`/僵尸判定/失败静默）、退出原因解码、USR1 通知安全性、内存策略改秒记账、**意图先于动作**的顺序断言（Phase 33.11–33.14）。红灯自证：L11 在前置顺序写反时精确变红 | 见本次提交 |
+| 2026-09-29 | 新增 | CHECKFLAGS / OPSSTATUS | 架构走查 A1（严格模式空转 —— 门禁报成功却一条都跑，最高级别假绿）与 A4（`action.sh` 自己重写了"怎么解析 ops.sh 的单行 status"） | 见本次提交 |
+| 2026-09-29 | 新增 | T15（真机） | 架构走查 A2：`eng_ours` 陈旧 → 自愈退化成 60s 长周期（修复后实测 13s） | 见本次提交 |
+| 2026-09-29 | 修改 | JS-UNIT（117 → 123，+1 文件）/ LIFECYCLE（55 → 56） | 架构走查 A5/A6 行为用例（谎报成功 / 丢回滚点 —— 断言命令流与文案双向对照）、B5 属性转义源码扫描、A3 组合断言 L12（停 → 引擎 → DNS 齐备） | 见本次提交 |
+| 2026-09-29 | 新增 | INSTALLGATE | 第二轮诊断 I1：装包门禁必须早于停服务（坏包曾把引擎/DNS 停掉就走） | 见本次提交 |
+| 2026-09-29 | 修改 | JS-UNIT（123 → 128）/ LIFECYCLE（+跳过计数） | 第二轮诊断 I2–I6 的行为与源码断言（startSvc 诚实度、reload 失败必报、`.prev` 刷新顺序、清选中不得假故障）；I7：L7g 由"跳过记成 PASS"改为 `skp` + 汇总打印跳过数（**跳过要看得见**） | 见本次提交 |
+| 2026-09-29 | 修改 | 真机档入口（`tools/check.sh`） | **跑前/跑后各直推一次当前源码**：T10 会把设备 `lib/` 换成 `$DATA_DIR/last-module.zip`（旧包），否则**下一次**真机档在旧代码上跑 → `T4` 假红（Phase 33.16 实测） | 见本次提交 |
+| 2026-09-29 | 新增 | T14a–T14e | 守护「必然在跑」三要素：显式 OOM 保护 / 身份可认 / 引导证据行（Phase 33） | 见本次提交 |
+| 2026-09-29 | 修改 | JS-UNIT | 用例 86→**108**；加载目标由 `index.html` 清单派生（面板拆分后按文件名扫描会静默失去覆盖）；新增清单双向闭合断言 | 见本次提交 |
+| 2026-09-29 | 修改 | BUILD-7 | `verify_zip` 增加「`index.html` 声明的每个脚本都必须在包内」（Phase 27.6 漏推事故的打包侧孪生断言） | 见本次提交 |
+| 2026-09-29 | 修改 | T10 | 明确副作用：本步会把设备 `lib/` 换成包内版本 → 开发直推态失效，需重跑 `tools/deploy-device.sh`（否则下一轮 T14 会在旧代码上跑） | 见本次提交 |
+| 2026-09-29 | 新增 | JSTYPES | 面板类型闸（棘轮两层：`// @ts-check` 逐文件点亮 + 零注释成本档；红灯自证：插一个裸引用 → TS2304） | 见本次提交 |
+| 2026-09-29 | 修改 | BUILD-7 | 纯净发布：`webroot/types/*` 与 `webroot/tsconfig.json` 不许进发布包（类型闸开发专用） | 见本次提交 |
+| 2026-09-29 | 新增 | JS-UNIT +4（DOMID） | DOM id 契约三方向（JS→HTML / HTML→JS 死按钮 / nav data-page）—— 补"桩 DOM 永远返回元素"的盲区；红灯自证：三个方向各注入一个错误 → 精确 3 红（Phase 32.7） | 见本次提交 |
+| 2026-09-29 | 新增 | JS-UNIT +4（A5 批量测速） | `parseCurlTimings`（索引还原/失败不冒充）+ `curlTimingBatch`（并发在 shell 内部/每节点独立文件/`-w` 契约）；真机端到端验证过（Phase 32.8） | 见本次提交 |
+| 2026-09-29 | 新增 | JS-UNIT +2（A5 提速） | `--connect-timeout 3`（失败节点 5.03s→3.00s）+ 失败原因透出 + **测速即选中**；真机整批 4 节点从 ~5.3s 降到 **2s**。新用例第一次跑就抓到桩的顺序缺陷（写 `github-accel` 的命令含同名字符串，被读分支吞掉） | 见本次提交 |
 | 2026-09-26 | 新增 | UIPARITY | UI 调用 ⊆ 已注册端点（棘轮；首跑冻结 3 条：见下「UI parity 已知缺口」） | 07cd4d6 |
 | 2026-09-26 | 修改 | UIPARITY（基线 3 → 2） | 挂载 `/web/fetch` + `/v1/web/fetch`（HandleWebFetch 从未挂载）→ 该缺口消失，收紧基线 | 见本次提交 |
 | 2026-09-26 | 修改 | T10a | 匹配面从 `syntax error` 扩大到 `no closing quote` / `bad substitution` / `unexpected`（当日一次安装出现 `ops.sh[291]: no closing quote`，且行号 291 > 文件 284 行 → 当时读的是另一份内容；不可复现，先让门禁能抓到同类签名） | 见本次提交 |

@@ -47,6 +47,20 @@ _Avoid_: 环境变量、配置（太泛，会漏掉"承载"这层意思）
 不能拦人的检查可以写进台账，但不叫门禁。
 _Avoid_: 检查、校验（太泛，会把"只是打印一下"也算成门禁）
 
+**自报标记（self-report marker）**
+桥（`module/webroot/bridge.js`）的每个 shell 操作在命令末尾由 shell 自己吐的成功标记
+（`write-ok` / `__SQL_OK__` / `snap-ok` …）。为什么存在：promise 降级形态下 stderr 被丢弃、
+退出码恒 0，设备上的失败对 exec 层不可见 —— 不自报就会"假成功"（2026-09-28 三起事故同族根因）。
+标记由桥剥离，调用方只见干净输出；成败判据 = 输出含标记，且"查无/齐全"类结论以 `r.ok` 为前提。
+_Avoid_: 退出码判断、stderr 解析（在这层环境里两者都不可靠）
+
+**计划（PLAN）**
+"先门禁后动作"的步骤顺序数据：`parsers.js` 的 `ENGINE_UPDATE_PLAN` / `MODULE_UPDATE_PLAN` /
+`ORPHAN_CLEAN_PLAN` / `DNS_OPTIMIZE_PLAN`。顺序不变量离线可断言；求值用
+`planGate(plan, phase, fact)`（分阶段）——`planSteps` 整计划求值在分阶段执行时必然假拦
+（缺 fact 的门禁默认拒绝）。正式规则见 `AGENT-CONVENTIONS.md §2.17`。
+_Avoid_: 顺序判断写进装配流程（那正是三次事故的形态）
+
 **档位（tier）**
 一组门禁的集合，按前置条件划分：离线（不需要真机/外网/上游参照树）、真机（需要 adb + root）、
 对照（需要上游参照树）、全部。缺前置时按约定 SKIP 而不是变红。

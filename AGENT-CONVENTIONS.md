@@ -74,6 +74,37 @@
    直接摸 `localStorage`：`session.test.ts` 里的防回潮门禁会扫全树并红。两种"登出"是**有意区分**的：
    `clearAuthed`（只清标记，保留 API key）vs `clearAll`（连 key 一起清，401 后清理过期凭据）
 16. **cgroup 脱组**：由 WebUI（`ksu.exec`）启动的进程必须迁出应用 cgroup，否则会随管理器应用被系统清理而连坐（ADR-0004）
+17. **门禁分阶段求值必须用 `planGate(plan, phase, fact)`**（2026-09-28）：`planSteps` 的语义是
+    "缺 fact 的门禁 = 拒绝"，调用方分阶段执行时只持有本阶段 fact，**传整计划必然被下一道门禁假拦**——
+    scanOrphans / optimize / engUpdate 三次同构事故（后两个是走查发现的活体：DNS 优选与引擎更新
+    在真机上整体失联）。`planSteps` 仅保留给"一次性持有全部 facts"的求值；跨阶段顺序仍由唯一
+    `*_PLAN` 常量承载。配套流程级回归在 `test/gate-flows.test.js`
+18. **桥的每个 shell 操作必须自报成败标记**（2026-09-28）：promise 降级形态下 stderr 被丢弃、
+    退出码恒 0 —— `!r.err` 会把设备上的失败判成成功（"永远 true" 的同族病）。现有协议：
+    `write-ok` / `append-ok` / `read-ok(__READ_OK__)` / `snap-ok` / `__SQL_OK__` / `dl-ok` /
+    ok|exists|no-src|fail（backupOnce）。**新增桥操作必须沿用此模式**；标记由桥自己剥离，
+    调用方只见干净输出（标记行无 `|`，漏剥会被孤儿扫描误算进存活节点）；"查无/齐全/未发现"
+    类结论必须以 `r.ok === true` 为前提 —— 读失败不是空结果
+19. **SQL 文本唯一所有者 = `bridge.js _cmds` 的 dbOps 构造器**（`scanOrphansSql` / `recheckOrphansSql` /
+    `orphanSnapshotSql` / `orphanDeleteSql` / `credScanSql`），与 shell 命令构造器同等的离线断言。
+    **禁止在 app.js 内联 SQL**（2026-09-28 快照事故：内联处把单引号翻倍 `.replace(/'/g,"''")`
+    → sqlite3 Parse error → 快照永远失败）。转义纪律：shell 引号归 `shq`，SQL 落盘归 heredoc，
+    **SQL 内不做二次转义**；孤儿别名进入 SQL 前必须已过 `UUID_ALIAS` 校验（computeOrphans 的输出）
+
+20. **守护的事件纪律**（2026-09-29，Phase 33.13）：`lib/watchdog.sh` 是**事件驱动**的 ——
+    子进程退出走 `trap CHLD`（毫秒级醒来），运维请求走 `USR1`（写在唯一接缝 `life_wd_request`），
+    `sleep` 只做兜底（缺省 60s）。三条硬规矩：
+    ① **信号 handler 内禁止 fork**（尤其禁止 `log()` —— 它带 `date`）：handler 自己 fork 会再产生一个
+       SIGCHLD → 再进 handler → **自我触发的风暴**（真机实测：同一秒刷几百行，且不会自己停）。handler 只许做算术赋值，真活儿留给主循环。
+    ② **要"立刻生效"的控制类写入必须经 `life_wd_request`**（它负责 `kill -USR1`）：否则在 60s 兜底周期下最长等一个周期，
+       `life_restart_engine` 的 `wait_for 20` 会先超时 → 面板显示"重启失败"，而真相只是没被叫醒。
+    ③ 想用 `inotifyd`（box 那一派）替代轮询时：**回调程序必须有 `+x`**（否则静默无常，本轮踩过），
+       且**被盯目录必须"安静"** —— 盯数据目录会被日志写入刷成事件风暴。
+21. **意图先于动作 + 时间口径用秒**（2026-09-29，Phase 33.14 真机 T4 抓到）：任何"用户显式停/关"的实现
+    **必须先写意图文件、再动进程**（`life_stop_user` / `life_disable_dns`）。事件驱动把"死亡 → 守护反应"的窗口
+    从秒级压到毫秒，任何"先停后写"都会让守护**把用户刚停掉的东西复活**；旧代码 5s 轮询 + 连续两次判死
+    （≈10s 窗口）**刚好掩盖**了这个竞态。配套离线断言 `L11`（断言"动作发生那一刻意图是否已可见"）。
+    **推论**：周期/阈值一律用**秒**表达，不用"轮次" —— 轮次会随周期变（5s→60s 时"每 12 轮"从 60 秒静默变 12 分钟）。
 
 ### 2.1 模块边界速查（加新东西时改哪里）
 
@@ -84,12 +115,16 @@
 | 关注点 | 唯一所有者 | 会红的门禁 | 加新东西时 |
 |---|---|---|---|
 | 服务该不该在跑 / 状态与意图 | `module/lib/lifecycle.sh` | 真机 `T1–T5` | 加动词；调用方只表达意图 |
+| 守护的 OOM 优先级 / 身份判定 | `lib/lifecycle.sh`（`life_oom_protect` / `life_pid_is_watchdog`） | `LIFECYCLE` + 真机 `T14` | **不许"靠继承"** `oom_score_adj`（继承值取决于启动者）；判"守护在不在"必须同时验身份（pidfile 号会被复用） |
+| 面板文件结构 / 脚本加载顺序 | `module/webroot/index.html` 的 `<script src>` 清单 | `JS-UNIT`（清单双向闭合）+ `BUILD-7` | 加/删页面文件**只改 `index.html`** —— 测试加载与打包断言都从它派生 |
 | 等就绪 / 等消失 | `module/lib/wait.sh` | `WAIT` + 真机 `T9` | 用 `wait_for` / `wait_gone`，不要写轮询 |
 | 日志路径 / 上限 / 轮转 | `module/lib/log.sh` | 真机 `T*` | 经它写日志 |
 | 状态词与界面文案 | `parsers.js` 的 `LIFECYCLE_STATES` | `contract-keys`（双向） | 加词 = 改表 + `life_state`，两侧都要动 |
 | 派生状态的来源展示（版本从哪来、是否刚自愈） | `ops.sh` emit（`engine_ver_src` / `engine_ver_healed`）+ `parsers.js engineVersionSourceLabel` | `JS-UNIT` + 真机 `T12` | 新字段 = 同时加 emit 与文案映射，并让自检断言它如实 |
 | 「什么算一个引擎」 | `parsers.js`（`ELF_MAGIC` / `ENGINE_MIN_BYTES`） | `engine-spec-contract` | 改 `parsers.js`，再按门禁同步 `ops.sh` 常量 |
-| 「先门禁后动作」的顺序 | `parsers.js` 的 `*_PLAN` + `planSteps` | `parsers` 计划结构断言 | 加步骤 = 改数据 + 加断言 |
+| 「先门禁后动作」的顺序 | `parsers.js` 的 `*_PLAN` + `planGate`（分阶段）| `parsers` 计划结构断言 + `gate-flows` 流程回归 | 加步骤 = 改数据 + 加断言 + 调用点用 planGate |
+| 桥操作的成败判据 | `bridge.js` 自报标记协议（见 §2.18）| `bridge-commands` / `gate-flows` | 新操作 = 构造器带 `echo <标记>` + 运行层只认标记 |
+| SQL 文本（模块 WebUI） | `bridge.js` `_cmds` dbOps 构造器（见 §2.19）| `bridge-commands` 形状断言 | 加 SQL = 加构造器 + 用例，禁止内联 app.js |
 | 前端请求形状 | `parsers.js` / `bridge.js` 命令构造器 / `web/src/lib/*.ts` | `JS-UNIT` / `BUN-UNIT` / `check-ui-parity` | 纯函数 + 用例，别散在组件里 |
 | 登录态 | `web/src/lib/session.ts` | `BUN-UNIT`（含防回潮扫描） | 用它的动词，不要摸 `localStorage` |
 | 门禁的棘轮语义 | `tools/ratchet.py` | `PY-UNIT` | scanner 只提供 `gaps` |
@@ -115,6 +150,14 @@
 | 改了什么 | 必须同时做 |
 |---|---|
 | `module/lib/*.sh` 的运维动作或状态 | 相关真机 `T*` 断言；台账登记 |
+| 改守护循环（`watchdog.sh` 的事件/间隔/兜底路径） | 保住 CHLD/USR1 语义（§2.20）+ handler 零 fork + 真机 `T2`/`T4`/`T5`/`T14` |
+| 加/改周期性节奏或阈值（内存采样、日志轮转、间隔） | 单位用**秒**（§2.21）+ 离线断言（`life_rss_log_due` 那类纯判定） |
+| 加/改"用户显式停/关"的动作（stop/disable/off） | 意图先落盘再动进程（§2.21）+ `L11` 类顺序断言 |
+| 改 `ops.sh` 的 emit 格式（status/panel 的键或行结构） | 所有消费者都要过一遍：`ops.sh get`（**解析的唯一所有者**）+ `OPSSTATUS` 门禁 + WebUI 解析层用例（2026-09-29 A4：`action.sh` 自己重写了解析，中间键恒空、行首键吐整行残余） |
+| 新增/改名 `ops.sh` 子命令 | `USAGE` + `module/action.sh`（管理器「操作」按钮）+ `OPSSTATUS` 台账 |
+| 加/改守护的"快/慢路径"判据（`eng_ours`/`dns_ours` 一类） | 真机 `T15`（停/启之后仍须 ≤30s 自愈）+ `LIFECYCLE` 台账；判据要用"当前关系"而不是"变量非空" |
+| 改门禁入口 `tools/check.sh` 的档位或严格标志 | `CHECKFLAGS` —— **门禁入口自己也要有门禁盯着**（A1 那种"报成功却一条都没跑"的假绿最难发现） |
+| 往 HTML 里插值到**属性值**（`attr="…"`） | 用 `escAttr`，不是 `esc`（`PAGE-FLOWS` 的源码扫描会红） |
 | 前端请求形状（`fetch`/`request`/`KB.ops`/`KB.fetch` 字面量） | `parsers.js`/`bridge.js`/`web/src/lib/*.ts` 纯函数用例；`check-ui-parity` 基线 |
 | 引擎路由/端点、补丁增撤 | `check-parity`；`docs/adr/0003` 登记表 |
 | schema 相关 | `python3 tools/gen-schema.py --check` |
@@ -122,7 +165,9 @@
 | 新增/删除/修改门禁断言 | `docs/TESTING.md` 台账 + 「变更记录」一行 |
 | 改 `parsers.js` 的引擎判据常量 | 同步 `ops.sh engine_src_ok`（`engine-spec-contract` 会红） |
 | 加/改生命周期状态词 | `LIFECYCLE_STATES` + `life_state`（`contract-keys` 双向门禁） |
-| 加/改"先门禁后动作"的步骤 | 对应 `*_PLAN` 数据 + 计划结构断言（改顺序即红） |
+| 加/改"先门禁后动作"的步骤 | 对应 `*_PLAN` 数据 + 计划结构断言（改顺序即红）+ 调用点用 `planGate` 分阶段求值（§2.17，传整计划=假拦事故）+ `gate-flows` 流程级用例 |
+| 新增 bridge 桥操作 / 改执行形态 | 自报成败标记（§2.18）+ `bridge-commands` 用例；标记必须由桥剥离 |
+| 内联 SQL / 拼接 shell 到 app.js | 禁止 —— 收进 `_cmds` 构造器（§2.19）+ 离线形状断言 |
 | 触碰 `localStorage` / 登录态键 | 只经 `web/src/lib/session.ts`（防回潮门禁扫全树） |
 | 需要"等一会/等就绪" | 用 `module/lib/wait.sh`；真机门禁也用它（否则 `WAIT`/`T9` 失效） |
 | 改打包或直推的注入 | 只改 `tools/inject-mod-id.sh`（`INJECT` 档会红） |
@@ -189,7 +234,7 @@
 
 | 文件 | 我们的改动 | 合并时怎么办 |
 |---|---|---|
-| `AGENTS.md` | §5.0「回归测试否则不算修」硬规则（2026-09-26，模块层与引擎层都适用） | 保留；上游若改同一段，把这条并回去 |
+| `AGENTS.md` | §5.0「回归测试否则不算修」硬规则（2026-09-26，模块层与引擎层都适用）；§9 模块 WebUI 陷阱清单（2026-09-28，三次事故沉淀，正文指向 AGENT-CONVENTIONS §2.17–2.19） | 保留；上游若改同一段，把这两条并回去 |
 | `internal/handlers/router.go` | ① ADR-0003 定点补丁：`/api/models/test` 鉴权 —— **上游 v1.9.2 已吸收，本地补丁已撤**；② 挂载 `/web/fetch` + `/v1/web/fetch`（`HandleWebFetch` 此前从未挂载 → Dashboard 网页抓取必 404；补丁存档 `tools/patches/media-web-fetch-route.patch`）；③ 抽出 `healthHandler` 并注册 `/api/health`（带 CORS，浏览器侧可达性探测）；④ 注册 SSO 回调 `/api/auth/oidc/callback`、`/api/auth/saml/acs`（诚实返 501） | 取上游后复核：`TestSetupServerRouter_ModelTestSessionAuth` 仍在跑、两条 web/fetch 路由仍在、`/api/health` 仍带 CORS、SSO 两条仍在（**v1.9.3 与 v1.9.4 复核：四条都仍在 → 全部保留**） |
 | `internal/handlers/sso/sso.go` | `HandleLoginNotImplemented`（SSO 回调的 501 实现，Phase 24） | 保留 |
 | `internal/handlers/chat/chat.go` | 删除从未被引用的 `HandleHealth` —— **2026-09-27 已撤：上游 v1.9.3 自己删掉了它** | 取上游后确认该函数未回归（若回归，DEADH 会红）；**v1.9.4 复核：未回归** |

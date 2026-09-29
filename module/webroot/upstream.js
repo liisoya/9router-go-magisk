@@ -1,3 +1,4 @@
+// @ts-check
 /* upstream.js — 上游/模块 release 地址契约的唯一所有者。
  *
  * 深 module：把「上游怎么命名它的发布物」这件事收在一处 —— 版本清单地址、release tag 形态、
@@ -18,7 +19,9 @@
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.KUpstream = factory();
-})(typeof self !== 'undefined' ? self : this, function () {
+  // 类型闸说明：`this` 分支转 any —— 本文件带了 module.exports，TS 按 CJS 模块处理，
+  // 顶层 `this` 的类型是"模块导出对象"，而浏览器分支要的是宿主全局（同 parsers.js / bridge.js）。
+})(typeof self !== 'undefined' ? self : /** @type {any} */ (this), function () {
   'use strict';
 
   // 引擎（上游）与模块各自的仓库：引擎资产只在引擎仓库发，模块 zip 只在模块仓库发。

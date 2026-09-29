@@ -6,7 +6,7 @@
 #   生命周期 = lib/lifecycle.sh（进程启停、用户意图、状态文件、cgroup 脱组）。本文件只 source 它，
 #              **绝不自己读写任何 lifecycle 状态文件**（否则"状态无主"的老毛病会立刻回来）。
 # 输出约定：机器可读的 key=value 行（WebUI 解析）；部分子命令输出状态词。
-USAGE="ops.sh <status|panel|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port>"
+USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port>"
 # 环境变量: DATA_DIR（默认 /data/adb/9router-go）、PORT（显式覆盖端口）
 
 MODDIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -48,15 +48,27 @@ engine_version_sync() {
   #     ③ 运行期文件缺失 → 从包内补齐。
   #   补充判据 = 包比运行期文件新（同 versionCode 的重装场景，见 T12a2）。
   # 同时记下"这次的值是从哪来的、是不是刚自愈"，供面板做来源自检提示（谎报一眼可见）
+  #
+  # --from-package（install-module 专用）：包**刚被整体换过**，运行期文件无条件以包内为准
+  #（跳过全部判据）；包里没有 etc/engine-version 时删除运行期文件——宁可显示"未知"，
+  # 也不留旧版本的谎报。此前这段逻辑内联在 cmd_install_module 里（第二写者，判据漂移）。
   ENGINE_VER_HEALED=0
   ENGINE_VER_SRC=runtime
+  _force=0; [ "${1:-}" = "--from-package" ] && _force=1
   if [ ! -s "$MODDIR/etc/engine-version" ]; then
-    [ -s "$DATA_DIR/engine-version" ] || ENGINE_VER_SRC=none
+    if [ "$_force" = 1 ]; then
+      rm -f "$DATA_DIR/engine-version" "$DATA_DIR/engine-version-code" 2>/dev/null
+      ENGINE_VER_SRC=none
+      ENGINE_VER_HEALED=1
+    else
+      [ -s "$DATA_DIR/engine-version" ] || ENGINE_VER_SRC=none
+    fi
     return 0
   fi
   _code="$(module_versioncode)"
   _seen="$(cat "$DATA_DIR/engine-version-code" 2>/dev/null)"
-  if [ ! -s "$DATA_DIR/engine-version" ] \
+  if [ "$_force" = 1 ] \
+     || [ ! -s "$DATA_DIR/engine-version" ] \
      || [ "$_seen" != "$_code" ] \
      || [ "$MODDIR/module.prop" -nt "$DATA_DIR/engine-version" ]; then
     cp "$MODDIR/etc/engine-version" "$DATA_DIR/engine-version" 2>/dev/null
@@ -100,14 +112,46 @@ cmd_panel() {
   _s="$(cmd_status)"
   _mem="$(awk '/^MemTotal:/{mt=$2}/^MemAvailable:/{ma=$2}END{print mt+0, ma+0}' /proc/meminfo 2>/dev/null)"
   _mem="${_mem:-0 0}"
-  _ep="$(life_pid_of "$LIFE_ST_ENGINE")"
-  _dp="$(life_pid_of "$LIFE_ST_DNS")"
+  _ep="$(life_engine_pid)"
+  _dp="$(life_dns_pid)"
   _er="$(awk '/^VmRSS:/{print $2+0; exit}' "/proc/$_ep/status" 2>/dev/null)"; _er="${_er:-0}"
   _dr="$(awk '/^VmRSS:/{print $2+0; exit}' "/proc/$_dp/status" 2>/dev/null)"; _dr="${_dr:-0}"
   _ub="$(base64 "$DATA_DIR/dns-upstreams.conf" 2>/dev/null | tr -d '\n')"
   _mu="$(cat "$DATA_DIR/module-update-url" 2>/dev/null)"
   _as="$(cat "$DATA_DIR/github-accel" 2>/dev/null)"
   echo "$_s mem_total=${_mem%% *} mem_avail=${_mem##* } engine_rss=$_er dns_rss=$_dr upstreams_b64=$_ub mod_url=$_mu accel_sel=$_as"
+}
+cmd_get() {
+  # ops.sh get <key> [key...] —— 键访问器：**「status/panel 是一行空格分隔的 k=v」这个事实的
+  # 唯一所有者**（解析只在这里实现一次）。
+  #
+  # 为什么要有它（2026-09-29 架构走查 A4）：module/action.sh 曾自己拿 `grep "^$1="` 去解析
+  # 这一行 —— 行锚匹配**行中间的键永远不中**（engine= 在行中间 → 显示成空），而**行首的键
+  # （port=）会命中整行**，`cut -d= -f2-` 于是把 "20130 bind=loopback module_version=… engine=up …"
+  # 整串吐出来（连 `curl http://127.0.0.1:$(kv port)/health` 都必然失败）。
+  #
+  # 输出形态刻意与 status/panel **不同**：每个键一行（`key=value`），键不存在就跳过该行，
+  # 全都没命中则退出 1（「读不到」不等于「空结果」）。多行在这里是安全的：
+  # 本访问器的消费者是 shell 脚本（action.sh），多行让 `grep "^key="` 这类读法**按构造正确**；
+  # WebUI 那条路仍用单行的 panel（promise 降级形态只保留末行）。
+  if [ "$#" -eq 0 ]; then
+    echo "usage: ops.sh get <key> [key...]" >&2
+    return 1
+  fi
+  _g_line="$(cmd_status)"
+  _g_hit=0
+  for _g_k in "$@"; do
+    # 键名白名单：既防用户输入当正则用，也保证下面的模式匹配不会自我破坏
+    case "$_g_k" in ''|*[!a-zA-Z0-9_]*) continue ;; esac
+    case " $_g_line" in
+      *" ${_g_k}="*)
+        _g_v="$(printf '%s' "$_g_line" | tr ' ' '\n' | sed -n "s/^${_g_k}=//p" | head -1)"
+        printf '%s=%s\n' "$_g_k" "$_g_v"
+        _g_hit=1
+        ;;
+    esac
+  done
+  [ "$_g_hit" = 1 ]
 }
 
 ENGINE_MIN_BYTES=5242880  # 与 parsers.js ENGINE_MIN_BYTES 对齐（真实产物约 25MB）
@@ -177,6 +221,15 @@ cmd_install_module() {
   # "ops.sh[193]: syntax error: unexpected ';'"（行号落在 case 块内），安装中途夭折、引擎可能被
   # 留在停住的状态。mv 换 inode 后执行中的实例读的还是旧文件，安全。
   [ -f "${1:-}" ] || { echo "no-src"; return 0; }
+  # **门禁先于动作**（2026-09-29 诊断）：与 cmd_install_engine 的"不合格源绝不碰现有二进制"对称。
+  # 过去这行之后立刻 stop_all：zip 坏 / 非 zip / unzip 缺失时只能 echo install-failed 走人，
+  # 而引擎与 dnsfwd **已经被停掉** —— 守护若未武装（watchdog-armed 不存在），服务不会自己回来。
+  # 装包是"模块唯一安装入口"，必须先把包验成可用，再动服务。
+  _lst="$(unzip -l "$1" 2>/dev/null)" || _lst=""
+  case "$_lst" in
+    *module.prop*) ;;
+    *) echo "install-failed"; return 0 ;;
+  esac
   life_wd_hold 300
   life_stop_all >/dev/null
   cp "$1" "$DATA_DIR/last-module.zip" 2>/dev/null
@@ -210,15 +263,9 @@ cmd_install_module() {
   done
   rm -rf "$_stage"
   chmod 0755 "$MODDIR"/*.sh "$MODDIR"/lib/*.sh "$MODDIR"/bin/* 2>/dev/null
-  # 整包更新同样换了 bin/9router-go：把运行期版本文件同步成"包里那份引擎的真实版本"。
-  # 否则 DATA_DIR/engine-version 会停在上一个版本 —— 面板谎报"当前 1.9.1"（引擎其实是 1.9.2），
-  # 并永远提示"有更新可用"。包内 etc/engine-version 是构建期写的，描述的就是刚装进来的二进制。
-  if [ -s "$MODDIR/etc/engine-version" ]; then
-    cp "$MODDIR/etc/engine-version" "$DATA_DIR/engine-version" 2>/dev/null
-    printf '%s\n' "$(module_versioncode)" > "$DATA_DIR/engine-version-code" 2>/dev/null
-  else
-    rm -f "$DATA_DIR/engine-version" "$DATA_DIR/engine-version-code"   # 包里没有 → 宁可显示"未知"，也不要留旧版本的谎报
-  fi
+  # 整包更新同样换了 bin/9router-go：运行期版本文件无条件以包内为准。
+  # 写入逻辑单一所有者 = engine_version_sync（此前内联第二实现，判据已与自愈版漂移）。
+  engine_version_sync --from-package
   rm -f "$1"
   # 与 install-engine 同一语义：只有新引擎**真的起来**才把恢复点刷成这一份（已验证可用）
   if [ "$(life_restart_engine)" = "engine=up" ]; then
@@ -321,5 +368,6 @@ case "${1:-}" in
   port53-busy)     if life_port53_busy; then echo 1; else echo 0; fi ;;
   seed-key)        shift; cmd_seed_key "$@" ;;
   get-port)        life_get_port ;;
+  get)             shift; cmd_get "$@" ;;
   *)               echo "usage: $USAGE"; exit 1 ;;
 esac

@@ -1,4 +1,4 @@
-/* app.js 装配层冒烟测试 —— 在桩 DOM + 桩 ksu.exec 里跑**真实的**初始化与 refresh()。
+/* 面板装配层冒烟测试 —— 在桩 DOM + 桩 ksu.exec 里跑**真实的**初始化与 refresh()。
  *
  * 为什么需要它（2026-09-27 真机事故，一路发到 r1 才被发现）：
  *   把 URL 常量收编进 upstream.js 时，漏改了 app.js 里一处裸引用 ——
@@ -13,8 +13,7 @@
  *   · 渲染有没有跑到底 → 断言 renderPanel **靠后**那两块（资源占用 / 服务地址）
  *     和链尾的 renderAccelCur 都留下了痕迹。任一没渲染 = 中途抛错。
  *
- * bridge.js 是从**宿主全局**读 window / ksu / localStorage 的（它是 UMD，在 node 里走
- * module.exports 分支），所以这些桩必须打在 `global` 上；app.js 则在 vm 上下文里跑。
+ * 桩在 test/lib/app-harness.js（唯一一份）；脚本清单来自 index.html（唯一来源）。
  * 运行：node --test module/webroot/test/
  */
 'use strict';
@@ -22,7 +21,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
+const { createHarness, scriptFiles, WEBROOT } = require('./lib/app-harness.js');
 
 // 真机形态的 panel 单行输出（值不含空格 —— 见 ops.sh cmd_panel 的约定）
 const PANEL_LINE = [
@@ -35,83 +34,21 @@ const PANEL_LINE = [
   'mod_url= accel_sel='
 ].join(' ');
 
-// ── 宿主全局桩（bridge.js 只认这些）──
-// 形态缓存必须命中 cb3：否则会先跑 2.5s 的形态探测，而探测用"回调名"而不是函数。
-global.window = { CFG: { MODDIR: '/data/adb/modules/ninerouter-go', DATA_DIR: '/data/adb/9router-go' } };
-global.localStorage = {
-  getItem: k => (k === '__kmod_exec_mode' ? 'cb3' : null),
-  setItem() {}, removeItem() {}
-};
-global.ksu = {
-  exec(cmd, opts, cb) {
-    let out = '';
-    if (cmd.includes('ops.sh panel') || cmd.includes('ops.sh status')) out = PANEL_LINE;
-    else if (cmd.includes('github-accel')) out = '';   // 未选加速节点 = 直连
-    const payload = out ? out + '\n__KMOD_DONE__0' : '__KMOD_DONE__0';
-    setTimeout(() => {
-      // cb3 形态传的是**回调名**，真正的函数挂在 window 上（sentinelExec 注册的）
-      const fn = typeof cb === 'function' ? cb : global.window[cb];
-      if (typeof fn === 'function') fn(payload);
-    }, 0);
-  }
-};
-const KB = require('../bridge.js');
-const KP = require('../parsers.js');
-const KU = require('../upstream.js');
+const h = createHarness({ execHandler: cmd => {
+  // ops() 逐 token shq 引号包裹：`'…ops.sh' 'panel'`
+  if (/ops\.sh' 'panel'|ops\.sh panel/.test(cmd) || /ops\.sh' 'status'/.test(cmd)) return PANEL_LINE;
+  if (cmd.includes('github-accel')) return '';   // 未选加速节点 = 直连
+  return '';
+}});
 
-function makeEl(id) {
-  return {
-    id, textContent: '', innerHTML: '', value: '', disabled: false, className: '',
-    style: {}, dataset: {}, onclick: null,
-    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-    querySelectorAll: () => [],
-    appendChild() {}, remove() {}, select() {}, focus() {}, addEventListener() {}
-  };
-}
-
-// 跑一次真实的 app.js：桩掉 DOM，其余（parsers / bridge / upstream）用真货
-function loadApp() {
-  const els = new Map();
-  const rejections = [];
-  const onRejection = r => rejections.push(r);
-  process.on('unhandledRejection', onRejection);
-
-  const win = {
-    CFG: global.window.CFG,
-    KParsers: KP,
-    KBridge: KB,
-    KUpstream: KU,
-    localStorage: global.localStorage,
-    ksu: global.ksu,
-    setTimeout, clearTimeout, setInterval, clearInterval,
-    console, TextEncoder, TextDecoder, btoa, atob, Promise, Date, Math, JSON,
-    prompt: () => null,
-    document: {
-      getElementById: id => {
-        if (!els.has(id)) els.set(id, makeEl(id));
-        return els.get(id);
-      },
-      querySelectorAll: () => [],
-      createElement: () => makeEl('tmp'),
-      body: { appendChild() {}, removeChild() {} },
-      execCommand: () => true
-    }
-  };
-  win.window = win;
-  win.self = win;
-
-  const ctx = vm.createContext(win);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8'), ctx, { filename: 'app.js' });
-  return { els, rejections, onRejection };
-}
-
-test('app.js 初始化 + refresh() 必须跑到底（装配层没有裸引用 / 中途抛错）', async () => {
-  const { els, rejections, onRejection } = loadApp();
+test('面板初始化 + refresh() 必须跑到底（装配层没有裸引用 / 中途抛错）', async () => {
+  const rec = h.recordRejections();
+  const els = h.loadApp();
   await new Promise(r => setTimeout(r, 80));   // 等 refresh() 与它的 .then 链跑完
-  process.off('unhandledRejection', onRejection);
+  rec.stop();
 
-  const rejected = rejections.map(r => (r && r.stack) || String(r)).join('\n');
-  assert.strictEqual(rejections.length, 0,
+  const rejected = rec.list.map(r => (r && r.stack) || String(r)).join('\n');
+  assert.strictEqual(rec.list.length, 0,
     `初始化链上抛出了异常（面板会显示旧快照、后面几块渲染不出来）：\n${rejected}`);
 
   // 状态行（renderPanel 前半段）
@@ -125,11 +62,26 @@ test('app.js 初始化 + refresh() 必须跑到底（装配层没有裸引用 / 
   assert.ok(els.get('accel-cur').textContent, '加速节点行没渲染（链尾 renderAccelCur 没跑到）');
 });
 
-test('app.js 的每个按钮绑定都真的执行到了（id 写错会静默失联）', () => {
-  const { els } = loadApp();
+test('每个按钮绑定都真的执行到了（id 写错会静默失联）', () => {
+  const els = h.loadApp();
   const ids = [...els.keys()].filter(id => id.startsWith('btn-'));
   assert.ok(ids.length >= 20, `只绑定到 ${ids.length} 个按钮，装配层似乎没跑完`);
   const unbound = ids.filter(id => typeof els.get(id).onclick !== 'function');
   assert.deepStrictEqual(unbound, [],
-    `这些按钮没绑上处理函数（app.js 里的 id 写错了？）：${unbound.join(', ')}`);
+    `这些按钮没绑上处理函数（id 写错了？）：${unbound.join(', ')}`);
+});
+
+// ── 清单双向闭合：index.html 声明的必须存在（漏推送），存在的必须被声明（死文件）──
+test('index.html 声明的每个脚本都必须在 webroot 下存在', () => {
+  const missing = scriptFiles().filter(f => !fs.existsSync(path.join(WEBROOT, f)));
+  assert.deepStrictEqual(missing, [],
+    `index.html 引用了不存在的脚本（真机表现：window.K* undefined、面板整页失效）：${missing.join(', ')}`);
+});
+
+test('webroot 下的每个 .js 都必须被 index.html 声明（否则是没人加载的死文件）', () => {
+  const declared = new Set(scriptFiles());
+  const onDisk = fs.readdirSync(WEBROOT).filter(f => f.endsWith('.js'));
+  const orphan = onDisk.filter(f => !declared.has(f));
+  assert.deepStrictEqual(orphan, [],
+    `这些文件没有任何页面加载它（忘了在 index.html 里声明？）：${orphan.join(', ')}`);
 });

@@ -285,3 +285,93 @@ test('DNS 计划结构：write 之前必须有 rows-gate 与 backup-gate（改�
   assert.deepStrictEqual(KP.DNS_OPTIMIZE_PLAN.slice(0, idx).filter(s => s.gate).map(s => s.id),
     ['rows-gate', 'backup-gate']);
 });
+// ── planGate：阶段切片求值（2026-09-28 三次同构事故的接口级修复）──
+// planSteps 语义是"缺 fact 的 gate = 拒绝"；调用方分阶段执行时只持有本阶段 fact，
+// 传整计划必然被下一道门禁假拦（scanOrphans 事故 + optimize/engUpdate 两个活体）。
+test('planGate：只求值指定阶段，后续门禁的 fact 缺失不再假拦', () => {
+  // 与事故同构的调用形态：rows-gate 过了、backup-gate 没有 fact
+  const v = KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'rows-gate', { ok: true });
+  assert.strictEqual(v.ok, true, '本阶段通过就必须放行，不得被后续无 fact 门禁假拦');
+});
+test('planGate：本阶段 fact 未过 → 拒绝并透出 reason', () => {
+  const v = KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'rows-gate', { ok: false, reason: '没有可用率 ≥50% 的上游' });
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.reason, '没有可用率 ≥50% 的上游');
+});
+test('planGate：缺 fact / 错误阶段 / 非门禁阶段的行为', () => {
+  assert.strictEqual(KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'rows-gate', null).ok, false, '缺 fact = 拒绝');
+  assert.strictEqual(KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'probe', { ok: true }).ok, true, '非门禁阶段不拦');
+  assert.strictEqual(KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'nosuch', null).ok, true, '未知阶段不拦（不冒充门禁）');
+});
+test('planGate：每道真实门禁都能用计划常量单独求值（阶段覆盖完整）', () => {
+  for (const plan of [KP.ORPHAN_CLEAN_PLAN, KP.ENGINE_UPDATE_PLAN, KP.MODULE_UPDATE_PLAN, KP.DNS_OPTIMIZE_PLAN]) {
+    const gates = plan.filter(s => s.gate).map(s => s.id);
+    assert.ok(gates.length > 0, '计划必须有门禁');
+    for (const g of gates) {
+      assert.strictEqual(KP.planGate(plan, g, { ok: true }).ok, true, `${g} 用 ok:true 必须放行`);
+      assert.strictEqual(KP.planGate(plan, g, { ok: false }).ok, false, `${g} 用 ok:false 必须拒绝`);
+    }
+  }
+});
+
+// ── parseScanLines / parseCredScan：从装配层抽出的纯解析 ──
+test('parseScanLines：无 | 行 = 存活，| 行首段 = 别名', () => {
+  const { live, aliases } = KP.parseScanLines([
+    'openai-compatible-chat-069fdcc2-f29b-41da-b3b9-11f4702667ac',  // 节点
+    'codebuddy-cn',                                                  // 连接
+    'oc|big-pickle|llm',                                             // kv 别名
+    ''                                                               // 空行忽略
+  ]);
+  assert.ok(live.has('openai-compatible-chat-069fdcc2-f29b-41da-b3b9-11f4702667ac'));
+  assert.ok(live.has('codebuddy-cn'));
+  assert.ok(aliases.has('oc'));
+  assert.strictEqual(live.size, 2);
+});
+test('parseScanLines：容忍 CRLF', () => {
+  const { live, aliases } = KP.parseScanLines(['node-a\r', 'oc|m|llm\r']);
+  assert.ok(live.has('node-a') && aliases.has('oc'));
+});
+test('parseCredScan：缺 key 的 apiKey 连接与缺 token 的 oauth 连接都要报', () => {
+  const rows = KP.parseCredScan([
+    "id1|openai|apiKey|null|null|null",       // apiKey 缺 → 报
+    "id2|claude|oauth|x|null|tok",            // oauth 有 token → 不报
+    "id3|gemini|apiKey|k|null|null",          // 有 key → 不报
+    "id4|bad|weird|null|null|null"            // 未知 authType 无 key → 报
+  ].join('\n'));
+  assert.deepStrictEqual(rows.map(r => r.provider), ['openai', 'bad']);
+});
+
+// ── 批量测速输出（A5）──
+// 索引必须写在行里：`cat *.out` 的 glob 是**字典序**（b0-10.out 会排在 b0-2.out 之前），
+// 靠行序映射回节点在节点数 ≥ 11 时会错位（内置 15 个 + 自定义，必然触发）。
+test('parseCurlTimings：按行内索引还原顺序，不靠 cat 的行序', () => {
+  const rows = KP.parseCurlTimings([
+    '2\thttps://c/\t200 0.300',
+    '10\thttps://k/\t200 0.100',
+    '0\thttps://a/\t200 0.200'
+  ].join('\n'));
+  assert.deepStrictEqual(rows.map(r => r.i), [0, 2, 10], '必须按索引排序');
+  assert.deepStrictEqual(rows.map(r => r.node), ['https://a/', 'https://c/', 'https://k/']);
+  assert.strictEqual(rows[0].ok, true);
+  assert.strictEqual(rows[0].ms, 200, 'ms 由 time_total 秒换算');
+});
+test('parseCurlTimings：超时/非 200/坏行 一律不冒充可用', () => {
+  const rows = KP.parseCurlTimings([
+    '0\thttps://slow/\t',              // curl -m 8 超时 → 第三段为空
+    '1\thttps://e404/\t404 0.010',     // 非 200
+    '2\thttps://ok/\t200 0.050',
+    'bad line without tabs',           // 坏行 → 忽略
+    ''
+  ].join('\n'));
+  assert.deepStrictEqual(rows.map(r => [r.i, r.ok]), [[0, false], [1, false], [2, true]]);
+});
+test('parseCurlTimings：失败原因必须带出来（只说"不可用"没法排查）', () => {
+  const rows = KP.parseCurlTimings([
+    '0\thttps://dead/\t000 3.000825 Could not resolve host: no-such-host-9r.invalid',
+    '1\thttps://ok/\t200 0.050'
+  ].join('\n'));
+  assert.strictEqual(rows[0].ok, false);
+  assert.ok(rows[0].err.includes('Could not resolve host'), 'errormsg 要透出来（超时/解析/证书可区分）');
+  assert.ok(Math.abs(rows[0].ms - 3000.825) < 1, '失败也要量化耗时（3s 是连接超时踩线）');
+  assert.strictEqual(rows[1].err, '', '成功行没有原因');
+});

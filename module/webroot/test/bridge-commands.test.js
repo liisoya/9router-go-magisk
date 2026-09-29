@@ -12,19 +12,58 @@ global.window = { CFG: { MODDIR: '/data/adb/modules/ninerouter-go', DATA_DIR: '/
 global.localStorage = { getItem: k => (k === '__kmod_exec_mode' ? 'cb3' : null), setItem() {}, removeItem() {} };
 global.ksu = {
   exec(cmd, opts, cb) {
-    // 伪造真机行为：命令自己吐 snap-ok 才算成功；否则只有哨兵（旧实现下 sqlite 报错的形态）
-    setTimeout(() => global.window[cb](cmd.includes('snap-ok') ? 'snap-ok\n__KMOD_DONE__0' : '__KMOD_DONE__1'), 0);
+    // 伪造真机行为：命令自己吐自报标记才算成功；否则只有哨兵（旧实现下 sqlite 报错的形态）
+    const marker = ['snap-ok', 'write-ok', 'append-ok', '__SQL_OK__', '__READ_OK__'].find(m => cmd.includes(m));
+    const out = marker ? marker + '\n' : '';
+    setTimeout(() => global.window[cb](out + '__KMOD_DONE__0'), 0);
   }
 };
 const KB = require('../bridge.js');
 const C = KB._cmds;
 
 // ── 引号转义（唯一出口：shq，经构造器输出验证）──
-test('readFile：路径单引号包裹', () => {
-  assert.strictEqual(C.readFile('/data/x'), "cat '/data/x' 2>/dev/null");
+test('readFile：路径单引号包裹 + 自报 read-ok 标记（读失败与空内容可辨）', () => {
+  assert.strictEqual(C.readFile('/data/x'), "cat '/data/x' 2>/dev/null && echo __READ_OK__");
 });
 test("shq：单引号转义为 '\\' ''（经 readFile 输出验证）", () => {
-  assert.strictEqual(C.readFile("/x/y'z"), "cat '/x/y'\\''z' 2>/dev/null");
+  assert.strictEqual(C.readFile("/x/y'z"), "cat '/x/y'\\''z' 2>/dev/null && echo __READ_OK__");
+});
+test('readFile 运行层：无标记 = 读失败（ok:false），标记被剥离不进内容', async () => {
+  // 直通桩：回显"命令本体"（剥掉调用方追加的哨兵尾巴）—— 覆写构造器的输出可精确控制
+  const origExec = global.ksu.exec;
+  global.ksu.exec = (cmd, opts, cb) => {
+    const body = cmd.replace(/; echo __KMOD_DONE__\$\?$/, '');
+    setTimeout(() => global.window[cb](body + '\n__KMOD_DONE__0'), 0);
+  };
+  const orig = C.readFile;
+  try {
+    C.readFile = () => 'true';                    // 旧失败形态：无输出
+    const bad = await KB.readFile('/d/f');
+    assert.strictEqual(bad.ok, false);
+    C.readFile = () => 'hello\n__READ_OK__';      // 成功形态
+    const good = await KB.readFile('/d/f');
+    assert.strictEqual(good.ok, true);
+    assert.strictEqual(good.out, 'hello');        // 标记连同换行被剥掉
+  } finally {
+    global.ksu.exec = origExec;
+    C.readFile = orig;
+  }
+});
+test('ops 子命令逐 token 过 shq（ver/路径不再裸拼）', () => {
+  assert.strictEqual(
+    C.ops('install-engine /data/local/tmp/9r-eng.new 1.9.4'),
+    "'/data/adb/modules/ninerouter-go/lib/ops.sh' 'install-engine' '/data/local/tmp/9r-eng.new' '1.9.4'");
+});
+test('dbOps：孤儿 SQL 形状（不翻倍引号；别名进入 LIKE/EXISTS）', () => {
+  const a = 'openai-compatible-chat-069fdcc2-f29b-41da-b3b9-11f4702667ac';
+  const snap = C.orphanSnapshotSql([a]);
+  assert.ok(snap.includes("key LIKE '" + a + "|%'"), snap);
+  assert.ok(!snap.includes("''"), '不得翻倍引号（2026-09-28 快照事故）');
+  assert.ok(C.orphanDeleteSql([a]).includes(`DELETE FROM kv WHERE scope='customModels' AND (key LIKE '${a}|%')`));
+  const re = C.recheckOrphansSql([a]);
+  assert.ok(re.includes(`SELECT '${a}' WHERE EXISTS (SELECT 1 FROM providerNodes WHERE id='${a}')`), re);
+  assert.ok(C.scanOrphansSql().includes("SELECT id FROM providerNodes;"));
+  assert.ok(C.credScanSql().includes('FROM providerConnections WHERE isActive=1'));
 });
 
 // ── writeFile：内容走 base64 通道，任意字符安全 ──
@@ -46,9 +85,35 @@ test('b64Decode：ASCII 与中文（UTF-8）往返', () => {
 test('appendLine：单引号不丢失、换行折叠为空格', () => {
   const cmd = C.appendLine('/d/accel-list.conf', "https://a'b/x/");
   assert.ok(cmd.includes("https://a'\\''b/x/"), '单引号经 shq 安全转义');
-  assert.ok(cmd.endsWith(">> '/d/accel-list.conf'"));
+  assert.ok(cmd.includes(">> '/d/accel-list.conf' && echo append-ok"), cmd);
   const folded = C.appendLine('/d/f', 'a\nb');
   assert.ok(!/\n/.test(folded.replace(/^printf '[^']*' '/, '').replace(/' >>.*/, '')) || folded.includes("'a b'"), '换行折叠为空格');
+});
+
+// ── writeFile / appendLine 自报成败（2026-09-28 审计）：promise 形态下 stderr 被丢弃、
+// 退出码恒 0，旧实现 `return !r.err` 把设备上的写失败判成成功 —— 面板谎报"已保存"。
+test('writeFile / appendLine 命令自吐成败标记', () => {
+  assert.ok(C.writeFile('/d/f', 'x').endsWith("&& echo write-ok"), C.writeFile('/d/f', 'x'));
+  assert.ok(C.appendLine('/d/f', 'x').endsWith('&& echo append-ok'));
+});
+test('writeFile / appendLine 运行层只认标记（无标记 = 失败，不得谎报成功）', async () => {
+  const orig = C.writeFile, origA = C.appendLine;
+  C.writeFile = () => 'true';            // 旧实现失败形态：无输出
+  C.appendLine = () => 'true';
+  assert.strictEqual(await KB.writeFile('/d/f', 'x'), false);
+  assert.strictEqual(await KB.appendLine('/d/f', 'x'), false);
+  C.writeFile = orig; C.appendLine = origA;
+  assert.strictEqual(await KB.writeFile('/d/f', 'x'), true);
+  assert.strictEqual(await KB.appendLine('/d/f', 'x'), true);
+});
+test('sqlFile 命令自吐 __SQL_OK__（读失败凭 r.ok 可辨，空结果不再冒充成功）', async () => {
+  let sent = '';
+  const orig = global.ksu.exec;
+  global.ksu.exec = (cmd, opts, cb) => { sent = cmd; return orig(cmd, opts, cb); };
+  const r = await KB.sqlFile('SELECT 1;');
+  global.ksu.exec = orig;
+  assert.ok(sent.includes("< /data/adb/9router-go/cc.sql && echo __SQL_OK__"), sent);
+  assert.strictEqual(r.ok, true, '命令自吐标记时 r.ok 必须为 true');
 });
 
 // ── 备份/恢复 ──
@@ -67,10 +132,29 @@ test('restoreBackup：ok/none 语义', () => {
 });
 
 // ── 网络 ──
-test('curlTiming：-w 格式与 URL 转义', () => {
-  const cmd = C.curlTiming('https://x/?a=1&b=2');
-  assert.ok(cmd.startsWith("curl -o /dev/null -s -m 8 -w '%{http_code} %{time_total}' '"));
-  assert.ok(cmd.endsWith("?a=1&b=2'"));
+// 批量测速（A5）：原先是面板侧 15+ 次**串行** exec（最坏 15×8s ≈ 120s，且无一字进度）。
+// 现在并发放在 **shell 内部**：单次 exec 里每节点一个后台子 shell、各自写自己的输出文件，
+// wait 后统一 cat —— 绕开 bridge 的全局串行队列（并发 ksu.exec 在部分管理器上会串扰），
+// 也就不需要"按宿主差异化放开并发"那套机制。
+test('curlTimingBatch：并发在 shell 内部 + 每节点独立文件 + 索引写在行里', () => {
+  const cmd = C.curlTimingBatch(['https://x/?a=1&b=2', 'https://y/'], 'b0');
+  assert.ok(cmd.startsWith('mkdir -p '), '必须先建批量输出目录');
+  assert.strictEqual((cmd.match(/ curl -o \/dev\/null/g) || []).length, 2, '每个 URL 一个 curl');
+  assert.strictEqual((cmd.match(/2>\/dev\/null &/g) || []).length, 2,
+    '每个 URL 一个后台任务（并发只在 shell 内部，不放开 exec 并发）');
+  assert.ok(cmd.includes('wait; cat'), '必须 wait 后统一 cat');
+  assert.ok(cmd.includes("b0-0.out'") && cmd.includes("b0-1.out'"),
+    '每节点必须有独立输出文件（共用 stdout 会互相插队）');
+  assert.ok(cmd.includes("'https://x/?a=1&b=2'"),
+    '含 & 的 URL 必须被单引号完整包裹（曾因 strip 引号破坏含引号 URL）');
+  assert.ok(cmd.includes('rm -rf'), '临时目录必须清理');
+});
+test('curlTimingBatch：-w 契约 + 连接超时（解析侧靠它提取 code/time/原因）', () => {
+  const cmd = C.curlTimingBatch(['https://x/'], 'b5');
+  assert.ok(cmd.includes("curl -o /dev/null -s -m 8 --connect-timeout 3 -w '%{http_code} %{time_total} %{errormsg}\\n'"),
+    '-w 或超时参数变了 → parsers.parseCurlTimings 解析不出来（两端必须同时改）');
+  assert.ok(cmd.includes('--connect-timeout 3'),
+    '缺连接超时 → 挂死的节点会拖满 -m 8（真机实测：5.03s → 3.00s）');
 });
 test('download：dl-ok 哨兵与超时透传', () => {
   const cmd = C.download('https://gh/x', '/data/local/tmp/f.new', 300);

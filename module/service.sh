@@ -49,4 +49,10 @@ done
 # --- 拉起引擎（唯一实现；幂等：已在跑则只补 cgroup 逃逸）---
 ( LIFE_CALLER=service.sh; export LIFE_CALLER; life_ensure_engine ) >>"$LOG" 2>&1
 
+# --- 守护第二次机会 ---
+# life_boot 里那次是在系统最繁忙的时刻（引擎/DNS 都还没起），2026-09-29 真机实测就在那里
+# 失败过（且失败被静默丢弃）。守护是**唯一的自愈者**，缺了它整机失去自愈能力 —— 所以等
+# 网络等待与引擎启动都过去、系统缓和之后再确认一次，并把判据如实写进日志。
+life_log "wd-ensure: $(life_wd_start)"
+
 exit 0

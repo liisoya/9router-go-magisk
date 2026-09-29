@@ -8,8 +8,8 @@
 #
 # 用法：tools/deploy-device.sh [设备序列号]
 #   设备序列号缺省取 `adb devices` 中第一台 usb 设备。
-# 推送内容：lib/{ops.sh,watchdog.sh}、service.sh、
-#           webroot/{index.html,app.js,bridge.js,parsers.js}、etc/engine-version
+# 推送内容：lib/*.sh、service.sh、
+#           webroot/*.{js,html}（glob；清单唯一来源 = index.html 的 <script src>）、etc/engine-version
 # 自检：注入后占位符计数必须为 0；远端执行 ops.sh panel 显示 engine=up 且 watchdog=up。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -54,6 +54,7 @@ M=/data/adb/modules/$MOD_ID
 cp /data/local/tmp/d-lib/* \$M/lib/
 cp /data/local/tmp/d-service.sh \$M/service.sh
 cp /data/local/tmp/d-webroot/* \$M/webroot/
+for _f in \$M/webroot/*.js; do [ -f /data/local/tmp/d-webroot/\$(basename \$_f) ] || rm -f \$_f; done
 [ -f /data/local/tmp/d-etc/engine-version ] && cp /data/local/tmp/d-etc/engine-version \$M/etc/engine-version
 chmod 0755 \$M/*.sh \$M/lib/*.sh
 rm -rf /data/local/tmp/d-lib /data/local/tmp/d-service.sh /data/local/tmp/d-webroot /data/local/tmp/d-etc

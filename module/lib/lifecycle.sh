@@ -50,7 +50,37 @@ LIFE_WD_LOG="$LOG_WATCHDOG_PATH"
 LIFE_DNS_LOG="$LOG_DNS_PATH"
 
 # ── 原语 ────────────────────────────────────────
-life_pid_alive() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
+life_pid_alive() {
+  # 用 shell **内建 read** 读 pid 文件，不用 `$(cat ...)`（那是一次 fork + 子 shell）。
+  # 为什么在意：守护每 5s 一轮、每轮要问两次"引擎/dnsfwd 还在不在" —— 实测优化前
+  # 9.17ms/轮 ≈ 158s CPU/天（0.18% 单核）、17280 次唤醒/天，而这些 CPU 全花在
+  # "为读几个字节而 fork"上。真机 A/B：见 docs/FIXPLAN.md Phase 33.11。
+  # 语义与原先一致（空文件/缺文件/非数字 → 不在），额外顺带更稳：多行 pid 文件只取首行。
+  # 变量名刻意用 _alive_* 前缀：本库靠全局变量传值，不得与调用方的 _p/_f 冲突。
+  _alive_f="$1"
+  [ -f "$_alive_f" ] || return 1
+  _alive_p=""
+  # **重定向顺序要紧**：`2>/dev/null` 必须在 `< file` 之前 —— shell 从左到右处理重定向，
+  # 写成 `read v < file 2>/dev/null` 时重定向失败的错误会先报在终端上（真机实测：
+  # 刚死的进程会在 `ops.sh panel` 的输出里混进 "can't open /proc/<pid>/stat"，
+  # 而那份输出是按键值解析的）。
+  read -r _alive_p 2>/dev/null < "$_alive_f" || return 1
+  case "$_alive_p" in ''|*[!0-9]*) return 1 ;; esac
+  # 僵尸态不算"活着"（见 life_stat_is_zombie）：读 /proc/<pid>/stat 仍是内建 read，0 次 fork
+  _alive_s=""
+  read -r _alive_s 2>/dev/null < "/proc/$_alive_p/stat" || return 1
+  life_stat_is_zombie "$_alive_s" && return 1
+  kill -0 "$_alive_p" 2>/dev/null
+}
+life_stat_is_zombie() {
+  # /proc/<pid>/stat 的 state 字段（第 3 段）为 Z = 僵尸（已退出、待回收）。
+  # 为什么单独成函数：**为了让它能被离线断言** —— 僵尸窗口在测试机上转瞬即逝
+  # （shell 会立刻回收子进程），抽成纯字符串判定后就能用真实样本把解析锁住。
+  # 为什么不用"按空格切第 3 段"：comm 字段可能含空格/括号（如 `(a b)`），切字段会错位；
+  # 所以匹配形状 —— **右括号 + 空格 + Z + 空格**。
+  case "${1:-}" in *") Z "*) return 0 ;; esac
+  return 1
+}
 life_pid_of() { cat "$1" 2>/dev/null; }
 life_pid_gone() {
   # "已经退出"判定（含僵尸态）—— 实现唯一所有者在 lib/wait.sh，这里只保留历史名字给既有调用方
@@ -64,6 +94,24 @@ life_pid_is_exe() {
   case "$_pid" in ''|*[!0-9]*) return 1 ;; esac
   _exe="$(readlink "/proc/$_pid/exe" 2>/dev/null)"
   case "$_exe" in "$_want"|"$_want (deleted)") return 0 ;; esac
+  return 1
+}
+life_pid_is_watchdog() {
+  # 守护身份校验：它是个 **shell 脚本**，/proc/<pid>/exe 指向 sh 而不是脚本本身，
+  # 所以 life_pid_is_exe 对它无效，只能按 cmdline 认（真机实测：cmdline 为
+  # "/system/bin/sh" + "<MODDIR>/lib/watchdog.sh"）。
+  # 为什么需要：pidfile 里的号会被无关进程复用（长跑 pid_max 会绕回），"活着"不等于
+  # "我们的守护还活着" —— 少了这层，面板会误报 up、且永不重新拉起。
+  # 匹配用"完整路径 or 任意路径下的同名脚本"：模块目录经符号链接/相对路径到达时，
+  # 严格全路径匹配会假死（宁可宽松一点，也不能把活着的守护判成不在）。
+  _pid="${1:-}"
+  case "$_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_pid" -ge 1 ] || return 1
+  _cl="$(tr '\0' '\n' 2>/dev/null < "/proc/$_pid/cmdline")"
+  case "$_cl" in
+    *"$LIFE_WATCHDOG"*) return 0 ;;
+    *"/watchdog.sh"*)   return 0 ;;
+  esac
   return 1
 }
 life_cgroup_escape() {
@@ -83,6 +131,56 @@ life_cgroup_escape() {
     echo "$_pid" > "$_r/cgroup.procs" 2>/dev/null && return 0
   done
   return 1
+}
+life_oom_protect() {
+  # 显式设定 OOM 优先级（第二个参数，-1000 = 内存压力下不可被杀）。
+  #
+  # 为什么必须**显式**：真实值是**继承**来的，取决于谁启动了它。2026-09-29 真机实测：
+  # 引擎/dnsfwd/守护三者都是 -1000（从 init/adbd 继承），而这不是任何人的选择 ——
+  # 后果是内存压力下内核杀不动模块进程，只能去杀系统里其他可杀进程（用户报告：
+  # "模块内存涨到 100+MB，然后系统的进程都挂掉了"）。策略必须是声明出来的：
+  #   · 守护 = -1000（唯一自愈者，它被杀 = 整机失去自愈能力）
+  #   · 其余进程的取值由调用方决定，不在这里替它做主
+  _pid="${1:-}"; _adj="${2:-}"
+  case "$_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_pid" -ge 1 ] || return 1
+  _n="${_adj#-}"
+  case "$_n" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_n" -le 1000 ] || return 1
+  [ -w "/proc/$_pid/oom_score_adj" ] || return 1
+  echo "$_adj" > "/proc/$_pid/oom_score_adj" 2>/dev/null || return 1
+  return 0
+}
+life_rss_kb() {
+  # /proc/<pid>/status 的 VmRSS（kB）；读不到就失败且不输出 —— 不冒充 0
+  # （与"读失败不冒充 0"同一条纪律，见 Phase 0.2）
+  _pid="${1:-}"
+  case "$_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_pid" -ge 1 ] || return 1
+  _r="$(awk '/^VmRSS:/{print $2}' "/proc/$_pid/status" 2>/dev/null)"
+  case "$_r" in ''|*[!0-9]*) return 1 ;; esac
+  echo "$_r"
+}
+# 内存证据策略（唯一所有者）：阈值与两条节奏都只在这里声明，守护只调用 life_rss_log_due
+# **单位是秒，不是轮次**：轮次会随 poll 间隔变（5s→60s 时"每 12 轮"会从 60 秒悄悄变成
+# 12 分钟），把意图静默改掉 —— 这正是本仓库最忌讳的那类 bug，所以口径钉死在秒。
+LIFE_RSS_WARN_KB=102400      # 100MB —— 用户报障的量级（面板告警线是 200/300MB）
+LIFE_RSS_WARN_GAP=720        # 超阈值时，两行之间至少隔 12 分钟
+LIFE_RSS_BASE_GAP=3600       # 基线：每 1 小时无条件记一行
+life_rss_log_due() {
+  # "这一轮该不该记内存" —— 纯判定，方便离线断言（守护的循环本身没法离线跑）。
+  #   $1 = 当前 RSS(kB，可空)  $2 = 已运行秒数  $3 = 上次记录的秒数
+  #   输出 1 = 该记 / 0 = 不必
+  # 为什么除了阈值还要有基线：只记"超 100MB"会漏掉"缓慢爬到 90MB"这种**最需要证据**的形态
+  # （真机那份报障正是"跑一段时间涨到 100+MB"）。基线每小时一行，趋势在任何量级都连得上。
+  _due_r="${1:-}"; _due_t="${2:-}"; _due_last="${3:-0}"
+  case "$_due_r" in ''|*[!0-9]*) echo 0; return 0 ;; esac
+  case "$_due_t" in ''|*[!0-9]*) _due_t=0 ;; esac
+  case "$_due_last" in ''|*[!0-9]*) _due_last=0 ;; esac
+  _due_gap=$((_due_t - _due_last))
+  if [ "$_due_r" -ge "$LIFE_RSS_WARN_KB" ] && [ "$_due_gap" -ge "$LIFE_RSS_WARN_GAP" ]; then echo 1; return 0; fi
+  [ "$_due_gap" -ge "$LIFE_RSS_BASE_GAP" ] && { echo 1; return 0; }
+  echo 0
 }
 life_port53_busy() {
   # 优先 ss（Android netstat 对 UDP 监听展示不可靠），netstat 兜底
@@ -156,7 +254,11 @@ life_load_runtime_env() {
 life_user_stopped() { [ -f "$LIFE_ST_USER_OFF" ]; }
 life_wd_disabled() { [ -f "$LIFE_ST_WD_OFF" ]; }
 life_wd_armed() { [ -f "$LIFE_ST_WD_ARMED" ]; }
-life_wd_alive() { life_pid_alive "$LIFE_ST_WD_PID"; }
+life_wd_alive() {
+  # "活着"必须同时"是我们的守护"：pidfile 里的号会被无关进程复用（见 life_pid_is_watchdog）。
+  # 少了这层，"系统里恰好有个同号进程"会让面板永久误报 up，且永远不再拉起守护。
+  life_pid_alive "$LIFE_ST_WD_PID" && life_pid_is_watchdog "$(life_pid_of "$LIFE_ST_WD_PID")"
+}
 life_wd_hold_active() {
   # 维护窗口用**绝对到期时间**：调用方崩了也不会把守护永久卡死
   [ -f "$LIFE_ST_WD_HOLD" ] || return 1
@@ -180,7 +282,43 @@ life_wd_hold() {
   echo "$(( $(date +%s) + _sec ))" > "$LIFE_ST_WD_HOLD" 2>/dev/null
 }
 life_wd_hold_release() { rm -f "$LIFE_ST_WD_HOLD"; }
-life_wd_request() { printf '%s\n' "${1:-start}" > "$LIFE_ST_WD_REQ" 2>/dev/null; }
+life_wd_request() {
+  printf '%s\n' "${1:-start}" > "$LIFE_ST_WD_REQ" 2>/dev/null
+  life_wd_notify
+}
+life_engine_pid()   { life_pid_of "$LIFE_ST_ENGINE"; }
+life_dns_pid()      { life_pid_of "$LIFE_ST_DNS"; }
+life_watchdog_pid() { life_pid_of "$LIFE_ST_WD_PID"; }
+life_wd_notify() {
+  # 写完请求后**立刻叫醒**守护，不等下一个轮询周期（FIXPLAN Phase 33.12）。
+  # 为什么这不是"可选优化"而是必需：守护间隔放宽到 60s 后，life_restart_engine 的
+  # `wait_for 20 2 life_engine_healthy` 会先超时（守护最多 60s 才看到请求文件）
+  # → 面板/CLI 报"重启失败"，而真相只是"没被叫醒"。
+  # 机制：USR1 —— 真机验证过它能打断被 sleep 阻塞的循环（3 轮实验见 Phase 33.12）。
+  # **安全前提**：pidfile 可能陈旧（pid 被复用），而 USR1 的默认动作是**终止**进程 ——
+  #  所以必须先确认那确实是我们自己的守护（cmdline 指纹），否则会杀掉无辜进程。
+  _nt_p="$(life_pid_of "$LIFE_ST_WD_PID" 2>/dev/null)"
+  case "$_nt_p" in ''|*[!0-9]*) return 1 ;; esac
+  life_pid_is_watchdog "$_nt_p" || return 1
+  kill -USR1 "$_nt_p" 2>/dev/null
+}
+life_exit_reason() {
+  # wait 的返回值 → 人话。**128+N = 被信号 N 杀死**，其余是退出码。
+  # 为什么要有它：这是"引擎为什么又死了"的唯一客观证据来源，而它只有守护在
+  # "引擎是自己的子进程"时拿得到（wait 只能取自己子进程的状态）。纯函数，可离线断言。
+  _er_c="${1:-}"
+  case "$_er_c" in
+    ''|*[!0-9]*) echo "原因未知（不是本守护的子进程）" ;;
+    0)   echo "正常退出" ;;
+    129) echo "被 SIGHUP 杀" ;;
+    130) echo "被 SIGINT 杀" ;;
+    134) echo "SIGABRT（自身中止）" ;;
+    137) echo "被 SIGKILL 杀（kill -9 / 内存回收 / 连坐清理）" ;;
+    139) echo "SIGSEGV（自身段错误）" ;;
+    143) echo "被 SIGTERM 停（优雅停止）" ;;
+    *) if [ "$_er_c" -gt 128 ]; then echo "被信号 $((_er_c - 128)) 杀"; else echo "退出码 $_er_c"; fi ;;
+  esac
+}
 life_wd_take_request() {
   # 取走即删（消费语义）；请求**优先于** hold —— 运维重启必须能立刻生效
   [ -s "$LIFE_ST_WD_REQ" ] || return 0
@@ -213,7 +351,12 @@ life_wd_start() {
   else
     "$LIFE_WATCHDOG" >>"$LIFE_WD_LOG" 2>&1 &
   fi
-  life_cgroup_escape "$!"
+  _wpid=$!
+  life_cgroup_escape "$_wpid"
+  # 守护 OOM 免疫必须**显式**设：真实值是从启动者继承的（2026-09-29 真机实测 adbd/init
+  # 都恰好是 -1000），"碰巧"不能当保障 —— 换个启动路径就可能变成可杀。
+  # 失败不阻塞启动（守护仍在跑），但如实写日志，绝不静默。
+  life_oom_protect "$_wpid" -1000 || life_log "watchdog: oom_score_adj 设置失败（内存压力下守护可能被杀）"
   # setsid 是异步的，pidfile 要下一拍才落盘：等它就位再返回，否则调用方会误判"守护不在"
   # 而退回本地启动 —— 那正好把引擎放回调用者的 cgroup。
   # 轮询语义唯一实现在 lib/wait.sh（30×0.1s ≈ 3s）
@@ -359,7 +502,12 @@ life_stop_dns() {
   done
   rm -f "$LIFE_ST_DNS"
 }
-life_disable_dns() { life_stop_dns; printf 'off\n' > "$LIFE_ST_DNS_OFF"; }
+life_disable_dns() {
+  # 同 life_stop_user：**意图先落盘再停进程**（否则守护的 CHLD 快路径会把刚关掉的 dnsfwd
+  # 又拉起来 —— 用户看到的是"关了又自己开了"）。
+  printf 'off\n' > "$LIFE_ST_DNS_OFF"
+  life_stop_dns
+}
 life_enable_dns() { rm -f "$LIFE_ST_DNS_OFF"; life_ensure_dns; }
 life_reload_dns() {
   # 热重载上游（SIGHUP）：只对"确实在跑的 dnsfwd"发信号（身份校验避免误伤复用 pid）
@@ -378,7 +526,14 @@ life_boot() {
   # 只能在 init/ksud 上下文调用（见 ADR-0004）。
   rm -f "$LIFE_ST_USER_OFF" "$LIFE_ST_WD_OFF"
   : > "$LIFE_ST_WD_ARMED"
-  life_wd_start >/dev/null
+  # **判据绝不丢弃**：2026-09-29 真机事故 —— 开机那次守护没起来，而 `life_wd_start
+  # >/dev/null` 把 start-failed 静默了，日志里一个字都没有，用户只能从面板看到
+  # "未运行"，无从排查（引擎随后任何死因都不会再自愈）。
+  # 失败立刻重试一次：开机期系统繁忙，首次启动可能在"等 pidfile 就位"的 3s 窗口里
+  # 超时（life_wd_start 幂等：已在跑则返回 running，不会起第二个）。
+  _w="$(life_wd_start)"
+  [ "$_w" = "start-failed" ] && { sleep 1; _w="start-failed→$(life_wd_start)"; }
+  life_log "boot: watchdog=$_w"
   echo "booted"
 }
 life_stop_all() {
@@ -395,27 +550,47 @@ life_stop_all() {
 }
 life_stop_user() {
   # 用户显式停服务：记住意图，守护不再复活（这正是"意图有主"的价值）
-  life_stop_all >/dev/null
+  # **顺序不能倒**：意图必须先落盘，再动进程。
+  # 为什么（Phase 33.12 真机 T4 抓到）：守护改成事件驱动后，引擎一死 CHLD 会**毫秒级**
+  # 唤醒它。若先停后写，守护醒来时 service-off 还不存在 → 它会立刻把用户刚停掉的服务复活。
+  # 旧代码（5s 轮询 + 连续两次判死 ≈ 10s 窗口）刚好掩盖了这个竞态 —— 是"变快"把它暴露的。
   printf 'stop\n' > "$LIFE_ST_USER_OFF"
+  life_stop_all >/dev/null
   echo "stopped"
 }
 life_start_user() {
   rm -f "$LIFE_ST_USER_OFF"
   life_ensure_engine
   life_ensure_dns >/dev/null
-  echo "started"
+  # 如实自报（2026-09-29 诊断）：过去无论引擎有没有起来都 echo started，面板于是无条件报
+  # 「✅ 服务已启动」—— 而同文件的 restart-engine 一直会回 engine=up/down。端口被占/二进制损坏时
+  # 用户看到的是"成功"与状态卡"未运行"互相打脸。改成与 restart 同一口径（等一会儿再判）。
+  if wait_for 20 2 life_engine_healthy; then echo "engine=up"; else echo "engine=down"; fi
+}
+life_restart_all() {
+  # 「停了它，就由同一处负责把它起回来」—— stop_all 会**连同 DNS 一起停**，所以这里必须
+  # 也把 DNS 拉回来。为什么要有这个 module（2026-09-29 架构走查 A3）：
+  # 无守护分支过去只 ensure_engine，DNS 静默停摆 —— 而 Android 无 /etc/resolv.conf、
+  # 引擎只认 127.0.0.1:53，DNS 不在就等于**域名解析全挂**；按钮文案写的却是「重启引擎 + DNS」。
+  # 收进一个函数后，两条分支（有守护/无守护）不会再各自漏掉一项。
+  life_stop_all >/dev/null
+  # LIFE_CALLER 只影响日志归属，透传调用方的名字
+  ( LIFE_CALLER="${1:-restart-all}"; export LIFE_CALLER; life_ensure_engine ) >/dev/null
+  ( LIFE_CALLER="${1:-restart-all}"; export LIFE_CALLER; life_ensure_dns ) >/dev/null 2>&1
 }
 life_restart_engine() {
   # 有守护时**委托守护**执行停止+启动：重启后的进程天然落在免疫上下文里；
   # 没守护时才退回本上下文（不理想，但至少能用，并把守护顺手拉回来）。
+  # 注意：守护那条分支自己有 eng_ours/dns_ours 记账与逐条日志，故不套用 life_restart_all
+  # （它在本文件里，不读那些守护态变量）；**但两侧"停就负责起"的语义必须一致** ——
+  # 无守护这一侧走 life_restart_all，DNS 不再被漏掉。
   rm -f "$LIFE_ST_USER_OFF"
   if ! life_wd_alive && life_wd_armed; then life_wd_start >/dev/null; fi
   life_wd_hold 180
   if life_wd_alive; then
     life_wd_request restart
   else
-    life_stop_all >/dev/null
-    ( LIFE_CALLER=restart-engine; export LIFE_CALLER; life_ensure_engine ) >/dev/null
+    life_restart_all restart-engine
   fi
   if wait_for 20 2 life_engine_healthy; then
     life_wd_hold_release

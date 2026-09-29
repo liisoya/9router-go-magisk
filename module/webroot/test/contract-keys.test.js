@@ -6,7 +6,7 @@
  * 界面安静地空着（历史上 `engine_version` 显示"未知"、`factory_key` 恒 0 都是这一类）。
  *
  * 做法：**源码就是契约的单一来源** —— 从 shell 的 emit 模板里抽出键集合，
- * 从 app.js 抽"被消费的键"，断言两者一致（消费的必须被 emit；emit 的要么被消费、
+ * 从面板脚本抽"被消费的键"，断言两者一致（消费的必须被 emit；emit 的要么被消费、
  * 要么登记在"仅供信息/内部"清单里）。不需要额外维护一份手写键表。
  *
  * 运行：node --test module/webroot/test/
@@ -16,11 +16,15 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const { scriptFiles, WEBROOT } = require('./lib/app-harness.js');
 
 const LIB = path.join(__dirname, '..', '..', 'lib');
 const shell = ['ops.sh', 'lifecycle.sh']
   .map(f => fs.readFileSync(path.join(LIB, f), 'utf8')).join('\n');
-const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+// 面板是多文件、清单唯一来源 = index.html 的 <script src>：键消费必须扫**全部**脚本。
+// 按文件名写死会漏掉新增的页面文件 —— 那些页面读的键就不再受契约约束（静默失覆盖）。
+const app = scriptFiles()
+  .map(f => fs.readFileSync(path.join(WEBROOT, f), 'utf8')).join('\n');
 const KP = require('../parsers.js');
 
 // ── shell 侧：只取"对外 payload 的 emit 函数"体里的 key= 记号 ──
@@ -73,7 +77,7 @@ test('shell emit 的键集合：非空且包含三态与版本链（防止 emit 
 test('WebUI 消费的每个键都必须被 shell emit（错拼/漏 emit = 界面静默空白）', () => {
   const missing = [...consumed].filter(k => !emitted.has(k)).sort();
   assert.deepStrictEqual(missing, [],
-    `app.js 读了 shell 没输出的键：${missing.join(', ')}（要么补 emit，要么改 app.js）`);
+    `面板脚本读了 shell 没输出的键：${missing.join(', ')}（要么补 emit，要么改面板脚本）`);
 });
 
 test('shell emit 的每个键要么被 WebUI 消费、要么在 EMIT_ONLY 里有理由', () => {

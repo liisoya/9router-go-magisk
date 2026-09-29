@@ -7,7 +7,8 @@
 #   --parity    对照：需要上游参照树（默认 ../9router，UPSTREAM= 可覆盖）
 #   --all       三档全跑
 # 严格模式（给将来的 CI）：
-#   --require-device / --require-parity   缺前置时判失败，而不是 SKIP
+#   --require-device / --require-parity   缺前置时判失败，而不是 SKIP（**同时选中该档**）
+#   --print-tiers                         只打印将要执行的档位后退出（自检与排查用）
 #
 # 约定（AGENT-CONVENTIONS §5）：缺前置 → 打印 SKIP 摘要并退出 0；断言失败 → 退出 1。
 # 环境变量：
@@ -17,10 +18,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-OFFLINE=0; DEVICE_TIER=0; PARITY_TIER=0; REQ_DEVICE=0; REQ_PARITY=0; PICKED=0
+OFFLINE=0; DEVICE_TIER=0; PARITY_TIER=0; REQ_DEVICE=0; REQ_PARITY=0; PICKED=0; PRINT_TIERS=0
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  # 只打印文件头的注释块（到第一行非注释为止），随头部增删自动跟随。
+  # 之前写死 `2,20p`：一旦头部加一行说明，`set -uo pipefail` 之类的代码就会被当成用法打出来。
+  sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
 for a in "$@"; do
@@ -29,13 +32,29 @@ for a in "$@"; do
     --device)        DEVICE_TIER=1; PICKED=1 ;;
     --parity)        PARITY_TIER=1; PICKED=1 ;;
     --all)           OFFLINE=1; DEVICE_TIER=1; PARITY_TIER=1; PICKED=1 ;;
-    --require-device) REQ_DEVICE=1 ;;
-    --require-parity) REQ_PARITY=1 ;;
+    # 严格模式**必须同时选档**（2026-09-29 架构走查 A1）：只设 REQ_* 时 PICKED 仍为 0，
+    # 下面会退回离线档 → 真机/对照档整块不执行，而 REQ_* 只在被跳过的块里被读 →
+    # 「严格模式」空转：报成功却一条 T*/A*/parity 都没跑（最高级别的假绿）。
+    --require-device) REQ_DEVICE=1; DEVICE_TIER=1; PICKED=1 ;;
+    --require-parity) REQ_PARITY=1; PARITY_TIER=1; PICKED=1 ;;
+    # 只打印将要执行的档位后退出：给 tools/test-check-flags.sh 断言用（也方便人肉确认）。
+    # **刻意不置 PICKED**：它是诊断开关，不是档位选择 —— 置了就会顶掉
+    # 「没有任何档位参数 → 默认 offline」这条规则，`--print-tiers` 单独用时会打印空档位。
+    --print-tiers)   PRINT_TIERS=1 ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "未知参数：$a" >&2; usage >&2; exit 2 ;;
   esac
 done
 [ "$PICKED" = 1 ] || OFFLINE=1
+if [ "$PRINT_TIERS" = 1 ]; then
+  _t=""
+  [ "$OFFLINE" = 1 ] && _t="${_t}offline,"
+  [ "$DEVICE_TIER" = 1 ] && _t="${_t}device,"
+  [ "$PARITY_TIER" = 1 ] && _t="${_t}parity,"
+  echo "tiers=${_t%,}"
+  echo "require-device=$REQ_DEVICE require-parity=$REQ_PARITY"
+  exit 0
+fi
 
 PASS=0; FAIL=0; SKIP=0
 FAILED=(); SKIPPED=()
@@ -94,6 +113,17 @@ if [ "$OFFLINE" = 1 ]; then
     run "JS-UNIT 模块 WebUI 纯函数（node --test，glob 全量）" node --test module/webroot/test/*.test.js
   fi
 
+  # JSTYPES：面板脚本类型闸（tsc --noEmit；**棘轮**：只有顶部写了 `// @ts-check` 的文件才被检查）
+  # 拦的是"名字/属性拼错、参数个数不对、跨文件顶层重名"这类**会整页失效**的错误
+  # （2026-09-27 真机事故：收编常量时漏改一处裸引用 → 面板显示旧快照、点按钮报 TS2304 那种错）。
+  # 用 web/node_modules 里的 tsc（不为它单独装一套依赖）；没有依赖就如实 SKIP。
+  if [ ! -d web/node_modules ]; then
+    skip "JSTYPES" "web/node_modules 不存在（先 bun/npm install）"
+  else
+    run "JSTYPES 面板脚本类型闸（tsc -p module/webroot）" \
+      web/node_modules/.bin/tsc -p module/webroot/tsconfig.json
+  fi
+
   # BUN-UNIT：引擎 Dashboard 纯函数（bun；无 bun 但有 npx 时用 `npx --yes bun` 兜底）
   if have bun; then
     run "BUN-UNIT Dashboard 纯函数（bun test）" bash -c 'cd web && bun test'
@@ -146,6 +176,29 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/test-wait-lib.sh ]; then
       run "WAIT 等就绪/等消失原语（lib/wait.sh）" sh tools/test-wait-lib.sh
     fi
+    # LIFECYCLE：lib/lifecycle.sh 可离线断言的部分（启动判据不丢 / 守护身份校验 / 参数护栏）
+    # 起因：2026-09-29 真机"开机守护没起来且日志无痕"——判据被静默丢弃，只能靠这个门禁兜住
+    if [ -f tools/test-lifecycle-lib.sh ]; then
+      run "LIFECYCLE 生命周期原语离线自证（lifecycle.sh）" sh tools/test-lifecycle-lib.sh
+    fi
+    # CHECKFLAGS：**门禁入口自己**的档位选择与严格模式
+    # 起因：2026-09-29 架构走查 A1 —— `--require-device/--require-parity` 只设 REQ_* 不选档位，
+    # 于是「严格模式」在 PICKED=0 时退回离线档，真机/对照档从不执行却报成功（最高级别假绿）。
+    if [ -f tools/test-check-flags.sh ]; then
+      run "CHECKFLAGS 门禁入口的档位选择与严格模式" sh tools/test-check-flags.sh
+    fi
+    # OPSSTATUS：ops.sh 的单行契约 + 键访问器 get + action.sh 端到端
+    # 起因：2026-09-29 架构走查 A4 —— action.sh 自己拿行锚解析**单行** status，中间键恒空、
+    # 行首键吐整行残余（连 /health 探测都必然失败）。解析收敛到 ops.sh get 后由这组断言钉住。
+    if [ -f tools/test-ops-get.sh ]; then
+      run "OPSSTATUS ops.sh 单行契约与键访问器（含 action.sh 端到端）" sh tools/test-ops-get.sh
+    fi
+    # INSTALLGATE：装包的门禁先于动作（坏包不得先把服务停掉）
+    # 起因：2026-09-29 第二轮诊断 —— cmd_install_module 先 stop_all 再 unzip，坏包只能 echo
+    # install-failed 走人，而引擎与 dnsfwd 已经被停；守护未武装时服务不会自己回来。
+    if [ -f tools/test-install-gate.sh ]; then
+      run "INSTALLGATE 装包门禁先于动作（坏包不得停服务）" sh tools/test-install-gate.sh
+    fi
   fi
 fi
 
@@ -161,10 +214,26 @@ if [ "$DEVICE_TIER" = 1 ]; then
       else skip "真机档" "没有可用设备（DEVICE= 可指定）"; fi
     else
       echo "  · 目标设备：$SERIAL"
+      # **先直推当前源码再跑真机档**（2026-09-29，Phase 33.16）：T* 末尾的 T10 会把设备 lib/
+      # 换成 `$DATA_DIR/last-module.zip`（一个**旧包** —— 那正是它的测试目的：测"装包覆写正在
+      # 运行的 lib/ 会不会自毁"）。副作用是**设备从此跑旧代码**，于是**下一次**真机档就在旧代码上跑。
+      # 实测代价：T4（用户停服意图被尊重）会**假红**，而真相只是"代码已被换回" —— 花了半小时才定位。
+      # 这里两头都补：开跑前直推；跑完再直推一次，让设备回到"当前代码"稳态。
+      if [ -x tools/deploy-device.sh ]; then
+        if bash tools/deploy-device.sh "$SERIAL" >/dev/null 2>&1; then
+          echo "  · 已直推当前源码（确保真机档跑在**当前代码**上，而不是上一次 T10 留下的旧包）"
+        else
+          echo "  · ⚠️ 直推失败：真机档可能跑在设备残留的旧代码上（T4 类断言会假红）"
+        fi
+      fi
       adb -s "$SERIAL" push tools/device/test-lifecycle.sh /data/local/tmp/ >/dev/null 2>&1 || true
       adb -s "$SERIAL" push tools/device/test-dashboard-api.sh /data/local/tmp/ >/dev/null 2>&1 || true
       run "T* 生命周期与安装（test-lifecycle.sh）" adb -s "$SERIAL" shell 'su -c "sh /data/local/tmp/test-lifecycle.sh"'
       run "A* 仪表盘 API（test-dashboard-api.sh）" adb -s "$SERIAL" shell 'su -c "sh /data/local/tmp/test-dashboard-api.sh"'
+      if [ -x tools/deploy-device.sh ]; then
+        bash tools/deploy-device.sh "$SERIAL" >/dev/null 2>&1 \
+          && echo "  · 已恢复开发直推态（T10 会把设备 lib/ 换成包内旧版）"
+      fi
     fi
   fi
 fi
@@ -205,7 +274,7 @@ else
        && ! echo "$CHANGED" | grep -qE '^(docs/TESTING\.md|tools/device/|docs/adr/)'; then
       echo "  ⚠️  改了 module/lib/*.sh，但没有同步文档/门禁（§4：运维动作 → T* 断言 + 台账）"; WARN=1
     fi
-    if echo "$CHANGED" | grep -qE '^(web/src/.*\.(ts|svelte)|module/webroot/(app|bridge|parsers)\.js)$' \
+    if echo "$CHANGED" | grep -qE '^(web/src/.*\.(ts|svelte)|module/webroot/[^/]*\.js)$' \
        && ! echo "$CHANGED" | grep -qE '(\.test\.(ts|js)$|docs/TESTING\.md)'; then
       echo "  ⚠️  改了前端请求形状相关文件，但没有测试改动（§4：请求形状 → 纯函数用例）"; WARN=1
     fi

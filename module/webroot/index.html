@@ -194,7 +194,7 @@
       <button id="btn-accel-clear">清除选中</button>
     </div>
     <div id="accel-list"></div>
-    <div class="hint">对候选节点发真实文件请求计时（本机结果）。默认隐藏清单，测速后显示 Top5 供选择。</div>
+    <div class="hint">对候选节点发真实文件请求计时（本机结果；每批 8 个并发，连接超时 3s）。测速后显示 Top5 并<b>自动选中最快</b>（可点别的节点或「清除选中」改），不可用的节点会带上原因。无需先选节点才能测。</div>
   </div>
 
   <div class="card">
@@ -230,9 +230,16 @@ window.CFG = {
   DATA_DIR: '/data/adb/9router-go'
 };
 </script>
+<!-- 加载顺序 = 唯一清单：test/lib/app-harness.js 与 build.sh verify_zip 都从这几行派生。
+     顺序规则：地址契约(upstream) → 纯函数(parsers) → 桥(bridge) → 通用(core) → 各页 → 引导(boot)。 -->
 <script src="upstream.js"></script>
 <script src="parsers.js"></script>
 <script src="bridge.js"></script>
-<script src="app.js"></script>
+<script src="app-core.js"></script>
+<script src="page-overview.js"></script>
+<script src="page-dns.js"></script>
+<script src="page-consistency.js"></script>
+<script src="page-update.js"></script>
+<script src="app-boot.js"></script>
 </body>
 </html>

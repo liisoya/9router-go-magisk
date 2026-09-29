@@ -316,6 +316,60 @@ else
   info "T12 跳过：包内 etc/engine-version 不存在"
 fi
 
+# ── T15 快路径的前提校正（2026-09-29 架构走查 A2）──
+# 守护用 eng_ours 判断"引擎是不是我亲手起的"来决定快慢路径。该值若陈旧（典型时序：守护起过引擎
+# → 用户「停止服务」让 stop_all 先 kill 再删 pidfile → 判据不成立 → 不清空 → 用户再「启动服务」
+# 起的新引擎不是守护子进程），就会既收不到 CHLD、又因为变量非空而停在 60s 长周期 ——
+# 自愈从秒级退化成最多 60s。这里复刻那条时序，并给一个**能区分的上限**：
+#   修好 → 退回 10s 短周期兜底（两次判死 ≈ 20s，+启动）；没修 → 最多 2×60 = 120s。
+info "T15 复刻：停服 → 启服（新引擎不再是守护子进程）→ 强杀，看自愈是否退化成 60s 长周期"
+"$OPS" stop-user >/dev/null 2>&1
+"$OPS" start-user >/dev/null 2>&1
+sleep 3
+P15="$(engpid)"
+if [ -z "$P15" ] || ! kill -0 "$P15" 2>/dev/null; then
+  no "T15 前置失败：停/启之后引擎不在（pid=$P15）"
+else
+  kill -9 "$P15" 2>/dev/null
+  S15="$(date +%s)"
+  if wait_for 30 2 livepid; then
+    ok "T15 停/启之后仍能自愈（$(( $(date +%s) - S15 ))s ≤30s；若 >60s 说明退回了长周期）"
+  else
+    no "T15 自愈超时（>30s）—— 快路径前提未被校正（eng_ours 陈旧 → 停在 60s 长周期）"
+  fi
+fi
+
+# ── T14 守护"必然在跑"的三要素（2026-09-29 真机事故：开机那次守护没起来，且日志无痕）──
+# 为什么是这三条：守护是**唯一的自愈者** —— 它不在，引擎任何死因都不会再被拉起（用户看到
+# "要手动开"）。而它的失败方式恰好都很隐蔽：① 保护是"继承"来的（换个启动路径就变可杀）
+# ② pidfile 的号会被无关进程复用（"活着"≠"是我们的守护"）③ 失败了不留任何日志。
+# 放在 T10 之前：T10 会替换设备上的 lib/（破坏性），必须在它之前跑。
+WDPID="$(cat "$DATA_DIR/watchdog.pid" 2>/dev/null | tr -d ' \n')"
+case "$WDPID" in ''|*[!0-9]*) WDPID="" ;; esac
+if [ -n "$WDPID" ] && kill -0 "$WDPID" 2>/dev/null; then
+  ADJ14="$(cat "/proc/$WDPID/oom_score_adj" 2>/dev/null)"
+  [ "$ADJ14" = "-1000" ] && ok "T14a 守护 oom_score_adj=-1000（内存压力下不会被杀）" \
+                         || no "T14a 守护 oom_score_adj=[$ADJ14]（期望 -1000：被杀即整机失去自愈）"
+  CMD14="$(tr '\0' ' ' < "/proc/$WDPID/cmdline" 2>/dev/null)"
+  case "$CMD14" in
+    *watchdog.sh*) ok "T14b 身份可按 cmdline 认出（pid=$WDPID）" ;;
+    *) no "T14b pidfile 的 pid 不是守护（cmdline=$CMD14）" ;;
+  esac
+  [ "$("$OPS" panel | tr ' ' '\n' | grep '^watchdog=')" = "watchdog=up" ] \
+    && ok "T14c 面板 watchdog=up（身份校验没误判）" \
+    || no "T14c 面板没报 watchdog=up（身份校验把活着的守护判死了？）"
+else
+  no "T14a/b/c 守护不在跑（pidfile=[$WDPID]）—— 整机当前没有自愈能力"
+fi
+grep -q 'watchdog: 引导中' "$DATA_DIR/watchdog.log" 2>/dev/null \
+  && ok "T14d 守护留下了引导证据行（用它区分「没被执行」与「在 source 里就死」）" \
+  || no "T14d 守护日志缺引导证据行（正在跑的是旧代码？）"
+if grep -q 'boot: watchdog=' "$DATA_DIR/9router.log" 2>/dev/null; then
+  ok "T14e 开机判据已入日志：$(grep 'boot: watchdog=' "$DATA_DIR/9router.log" | tail -n 1 | sed 's/.*\] //')"
+else
+  info "T14e 跳过：本次运行还没重启过（boot: watchdog= 只在开机路径写）"
+fi
+
 # ── T10 整包安装不得自毁：install-module 必须能跑完（执行中被覆写的回归）──
 # 2026-09-26 实测：直接 `unzip -oq` 到 $MODDIR 会覆写正在执行的 lib/ops.sh（同 inode）→
 # mksh 报 "ops.sh[193]: syntax error"、安装中途夭折。现改为"暂存 + mv 换 inode"。
@@ -335,6 +389,10 @@ if [ -f "$ZIP" ]; then
   esac
   [ "$("$OPS" panel | tr ' ' '\n' | grep '^engine=')" = "engine=up" ] && ok "T10b 安装后引擎 up" || no "T10b 安装后引擎不在跑"
   rm -f /data/local/tmp/9r-gate.zip
+  # **必须说清副作用**：本步把设备 lib/ 换成了包内（发布版）那份 —— 开发直推
+  # （tools/deploy-device.sh）带来的新代码从此失效，下次开机跑的就是包内那份。
+  # 不说清的话，下一轮 T14 会在**旧代码**上跑，把"新代码的问题"和"代码已被换回"混成一团。
+  info "⚠️ 设备 lib/ 已被换成包内版本（开发直推态已失效）；回到开发态请重跑 tools/deploy-device.sh"
 else
   info "T10 跳过：$ZIP 不存在（先跑一次 install-module 生成）"
 fi

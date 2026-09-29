@@ -370,3 +370,27 @@ make dev
 rtk git status
 rtk git diff
 ```
+
+---
+
+## 9. 模块 WebUI（`module/webroot`）陷阱清单 —— 2026-09-28 事故沉淀，改代码前必读
+
+这一层的三起真机事故（孤儿扫描整体失联、快照永远失败、写操作假成功）全部是**同族结构问题**，
+正式不变量在 `AGENT-CONVENTIONS.md §2.17–2.19`，逐事故证据链在 `docs/FIXPLAN.md Phase 30–32`。
+改这层代码前先核对：
+
+1. **门禁分阶段求值用 `planGate(plan, phase, fact)`，不要用 `planSteps` 传整计划** —— planSteps
+   的"缺 fact = 拒绝"语义下，分阶段执行的调用方传整计划必然被下一道门禁假拦（三次事故，
+   其中 DNS 优选与引擎更新曾整体失联且无测试覆盖）。
+2. **桥操作必须自报成败标记**（`write-ok` / `append-ok` / `__READ_OK__` / `snap-ok` / `__SQL_OK__` /
+   `dl-ok`）：promise 降级形态下 stderr 被丢弃、退出码恒 0，`!r.err` 会把失败判成成功。
+   标记由桥剥离；调用方的"查无 / 齐全 / 未发现"类结论必须以 `r.ok === true` 为前提。
+3. **SQL 只写在 `bridge.js _cmds` 构造器里**，app.js 禁止内联；**SQL 内禁止翻倍转义**
+   （`.replace(/'/g,"''")` → sqlite3 Parse error；shell 引号归 `shq`，落盘归 heredoc）。
+4. **测试断言别用裸 `"''"` 子串**判翻倍引号 —— `shq` 的 `'\'`'` 转义天然含相邻两个单引号；
+   用事故特征标记（如 `''customModels''`、`LIKE ''`）。
+5. **读失败 ≠ 空结果**：任何"未发现 / 凭据齐全 / 直连"类显示，读失败时必须显示异常而非假阴性。
+6. **测试桩要与命令形状同步**：`ops()` 逐 token 加引号、桥命令自带标记后，桩的 `includes()`
+   匹配要跟着改（共享桩具在 `test/lib/app-harness.js`，别再复制）。
+7. **新 bug 修复必须带"修复前红"的回归测试**（§5.0 硬规则）+ `docs/FIXPLAN.md` 登记；流程级
+   行为（点按钮后的完整链路）用 `gate-flows.test.js` 模式驱动真实 app.js。

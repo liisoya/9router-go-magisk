@@ -115,40 +115,51 @@ test('取不到摘要时 checksumGate 必须拒绝（fail-closed 联动）', () 
 });
 
 // ── 回潮扫描：装配层不许再手写任何上游地址（地址契约只有一个所有者）──
-const APP = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
-const IDX = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-test('app.js 不得再手写 release 地址 / 仓库字面量 / 清单 URL', () => {
+// 要扫**全部面板脚本**（清单唯一来源 = index.html 的 <script src>）：只按文件名扫一个
+// 文件时，拆成多文件后新增的页面就不在覆盖范围内（门禁静默失去覆盖）。
+// upstream.js 是地址的所有者，排除它自己。
+const { scriptFiles, WEBROOT } = require('./lib/app-harness.js');
+const IDX = fs.readFileSync(path.join(WEBROOT, 'index.html'), 'utf8');
+const APP = scriptFiles()
+  .filter(f => f !== 'upstream.js')
+  .map(f => fs.readFileSync(path.join(WEBROOT, f), 'utf8')).join('\n');
+test('面板脚本不得再手写 release 地址 / 仓库字面量 / 清单 URL', () => {
   assert.ok(!APP.includes('releases/download/'),
-    'app.js 又手写 release 地址了 —— 请走 KU.engineAssetUrl / engineSumsUrl');
-  assert.ok(!/github\.com\/luqman-v1/.test(APP), 'app.js 里出现引擎仓库字面量（应为 KU.ENGINE_REPO）');
-  assert.ok(!/raw\.githubusercontent\.com/.test(APP), 'app.js 里出现清单 URL 字面量（应为 KU.*_URL）');
-  assert.ok(/KU\./.test(APP), 'app.js 没有使用 KUpstream（地址契约的所有者）');
+    '又手写 release 地址了 —— 请走 KU.engineAssetUrl / engineSumsUrl');
+  assert.ok(!/github\.com\/luqman-v1/.test(APP), '出现引擎仓库字面量（应为 KU.ENGINE_REPO）');
+  assert.ok(!/raw\.githubusercontent\.com/.test(APP), '出现清单 URL 字面量（应为 KU.*_URL）');
+  assert.ok(/KU\./.test(APP), '没有使用 KUpstream（地址契约的所有者）');
 });
-// ── 回潮扫描之二：upstream.js **拥有**的名字，app.js 里必须带 `KU.` 前缀 ──
+// ── 回潮扫描之二：upstream.js **拥有**的名字，面板脚本里必须带 `KU.` 前缀 ──
 // 2026-09-27 真机事故：把常量收编进 upstream.js 时漏改了 renderPanel 里的一处裸引用
 // （`st.mod_url || DEFAULT_MOD_UPDATE_URL`），面板每次刷新都抛 ReferenceError —— 纯函数
 // 用例全绿也拦不住，因为它们不跑装配层。名字清单**从 upstream.js 的返回对象里现取**，
 // 不手写：手写的清单自己就会漂，那正是这个仓库反复吃过亏的地方。
-const UPSTREAM_SRC = fs.readFileSync(path.join(__dirname, '..', 'upstream.js'), 'utf8');
+const UPSTREAM_SRC = fs.readFileSync(path.join(WEBROOT, 'upstream.js'), 'utf8');
 function ownedNames(src) {
   const m = src.match(/return\s*\{([\s\S]*?)\};/);
   assert.ok(m, 'upstream.js 里找不到 return 对象（改名了？本门禁需要同步）');
   return m[1].split(/[,\s]+/).map(s => s.trim()).filter(s => /^[A-Za-z_$][\w$]*$/.test(s));
 }
-test('app.js 引用 upstream.js 拥有的名字时必须带 KU. 前缀（不许裸引用）', () => {
+test('面板脚本引用 upstream.js 拥有的名字时必须带 KU. 前缀（不许裸引用）', () => {
   const names = ownedNames(UPSTREAM_SRC);
   assert.ok(names.length >= 10, `只从 upstream.js 解析出 ${names.length} 个名字，解析规则该更新了`);
   // 注释里写名字是正常的（解释为什么要带前缀），先剥掉注释再扫
   const code = APP.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
   const bare = names.filter(n => new RegExp(`(?<![.\\w$])${n}(?![\\w$])`).test(code));
   assert.deepStrictEqual(bare, [],
-    `app.js 裸引用了这些名字（应写成 KU.<名字>）：${bare.join(', ')}`);
+    `面板脚本裸引用了这些名字（应写成 KU.<名字>）：${bare.join(', ')}`);
 });
 
-test('index.html 必须加载 upstream.js，且在 parsers.js / app.js 之前', () => {
+// 地址契约必须先就位：upstream.js 必须是清单里**第一个**脚本。
+// （原先只断言"在 parsers.js / app.js 之前"，写死了两个文件名 —— 清单变了它就失效。）
+test('index.html 必须加载 upstream.js，且在清单里其余脚本之前', () => {
   const iUp = IDX.indexOf('upstream.js');
-  const iApp = IDX.indexOf('app.js');
   assert.ok(iUp !== -1, 'index.html 没加载 upstream.js → window.KUpstream 为 undefined');
-  assert.ok(iUp < iApp, 'upstream.js 必须在 app.js 之前加载');
-  assert.ok(iUp < IDX.indexOf('parsers.js'), 'upstream.js 与解析层无依赖，放最前即可');
+  for (const f of scriptFiles()) {
+    if (f === 'upstream.js') continue;
+    const i = IDX.indexOf(f);
+    assert.ok(i !== -1, `index.html 缺 ${f}（与清单不一致）`);
+    assert.ok(iUp < i, `upstream.js 必须在 ${f} 之前加载（地址契约要先就位）`);
+  }
 });

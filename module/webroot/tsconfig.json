@@ -1,0 +1,37 @@
+{
+  // 面板脚本的类型闸（门禁档位 JSTYPES；接在 tools/check.sh --offline）
+  //
+  // ── 棘轮语义（两层）──
+  // 第一层：checkJs=false —— **只有在本文件顶部写了 `// @ts-check` 的脚本才被检查**。
+  //         因此"点亮哪些文件"是显式的、可逐个推进的；未点亮的历史文件不会让闸位变红。
+  // 第二层：严格度分档。**当前档 = "零注释成本也能拦到目标 bug"**：
+  //         allowJs 让 TS 读 JS 并做结构推断，于是下面这些**不需要任何 JSDoc** 就能拦：
+  //           · TS2304 找不到名字（2026-09-27 真机事故：收编常量时漏改一处裸引用 → 整页失效）
+  //           · TS2554 参数个数不对 / TS2339·TS2551 属性拼错（对象字面量推断出的类型）
+  //           · TS2300·TS2451 **跨文件顶层重名**（经典脚本共享一个词法作用域，重名 = 整页 SyntaxError）
+  //         为什么不直接上 strict：先量过 —— 仅 parsers.js 在 strict 下就有 41 条，**全是**
+  //         `noImplicitAny`（缺 JSDoc 参数标注），没有一条是真 bug。一次补几百处标注会把
+  //         "拦 bug"变成"补注释"，还会把一次发版搅成大 diff。下一档（`noImplicitAny` →
+  //         `strictNullChecks` → `strict`）在**逐文件补齐 JSDoc 之后**再打开，那时才付那份钱。
+  //
+  // 为什么用 JS+JSDoc 而不是迁到 TS：面板必须保持"零构建、任何 WebView 直接 <script src>
+  // 就能跑"（ADR-0008）。类型闸买的是"静态拦一类错误"，不需要动产物形态。
+  //
+  // 这些文件是**经典脚本**（无 import/export）—— TS 按全局脚本处理：跨文件共享顶层词法
+  // 作用域，与浏览器一致。
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM"],
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "noImplicitThis": true,
+    "skipLibCheck": true,
+    "types": [],
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["*.js", "types/*.d.ts"]
+}
