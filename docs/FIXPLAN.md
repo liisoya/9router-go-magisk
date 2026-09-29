@@ -1018,8 +1018,25 @@
 - **门禁**：`bun test`（Dashboard 纯函数）**100/100**（新增 2 条，其中嵌套 envelope 一条修复前红）；
   面板 `node --test` **128/128**；面板 JSTYPES **0 错**；`tsc -b`（Dashboard）**0 错**；
   LIFECYCLE **55/0（+1 跳过）**。
-- [ ] **待定**：本轮改了 `web/src`（Dashboard 源码）→ 要真机生效需 `bun run build` 重建 `web/dist`
-  并重打引擎二进制与模块 zip（即 **v1.9.5-r2**）。是否现在发，由用户决定。
+- [x] **r1 就地替换（用户决策：不发 r2，"这问题本就该在 r1 解决"）✅ 2026-09-29**
+  - 顺序（每步都有理由）：提交修正 → `FORCE=1 bash build.sh` → `gh release upload --clobber`（同名 →
+    URL 不变）→ tag 移到修正提交 → **再 `gh release edit --draft=false --tag v1.9.5-r1`**。
+  - ⚠️ **必须 `FORCE=1`**：`build.sh` 步骤 1 在 `web/dist/index.html` 存在时会**跳过前端构建** ——
+    否则就是"改了 `web/src` 却发了旧包"，正是 build.sh 里那段防的静默回归。
+  - ⚠️ **改动 `web/src` 后，入库的 `module/bin/9router-go` 也要提交**（build.sh 步骤 5 会重编它，
+    而它是入库文件）→ 否则出现"tag 里的二进制是旧的、release 资产是新的"不一致。
+  - 🔴 **踩到的坑①：删掉远端 tag 会把 Release 转成草稿**（URL 变 `untagged-…`、**公开下载 404**），
+    而 `gh release view`（走 API）**看起来一切正常** —— 只有 `curl` 走**公开 URL** 才暴露。
+    → **纪律**：移动/删除 tag 后必须复核 `isDraft:false`，并用公开 URL 下载比对 sha256。
+  - 🟠 **坑②：本机 `ALL_PROXY=socks5h://127.0.0.1:7890` 会截断 15MB 资产**（实测收到 9 字节
+    "Not Found" 与一次 13.7MB 半包）→ 取发布资产改用 `192.168.10.7:7890`（手机上的 mihomo）即完整。
+  - **证据**：新包 sha256 `c64d6f87…`（旧 `027bbbc8…`，15168839 vs 15168697 字节）；`Mantep210` 在
+    `web/dist`、引擎二进制、包内引擎里**均为 0 次**（旧包是 1）→ 证明引擎嵌入了新前端；公开 URL
+    下载回来逐字节相同 + `unzip -t` 无错；真机用 `ops.sh install-module` 装该包 → `engine=up`（4.21s）、
+    `module_version=v1.9.5-r1` / `versioncode=109050` / `engine_version=1.9.5`、`engine/dns/watchdog=up`、
+    `health=200`（端口 20128）。
+  - **已知副作用（用户确认接受）**：`versionCode` 保持 109050 → 更新器不会对**已装 r1** 的设备提示更新
+    （比的是 versionCode，不是字节）；新装/手动重装不受影响。
 
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
