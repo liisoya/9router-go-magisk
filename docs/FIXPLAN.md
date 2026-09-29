@@ -952,6 +952,28 @@
   变异代码下仍 pass）。修 I6/I3 时因此改用源码级断言。② 想给 I5 做真回归需要"并发扫描"的时序桩。
   两条都属于"架构挡住了锁死这个 bug"，是下一轮值得补的测试基建。
 
+## Phase 35 · 上游同步 v1.9.4 → v1.9.5 + 发布 v1.9.5-r1 ✅ 2026-09-29
+
+> 按 `AGENT-CONVENTIONS §7` 八步走的记录（以本地 diff 为准，不读 release notes）。
+
+- **规模**：131 文件 / +10259 −1161。主要内容：新增 `/v1/responses` 翻译器（Chat↔Responses 双向 +
+  `reasoning_details`）、Dashboard 更新弹窗四个缺陷（#27/#31）与备份流修复（#32/#34）、配额读取节流（#30）、
+  `/v1/models/<model>` 与列表一致（#28）、mimo `reasoning_effort` 按模型级别降级、全仓 gofmt。
+- **补丁裁决（§7.2）**：`tools/patches/media-web-fetch-route.patch` **保留**（`/web/fetch` 两路由 +
+  `/api/health` + SSO 501 仍在本仓、上游未吸收）。
+- **冲突（§7.3，仅 3 处）**：`README.md` → 按 §10.2 取我们的；`CHANGELOG.md` → 取我们的（含模块段）
+  并把上游 `[v1.9.5]` 小节插回；`web/src/components/ProfileSettingsView.svelte` → 取我们的
+  （密码弹层备份交互）——**上游本版也改了这个文件（备份流四缺陷 #32/#34）→ 待复核是否适用于我们的交互**。
+- **门禁（§7.4–7.6）**：`gen-schema --check` ✅ 一致；`check-parity` ✅ 无新增缺口（基线 131 条）；
+  离线档 **16/16**（一次运行出现"失败 1"，随后两次复跑均 0 失败 → 记为**抖动**，待观察）；
+  `build.sh` 七步绿；真机用**我们自己的入口** `ops.sh install-module` 装包成功：
+  `module_version=v1.9.5-r1 / versioncode=109050 / engine_version=1.9.5 / engine=up dns=up watchdog=up / health=200`，
+  并看到"每小时内存基线"在真机线上生效（`引擎内存 26148kB … 已运行 7240s`）。
+- **版本物料**：`module/module.prop` v1.9.5-r1 / 109050；`update.json` 同步；`VERSION` 随上游为 `1.9.5`。
+- [ ] **待办**：推送（本环境无凭据，见交接）+ 打 `v1.9.5-r1` tag 与 GitHub Release（附
+  `dist/9router-go-1.9.5-r1-magisk.zip`；注意 `.github/workflows/release.yml` 是**上游继承**的引擎发布流，
+  触发 `v*` 只产出引擎二进制，模块 zip 需手工附加）。
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |

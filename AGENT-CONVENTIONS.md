@@ -243,6 +243,7 @@
 | `internal/handlers/dashboard/settings_test.go` | 回插 `TestHandleExportDatabase_AcceptsPasswordHeader`（锁 `x-9r-password` 契约） | 合并后确认该测试仍在 |
 | `web/src/api/client.ts`、`App.svelte`、`components/{LoginView,EndpointView,ProfileSettingsView,analytics/AnalyticsView}.svelte`、`lib/{session,db-backup}.ts`（含 `.test.ts`） | 登录态收敛到 `lib/session.ts`（防回潮门禁扫全树）、备份导出/导入的密码弹层与请求形状（Phase 20） | 保留我们的交互，其余取上游；合并后必须跑 `session.test.ts` 的防回潮扫描（**v1.9.3 与 v1.9.4 复核：均未回潮 → 保留**） |
 | `COMPARISON.md` | §0 端点 parity 巡检节（机器可验） | 与上游 statuses 图例并存，不删除任何一侧 |
+| `web/src/components/ProfileSettingsView.svelte` | 密码弹层备份/恢复交互（`dbAuth`/`lib/db-backup`；与上游同区不同实现） | **2026-09-29 新增待复核**：上游 v1.9.5 也改了本文件（备份流四缺陷 #32/#34）→ 合并时取了我们的，需复核那些上游修复是否适用于我们的交互（`bun test web/src` 与 `TSC` 是当下的安全网） |
 | `README.md` | **换成了模块自己的英文首页**（2026-09-27），同目录另有 `README.zh-CN.md` 中文版。上游原文**不在本仓留副本**（会过期的快照不如没有），顶部语言切换行直接链上游仓库的 README | 合并时**保留我们的 `README.md`**：上游 README 的改动不再自动进来，正文里也没有上游内容需要对齐；想看上游原文点切换行 |
 
 > 每次合并后，**先看本表，再跑 `tools/check.sh --all`**。新增对共享文件的改动必须追加到本表。
