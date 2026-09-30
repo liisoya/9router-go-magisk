@@ -21,12 +21,22 @@ const BUILTIN_ACCEL = [
   'https://ghfile.geekertao.top/', 'https://github-proxy.lixxing.top/', 'https://gh-proxy.com/'
 ];
 // ═══════════ 更新 ═══════════
+// 读"当前选中的加速节点"的**唯一入口**（2026-09-30 架构扫描 C4）。
+// 为什么要有它：这段知识（从哪个文件读；空串 = 直连；**读失败 r.ok===false 不等于"没选"**）
+// 原先在 5 个调用点各写一遍，I6 正是漏掉最后一条 —— 清掉选中后无参重渲染，把正常态渲染成
+// 「未知（读取失败）」。调用方现在只问"选中的是谁"，不再各自解释 ok 与空串。
+// 返回判别式结果：ok=false 只能来自**读失败**（与"没选"严格区分）。
+async function readAccelSel() {
+  const r = await KB.readFile(ACCEL_SEL);
+  if (r.ok === false) return { ok: false, sel: '' };
+  return { ok: true, sel: r.out.trim() };
+}
 async function renderAccelCur(sel) {
   if (sel === undefined) {
-    const r = await KB.readFile(ACCEL_SEL);
+    const r = await readAccelSel();
     // 读失败不得渲染成"直连 GitHub"（那是把故障说成配置）
-    if (r.ok === false) { document.getElementById('accel-cur').textContent = '未知（读取失败）'; return; }
-    sel = r.out.trim();
+    if (!r.ok) { document.getElementById('accel-cur').textContent = '未知（读取失败）'; return; }
+    sel = r.sel;
   }
   document.getElementById('accel-cur').textContent = sel || '直连 GitHub';
   return sel;
@@ -38,7 +48,7 @@ async function speedTest() {
     const target = KU.ENGINE_VERSION_FILE_URL;
     const results = [], failures = [];
     const box = document.getElementById('accel-list');
-    const cur = (await KB.readFile(ACCEL_SEL)).out.trim();
+    const cur = (await readAccelSel()).sel;   // 这里只要"当前值"用于比较与文案，渲染状态在 renderAccelCur
     const t0 = Date.now();
     const elapsed = () => Math.round((Date.now() - t0) / 1000);
     // 分批并发（A5）：并发放在 **shell 内部**（见 bridge.curlTimingBatch），批间更新进度。
@@ -105,7 +115,7 @@ async function engCheck() {
   return withBusy($id('btn-eng-check'), '检查中…', async () => {
     const out = $id('eng-out');
     out.style.display = 'block'; out.textContent = '检查中…';
-    const p = (await KB.readFile(ACCEL_SEL)).out.trim();
+    const p = (await readAccelSel()).sel;   // 只用于给 GitHub 地址拼加速前缀（读失败=按直连处理，与旧行为一致）
     const r = await KB.fetch(KU.withAccel(KU.ENGINE_VERSION_URL, p), 15);
     let latest = '';
     try { latest = JSON.parse(r.out).latestVersion || ''; } catch {}
@@ -122,7 +132,7 @@ async function engCheck() {
 async function engUpdate() {
   const ver = state.engLatest; if (!ver) return;
   const out = document.getElementById('eng-out');
-  const p = (await KB.readFile(ACCEL_SEL)).out.trim();
+  const p = (await readAccelSel()).sel;   // 只用于给 GitHub 地址拼加速前缀（读失败=按直连处理，与旧行为一致）
   // 地址由 KUpstream 出（tag 形态的唯一所有者），并把**最终下载地址**显示出来：
   // 这次定位最痛的一点就是面板只说"下载失败"、不说"下的是哪个地址"（2026-09-27）
   const dlUrl = KU.withAccel(KU.engineAssetUrl(ver), p);
@@ -166,7 +176,7 @@ async function modCheck() {
     const out = $id('mod-out');
     out.style.display = 'block'; out.textContent = '检查中…';
     const url = state.modUrl || KU.DEFAULT_MOD_UPDATE_URL;
-    const p = (await KB.readFile(ACCEL_SEL)).out.trim();
+    const p = (await readAccelSel()).sel;   // 只用于给 GitHub 地址拼加速前缀（读失败=按直连处理，与旧行为一致）
     const target = KU.withAccelIfGithub(url, p);
     const r = await KB.fetch(target, 20);
     let j; try { j = JSON.parse(r.out); } catch { out.textContent = '❌ 更新源不可达或格式错误\n' + r.out.slice(0, 200); return; }
@@ -183,7 +193,7 @@ async function modCheck() {
 async function modUpdate() {
   const j = state.modUpdate; if (!j) return;
   const out = document.getElementById('mod-out');
-  const p = (await KB.readFile(ACCEL_SEL)).out.trim();
+  const p = (await readAccelSel()).sel;   // 只用于给 GitHub 地址拼加速前缀（读失败=按直连处理，与旧行为一致）
   const dlUrl = KU.withAccelIfGithub(j.zipUrl, p);
   out.textContent = '下载模块 zip…';
   if (!await KB.download(dlUrl, '/data/local/tmp/mod-update.zip', 600)) { out.textContent = '❌ 下载失败'; return; }

@@ -1,0 +1,26 @@
+# 「内部节点 ID 形状」的共享样本夹具（跨语言接缝门禁，2026-09-30 架构扫描 C3）
+#
+# 为什么有它：面板（module/webroot/parsers.js 的 UUID_ALIAS）与引擎（internal/db 的
+# IsInternalNodeAlias）必须对**同一个形状**给出一致判断 —— 任一侧改形状都不会报错：
+# 面板会静默不再识别孤儿，或引擎把内部 ID 发布给用户。此前只有一句注释兜底。
+#
+# 格式：`<样本> <yes|no>`（# 开头与空行忽略）。
+# 两侧测试都读这个文件：internal/db/heal_test.go 与 module/webroot/test/parsers.test.js。
+# 任一侧漂移 → 一侧红。加样本只改这里一处。
+openai-compatible-chat-63ab874d-5ec5-48b5-9098-f3307545300f yes
+openai-compatible-chat-deadbeef-0000-4000-8000-000000000001 yes
+openai-compatible-chat-B5B35395-3025-4810-90CD-5473475261B8 yes
+openai-compatible-chat-069FDCC2-F29B-41DA-B3B9-11F4702667AC yes
+openrouter no
+oc no
+qd no
+deepseek no
+openai-compatible-chat- no
+openai-compatible-chat-not-a-uuid no
+openai-compatible-chat-63ab874d-5ec5-48b5-9098 no
+openai-compatible-chat-63ab874d-5ec5-48b5-9098-f3307545300f-extra no
+openai-compatible-chat-x3ab874d-5ec5-48b5-9098-f3307545300f no
+anthropic-compatible-chat-63ab874d-5ec5-48b5-9098-f3307545300f no
+63ab874d-5ec5-48b5-9098-f3307545300f no
+openai-compatible-chat-63ab874d-5ec5-48b5-9098-f3307545300f/model no
+ openai-compatible-chat-63ab874d-5ec5-48b5-9098-f3307545300f no

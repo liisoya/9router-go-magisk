@@ -166,6 +166,28 @@ test('存活集合：连接 provider 必须计入（扫描行里不含 |）', ()
     '连接 provider 没进存活集合 → 该 provider 的自定义模型会被误删');
 });
 
+// ── 跨语言接缝门禁：形状判定的样本只应有一份（2026-09-30 架构扫描 C3）────────────────
+// 面板这里判"是不是内部节点 ID"，引擎（internal/db.IsInternalNodeAlias）用同一形状做自愈与
+// 列表发布。任一侧改形状都不会报错：面板静默不再识别孤儿，或引擎把内部 ID 发布给用户。
+// 两侧因此读**同一份夹具**，各自断言逐样本一致 —— 一侧漂移，两侧之一必红。
+test('形状判定：与引擎共用一份样本夹具（任一侧漂移必红）', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const fixture = path.join(__dirname, '..', '..', '..', 'tools', 'fixtures', 'internal-node-alias-samples.txt');
+  const lines = fs.readFileSync(fixture, 'utf8').split('\n')
+    .map(l => l.replace(/\r$/, ''))
+    .filter(l => l.trim() !== '' && !l.trim().startsWith('#'));
+  assert.ok(lines.length >= 10, `样本太少（${lines.length} 行）—— 接缝门禁形同虚设`);
+  const bad = [];
+  for (const line of lines) {
+    const i = line.lastIndexOf(' ');
+    const sample = line.slice(0, i), want = line.slice(i + 1).trim() === 'yes';
+    if (KP.UUID_ALIAS.test(sample) !== want) bad.push(`${JSON.stringify(sample)} 期望 ${want}`);
+  }
+  assert.deepStrictEqual(bad, [],
+    `面板的 UUID_ALIAS 与引擎的 IsInternalNodeAlias 判定不一致（改形状时两侧要一起改）：${bad.join('; ')}`);
+});
+
 // ── 引擎更新装前门禁（2026-09-26 事故 fixture）──
 // 事故现场：加速节点对 release 资产返回 404，正文 "Not Found"（9 字节）被装成引擎，
 // 备份被同一份垃圾覆盖，设备上再没有可用引擎（引擎与面板全部停摆）。
@@ -234,74 +256,65 @@ test('engineVersionSourceLabel：来源缺失/未知不冒充正常', () => {
   assert.strictEqual(KP.engineVersionSourceLabel(undefined, undefined), '未知来源(undefined)');
   assert.ok(KP.engineVersionSourceLabel('bogus', false).includes('bogus'));
 });
-// ── "先门禁后动作"的计划（候选 3）：顺序不变量离线可断言 ──
-// 这些断言以前做不到 —— 顺序只写在 app.js 的装配流程里，只能靠真机 T8 兜。
-test('planSteps：任一引擎门禁未过 → install 不可达（事故路径）', () => {
-  const bad = KP.planSteps(KP.ENGINE_UPDATE_PLAN,
-    { 'file-gate': { ok: true }, 'sum-gate': { ok: false, reason: 'SHA256 不匹配' } });
-  assert.strictEqual(bad.blockedBy.id, 'sum-gate');
-  assert.ok(!bad.ran.includes('install'), 'sum 门禁没过却允许 install —— 正是 404 正文被装上的那条路');
-  const badFile = KP.planSteps(KP.ENGINE_UPDATE_PLAN,
-    { 'file-gate': { ok: false, reason: '不是引擎二进制' } });
-  assert.strictEqual(badFile.blockedBy.id, 'file-gate');
-  assert.ok(!badFile.ran.includes('install'));
-});
-test('planSteps：两个门禁都过才 ran 到 install', () => {
-  const v = KP.planSteps(KP.ENGINE_UPDATE_PLAN,
-    { 'file-gate': { ok: true }, 'sum-gate': { ok: true } });
-  assert.strictEqual(v.blockedBy, null);
-  assert.ok(v.ran.includes('install'));
-});
-test('planSteps：没给 fact 的门禁算未通过（默认拒绝，不是默认放行）', () => {
-  const v = KP.planSteps(KP.ENGINE_UPDATE_PLAN, { 'file-gate': { ok: true } });
-  assert.strictEqual(v.blockedBy.id, 'sum-gate');
-});
-test('计划结构：install 之前必须有两个门禁（改顺序会红）', () => {
+// ── "先门禁后动作"：顺序不变量离线可断言（2026-09-30 架构扫描 C1 重整）──────────
+// 背景：这里曾经有两个求值器 —— planSteps（按计划顺序 walk，但**生产零调用**，只有测试在用）
+// 与 planGate（生产唯一入口，却只用计划判断"这个阶段是不是门禁"，**顺序不参与求值**）。
+// 于是"顺序离线可断言"实际只断言了常量数组本身；运行期的先后由各调用点的 await 顺序决定，
+// 把它写反**不会有任何门禁变红**（等于假信心）。
+// 现在的分工：
+//   · **顺序**由流程用例守 —— gate-flows.test.js / orphan-scan.test.js 断言真实命令序列；
+//   · 这里只锁两件可机械判定的事：**计划结构**与**调用点与计划一致**（见下）。
+test('计划结构：ENGINE_UPDATE_PLAN 的 install 之前必须有两个门禁', () => {
   const idx = KP.ENGINE_UPDATE_PLAN.findIndex(s => s.id === 'install');
   assert.ok(idx > 0, 'ENGINE_UPDATE_PLAN 里没有 install 步骤');
   assert.deepStrictEqual(KP.ENGINE_UPDATE_PLAN.slice(0, idx).filter(s => s.gate).map(s => s.id),
     ['file-gate', 'sum-gate']);
 });
-test('计划结构：孤儿清理的 snapshot 门禁在 delete 之前（快照失败不得删除）', () => {
-  const v = KP.planSteps(KP.ORPHAN_CLEAN_PLAN,
-    { scan: { ok: true }, recheck: { ok: true }, snapshot: { ok: false, reason: '快照失败' } });
-  assert.strictEqual(v.blockedBy.id, 'snapshot');
-  assert.ok(!v.ran.includes('delete'));
-});
-test('计划结构：模块更新的 zip 门禁在 install 之前', () => {
-  const v = KP.planSteps(KP.MODULE_UPDATE_PLAN, { 'zip-gate': { ok: false, reason: '缺 module.prop' } });
-  assert.strictEqual(v.blockedBy.id, 'zip-gate');
-  assert.ok(!v.ran.includes('install'));
-});
-
-// ── DNS 优选："先留回滚点、再改写"（候选 3 的最后一处编排）──
-test('DNS 计划：没有可用上游 → 不得改写配置（write/reload 不可达）', () => {
-  const v = KP.planSteps(KP.DNS_OPTIMIZE_PLAN,
-    { 'rows-gate': { ok: false, reason: '没有可用率 ≥50% 的上游' } });
-  assert.strictEqual(v.blockedBy.id, 'rows-gate');
-  assert.ok(!v.ran.includes('write') && !v.ran.includes('reload'));
-});
-test('DNS 计划：回滚点不可用 → 不得改写（用户配置不能被置于无回滚点的状态）', () => {
-  const v = KP.planSteps(KP.DNS_OPTIMIZE_PLAN,
-    { 'rows-gate': { ok: true }, 'backup-gate': { ok: false, reason: '备份失败' } });
-  assert.strictEqual(v.blockedBy.id, 'backup-gate');
-  assert.ok(!v.ran.includes('write'));
-});
-test('DNS 计划：两个门禁都过 → 才 ran 到 write 与 reload', () => {
-  const v = KP.planSteps(KP.DNS_OPTIMIZE_PLAN,
-    { 'rows-gate': { ok: true }, 'backup-gate': { ok: true } });
-  assert.strictEqual(v.blockedBy, null);
-  assert.ok(v.ran.includes('write') && v.ran.includes('reload'));
-});
-test('DNS 计划结构：write 之前必须有 rows-gate 与 backup-gate（改顺序会红）', () => {
+test('计划结构：DNS_OPTIMIZE_PLAN 的 write 之前必须有 rows-gate 与 backup-gate', () => {
   const idx = KP.DNS_OPTIMIZE_PLAN.findIndex(s => s.id === 'write');
   assert.ok(idx > 0, 'DNS_OPTIMIZE_PLAN 里没有 write 步骤');
   assert.deepStrictEqual(KP.DNS_OPTIMIZE_PLAN.slice(0, idx).filter(s => s.gate).map(s => s.id),
     ['rows-gate', 'backup-gate']);
 });
+test('计划结构：ORPHAN_CLEAN_PLAN 的 snapshot 是门禁且排在 delete 之前', () => {
+  const ids = KP.ORPHAN_CLEAN_PLAN.map(s => s.id);
+  const i = ids.indexOf('snapshot');
+  assert.ok(i >= 0 && i < ids.indexOf('delete'), `顺序不对：${ids.join(' → ')}`);
+  assert.strictEqual(KP.ORPHAN_CLEAN_PLAN[i].gate, true, 'snapshot 必须是门禁（快照失败不得删除）');
+});
+test('计划结构：MODULE_UPDATE_PLAN 的 zip-gate 在 install 之前', () => {
+  const ids = KP.MODULE_UPDATE_PLAN.map(s => s.id);
+  const i = ids.indexOf('zip-gate');
+  assert.ok(i >= 0 && i < ids.indexOf('install'), `顺序不对：${ids.join(' → ')}`);
+});
+// 调用点与计划必须一致：`planGate(KP.X_PLAN, 'phase', …)` 的阶段名一旦拼错/改名，
+// find 返回 undefined → `.gate` 为假 → 该门禁被**静默当成非门禁跳过**（比报错危险得多）。
+// 这条扫描把"阶段名必须存在于对应计划、且确实是门禁"变成会红的约束（跨文件，机械可判定）。
+test('调用点与计划一致：planGate 的每个阶段名都必须是该计划里的门禁', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const dir = path.join(__dirname, '..');
+  const bad = [];
+  let seen = 0;
+  for (const f of fs.readdirSync(dir).filter(n => n.endsWith('.js'))) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    const re = /planGate\(\s*KP\.([A-Z_]+)\s*,\s*'([^']+)'/g;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      seen++;
+      const plan = KP[m[1]];
+      if (!Array.isArray(plan)) { bad.push(`${f}: 未知计划 ${m[1]}`); continue; }
+      const step = plan.find(s => s.id === m[2]);
+      if (!step) bad.push(`${f}: 阶段 '${m[2]}' 不在 ${m[1]} 里（会被静默当成非门禁跳过）`);
+      else if (step.gate !== true) bad.push(`${f}: 阶段 '${m[2]}' 在 ${m[1]} 里但不是门禁`);
+    }
+  }
+  assert.ok(seen >= 6, `只扫到 ${seen} 个 planGate 调用点 —— 扫描没生效？`);
+  assert.deepStrictEqual(bad, [], bad.join('; '));
+});
 // ── planGate：阶段切片求值（2026-09-28 三次同构事故的接口级修复）──
-// planSteps 语义是"缺 fact 的 gate = 拒绝"；调用方分阶段执行时只持有本阶段 fact，
-// 传整计划必然被下一道门禁假拦（scanOrphans 事故 + optimize/engUpdate 两个活体）。
+// 调用方分阶段执行，每次只持有本阶段 fact；若传整计划让"缺 fact 的门禁 = 拒绝"生效，
+// 必然被下一道门禁假拦（scanOrphans 事故 + optimize/engUpdate 两个活体）。
 test('planGate：只求值指定阶段，后续门禁的 fact 缺失不再假拦', () => {
   // 与事故同构的调用形态：rows-gate 过了、backup-gate 没有 fact
   const v = KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'rows-gate', { ok: true });

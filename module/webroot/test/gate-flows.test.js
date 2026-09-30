@@ -78,6 +78,12 @@ test('DNS 优选全链可达：探测 → Top5 → 备份 → 写配置 → 热�
   assert.ok(finalWrite, '最终配置写入不可达 —— 优选在备份门禁处被假拦（bug A）');
   assert.ok(finalWrite.includes('base64 -d >') && captured.some(c => /ops\.sh' 'reload-dns'/.test(c)),
     '写完配置必须热重载生效');
+  // C1：**顺序**断言（此前只断言"可达"，把顺序写反不会有门禁变红）。
+  // DNS_OPTIMIZE_PLAN 要求"先留回滚点、再改写"（用户配置不能被置于无回滚点的状态）。
+  const iBackup = captured.findIndex(c => c.includes('.prev') && c.includes('cp '));
+  const iWrite = captured.findIndex(c => c.includes('dns-upstreams.conf') && c.includes('base64 -d'));
+  assert.ok(iBackup >= 0 && iBackup < iWrite,
+    `回滚点必须早于改写（备份#${iBackup} / 写入#${iWrite}）—— 顺序反了等于用户配置没有回滚点`);
 });
 
 test('引擎更新全链可达：门禁 → 校验和 → install-engine（bug B 回归）', async () => {
@@ -90,6 +96,16 @@ test('引擎更新全链可达：门禁 → 校验和 → install-engine（bug B
   assert.ok(captured.some(c => /ops\.sh' 'install-engine'/.test(c)),
     'install-engine 不可达 —— file-gate 通过后被无 fact 的 sum-gate 假拦（bug B）');
   assert.ok(els.get('eng-out').textContent.includes('完成'), '更新成功必须有回执');
+  // C1：**顺序**断言 —— ENGINE_UPDATE_PLAN 的三道门禁（体积 → ELF 魔数 → 校验和）
+  // 都必须早于 install-engine。此前只断言"install 可达"，把门禁挪到安装之后不会有门禁变红
+  // （那正是 2026-09-26「9 字节 404 正文被装成引擎」那一类事故的形状）。
+  const iInstall = captured.findIndex(c => /ops\.sh' 'install-engine'/.test(c));
+  const iSize = captured.findIndex(c => c.includes('wc -c'));
+  const iMagic = captured.findIndex(c => c.includes('od -An'));
+  const iSum = captured.findIndex(c => c.includes('sha256sum') && !c.includes('curl'));
+  assert.ok(iSize >= 0 && iSize < iInstall, `体积门禁必须在安装之前（体积#${iSize} / 安装#${iInstall}）`);
+  assert.ok(iMagic >= 0 && iMagic < iInstall, `ELF 门禁必须在安装之前（魔数#${iMagic} / 安装#${iInstall}）`);
+  assert.ok(iSum >= 0 && iSum < iInstall, `校验和必须在安装之前（校验#${iSum} / 安装#${iInstall}）`);
 });
 
 test('file-gate 不过时 install-engine 仍不可达（门禁不因 planGate 而松动）', async () => {

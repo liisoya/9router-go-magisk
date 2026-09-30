@@ -225,16 +225,38 @@ MODDIR
 INITIAL_PASSWORD
 EOF
 }
+life_carrier_env_value() {
+  # 承载性 env 的**取值唯一来源**（键 → 值）。
+  # 分工（2026-09-30 架构扫描 C6 重整）：`life_carrier_env_keys` 决定**有哪些键**，
+  # 本函数决定**每个键的值是什么**，`life_write_runtime_env` 只按清单取值写出。
+  # 此前是"清单 + 六行 echo + 内联 export"三份并行实现：改一处忘另一处，离线看不见，
+  # 只有真机 T7 能兜（而 T7 要有设备）。现在离线档 L13 断言"写出物键集合 == 清单"。
+  case "${1:-}" in
+    SSL_CERT_DIR)     printf '%s' /system/etc/security/cacerts ;;
+    AUTO_UPDATE)      printf '%s' false ;;
+    PORT)             life_get_port ;;
+    DATA_DIR)         printf '%s' "$DATA_DIR" ;;
+    MODDIR)           printf '%s' "$MODDIR" ;;
+    INITIAL_PASSWORD) cat "$DATA_DIR/initial-password" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+life_carrier_env_export() {
+  # 内联兜底用：把清单里的每个键按取值函数导出给子进程（不再手写 export 列表 —— 那正是第三份实现）。
+  # **值可以为空，但键必须齐**：键集合恒等于清单（离线 L13 断言）—— 取不到值时"少一个键"
+  # 会让引擎少一份承载性 env（例如没有 SSL_CERT_DIR 则所有 HTTPS 全废），比空值危险得多。
+  for _k in $(life_carrier_env_keys); do
+    _v="$(life_carrier_env_value "$_k" 2>/dev/null)"
+    export "$_k=$_v"
+  done
+}
 life_write_runtime_env() {
-  _p="$(life_get_port)"
   {
     echo "# 由 lib/lifecycle.sh 生成（勿手改）：引擎运行环境（承载性 env 的单一来源）"
-    echo "SSL_CERT_DIR=$(life_env_q /system/etc/security/cacerts)"
-    echo "AUTO_UPDATE=$(life_env_q false)"
-    echo "PORT=$(life_env_q "$_p")"
-    echo "DATA_DIR=$(life_env_q "$DATA_DIR")"
-    echo "MODDIR=$(life_env_q "$MODDIR")"
-    echo "INITIAL_PASSWORD=$(life_env_q "$(cat "$DATA_DIR/initial-password" 2>/dev/null)")"
+    for _k in $(life_carrier_env_keys); do
+      _v="$(life_carrier_env_value "$_k" 2>/dev/null)"
+      echo "$_k=$(life_env_q "$_v")"
+    done
   } > "$LIFE_RUNTIME_ENV" 2>/dev/null || return 1
   chmod 600 "$LIFE_RUNTIME_ENV" 2>/dev/null
   echo "$LIFE_RUNTIME_ENV"
@@ -418,12 +440,11 @@ life_ensure_engine() {
   # 承载性 env 从唯一来源加载（C3）：runtime.env 由 life_write_runtime_env 生成，
   # 清单是 life_carrier_env_keys。生成失败才退回内联（不静默降级）。
   if life_write_runtime_env >/dev/null && life_load_runtime_env; then
-    :
+    : 
   else
     life_log "ensure-engine: runtime.env 生成/加载失败，退回内联 env"
-    export SSL_CERT_DIR=/system/etc/security/cacerts DATA_DIR MODDIR AUTO_UPDATE=false
-    PORT="$(life_get_port)"; export PORT
-    export INITIAL_PASSWORD="$(cat "$DATA_DIR/initial-password" 2>/dev/null)"
+    # 内联兜底也**按清单导出**（此前手写 5 条 export —— 那是承载性 env 的第三份实现）
+    life_carrier_env_export
   fi
 
   life_log "ensure-engine: port=$PORT caller=${LIFE_CALLER:-shell} cgroup=$(life_cgroup_of self)"

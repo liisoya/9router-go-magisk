@@ -244,6 +244,33 @@ else
   no "L12 组合不对：「$(cat "$_ORD")」，期望「stop engine dns 」"
 fi
 
+echo "== L13 承载性 env：清单驱动写出（键集合必须逐键一致）=="
+# 为什么（2026-09-30 架构扫描 C6）：清单 / 六行 echo / 内联 export 曾是**三份并行实现** ——
+# 改一处忘另一处离线看不见（只有真机 T7 兜，而 T7 要有设备）。现在清单是唯一声明：
+# 写出物必须与它**逐键一致**（多一个、少一个都红），内联兜底也走同一清单。
+_ENVD="$_TMPD/envcheck"; mkdir -p "$_ENVD"
+printf 'pw-123\n' > "$_ENVD/initial-password"
+_OLD_DATA="$DATA_DIR"; _OLD_ENV="${LIFE_RUNTIME_ENV:-}"
+DATA_DIR="$_ENVD"; LIFE_RUNTIME_ENV="$_ENVD/runtime.env"
+if life_write_runtime_env >/dev/null 2>&1; then ok "L13 runtime.env 可生成"; else no "L13 生成失败"; fi
+_list="$(life_carrier_env_keys | sort | tr '\n' ' ')"
+_written="$(sed -n 's/^\([A-Z_][A-Z_0-9]*\)=.*/\1/p' "$_ENVD/runtime.env" 2>/dev/null | sort | tr '\n' ' ')"
+[ "$_list" = "$_written" ] && ok "L13 写出键集合 == 清单（$_list）" \
+  || no "L13 清单与写出不一致：清单[$_list] 写出[$_written]"
+_missing=""
+for _k in $(life_carrier_env_keys); do
+  case "$_k" in INITIAL_PASSWORD) continue ;; esac   # 初始密码文件可不存在（首启前）
+  grep -q "^$_k=." "$_ENVD/runtime.env" 2>/dev/null || _missing="$_missing $_k"
+done
+[ -z "$_missing" ] && ok "L13 承载性键都有非空值" || no "L13 这些键没有值：$_missing"
+# 内联兜底（runtime.env 生成/加载失败时走它）必须导出**同一批键**，不能是第三份手写清单
+_fallback="$( ( unset SSL_CERT_DIR AUTO_UPDATE PORT DATA_DIR MODDIR INITIAL_PASSWORD 2>/dev/null; \
+  life_carrier_env_export; env ) 2>/dev/null \
+  | sed -n 's/^\(SSL_CERT_DIR\|AUTO_UPDATE\|PORT\|DATA_DIR\|MODDIR\|INITIAL_PASSWORD\)=.*/\1/p' | sort | tr '\n' ' ')"
+[ "$_fallback" = "$_list" ] && ok "L13 内联兜底导出的键 == 清单" \
+  || no "L13 兜底与清单不一致：清单[$_list] 兜底[$_fallback]"
+DATA_DIR="$_OLD_DATA"; LIFE_RUNTIME_ENV="$_OLD_ENV"
+
 echo "== 结果：通过 $PASS / 失败 $FAIL / 跳过 $SKIP =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

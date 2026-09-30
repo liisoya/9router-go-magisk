@@ -279,8 +279,11 @@ func derivePrefixFromName(name string) string {
 // 唯一所有者：面板侧 (`module/webroot/parsers.js` 的 UUID_ALIAS)、本包（自愈与校验）、
 // chat 包（列表发布前的兜底）必须用**同一个形状**，否则会出现"一处认得出、另一处认不出"
 // 的静默漏网。面板那份是 JS，无法共享常量，改动时三处一起改。
+// `(?i)` 是**必需的**：面板侧的正则带 /i（大小写不敏感），两侧判定必须逐样本一致 ——
+// 2026-09-30 的跨语言夹具门禁（tools/fixtures/internal-node-alias-samples.txt）第一次运行
+// 就抓到这里：Go 侧原来区分大小写，大写节点 ID 会被引擎判"不是内部 ID"、却被面板判"是"。
 var internalNodeAliasRE = regexp.MustCompile(
-	`^openai-compatible-chat-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	`(?i)^openai-compatible-chat-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // IsInternalNodeAlias 判断别名是不是内部节点 ID 的形状（大小写不敏感）。
 func IsInternalNodeAlias(alias string) bool {

@@ -2,9 +2,43 @@ package db
 
 import (
 	json "encoding/json/v2"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestIsInternalNodeAlias_SharedFixture 是**跨语言接缝门禁**（2026-09-30 架构扫描 C3）：
+// 形状判定的唯一所有者在 Go（db.IsInternalNodeAlias），但面板侧（module/webroot/parsers.js
+// 的 UUID_ALIAS）必须给出**逐样本一致**的答案 —— 否则面板会静默不再识别孤儿，或引擎把内部 ID
+// 发布给用户。两侧读同一份夹具（tools/fixtures/internal-node-alias-samples.txt），任一侧漂移即红。
+func TestIsInternalNodeAlias_SharedFixture(t *testing.T) {
+	path := filepath.Join("..", "..", "tools", "fixtures", "internal-node-alias-samples.txt")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读共享夹具 %s: %v（跨语言接缝门禁的样本只应有一份）", path, err)
+	}
+	checked := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		sample, want, ok := strings.Cut(line, " ")
+		if !ok {
+			t.Fatalf("夹具行格式错误（应为 `<样本> yes|no`）：%q", line)
+		}
+		wantYes := strings.TrimSpace(want) == "yes"
+		if got := IsInternalNodeAlias(sample); got != wantYes {
+			t.Errorf("IsInternalNodeAlias(%q) = %v, 期望 %v（面板侧 UUID_ALIAS 必须给出同一答案）",
+				sample, got, wantYes)
+		}
+		checked++
+	}
+	if checked < 10 {
+		t.Fatalf("夹具样本太少（%d 行）—— 接缝门禁形同虚设", checked)
+	}
+}
 
 // healTestDB 建一个带真实 core schema 的临时库（heal 要碰 providerNodes/providerConnections/kv）。
 func healTestDB(t *testing.T) (*Repo, func()) {

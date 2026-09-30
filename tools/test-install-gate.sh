@@ -4,8 +4,14 @@
 # 为什么有它：`cmd_install_module` 是模块**唯一安装入口**，而它过去是「先 stop_all 再 unzip」——
 # zip 坏 / 非 zip / unzip 缺失时只能 echo install-failed 走人，引擎与 dnsfwd **已经被停掉**；
 # 守护若未武装，服务不会自己回来。同文件的 `cmd_install_engine` 一直是"不合格源绝不碰现有二进制"。
-# 本测试**只跑否定路径**（坏包必须被挡在服务之前）：成功路径会真的往 $MODDIR 落文件，
-# 测试里绝不能跑（所以另一半用源码顺序断言补上）。
+#
+# 分工（2026-09-30 架构扫描 C5 重整）：
+#   · **本文件**只跑否定路径，但断言是**行为**的 —— 用真实 lifecycle + 临时 DATA_DIR，
+#     坏包若真的走到 stop_all，那个"活着的引擎" pidfile 就会被删掉（I1b/I2b 就是在看它）。
+#   · **install 的成功与回滚全路径**在 `tools/test-install-flow.sh`（INSTALLFLOW）里跑：
+#     那边把 MODDIR 指到临时目录，所以能真装、真回滚。
+#   · 这里曾有一条 I4「用 grep 行号比较门禁行与 stop_all 行」—— **已删**：顺序判断用文本形状
+#     （行号）是脆的（格式化/重构即可打穿），而它的前提"成功路径不能跑"也已被 INSTALLFLOW 取代。
 set -u
 OPS="./module/lib/ops.sh"
 if [ ! -f "$OPS" ]; then
@@ -40,21 +46,8 @@ OUT2="$(DATA_DIR="$TMPD" sh "$OPS" install-module "$TMPD/truncated.zip" 2>/dev/n
 OUT3="$(DATA_DIR="$TMPD" sh "$OPS" install-module "$TMPD/nope.zip" 2>/dev/null)"
 [ "$OUT3" = "no-src" ] && ok "I3 文件不存在 → no-src（与坏包区分）" || no "I3 输出不对：「$OUT3」"
 
-echo "== I4 源码顺序：门禁行必须在 life_stop_all 之前（成功路径用顺序断言兜住）=="
-GATE_LINE="$(grep -n "unzip -l \"\$1\"" "$OPS" | head -1 | cut -d: -f1)"
-STOP_LINE="$(sed -n '/^cmd_install_module()/,/^}/p' "$OPS" | grep -n "life_stop_all" | head -1 | cut -d: -f1)"
-if [ -n "$GATE_LINE" ] && [ -n "$STOP_LINE" ]; then
-  # 两个行号体系不同：把 cmd_install_module 的起始行找出来再比
-  FN_LINE="$(grep -n "^cmd_install_module()" "$OPS" | cut -d: -f1)"
-  ABS_STOP=$((FN_LINE + STOP_LINE - 1))
-  if [ "$GATE_LINE" -lt "$ABS_STOP" ]; then
-    ok "I4 验证行($GATE_LINE) 早于 stop_all($ABS_STOP)：门禁先于动作"
-  else
-    no "I4 顺序反了：门禁在 $GATE_LINE、stop_all 在 $ABS_STOP"
-  fi
-else
-  no "I4 定位失败（gate=$GATE_LINE stop=$STOP_LINE）"
-fi
+# I4「grep 行号比顺序」已删除（2026-09-30 C5）：顺序判断改用行为 —— 坏包是否真的停掉服务
+# 由上面的 I1b/I2b 直接看 pidfile，成功/回滚全路径由 tools/test-install-flow.sh 覆盖。
 
 kill -9 "$FAKE" 2>/dev/null
 wait "$FAKE" 2>/dev/null

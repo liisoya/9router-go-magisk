@@ -128,6 +128,23 @@ test('A5c reloadDns：热重载失败必须报出来（四个调用点全传 sil
     `配置已写盘却不生效，界面必须说清，实际文案：「${els.get('toast').textContent}」`);
 });
 
+// ── C4（2026-09-30 架构扫描）：加速选中的读取只有一处入口 ────────────────────────
+// 为什么用源码级断言：要走到那条读取分支需要驱动"选中/测速"流程（依赖 curl 测速桩），
+// 成本高且脆；而这里要锁的是 **locality**（同一知识只有一处）与**判别式语义**（ok:false
+// 只能来自读失败，与"没选"严格区分）—— 两者都是可以机械判定的形状（同 .prev / escAttr 那两条）。
+// I6 就是漏掉这条知识造成的：清掉选中后无参重渲染，把正确状态渲染成「未知（读取失败）」。
+test('C4 加速选中：读取只经 readAccelSel（不得再内联 readFile，读失败必须可辨）', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'page-update.js'), 'utf8');
+  const inline = (src.match(/KB\.readFile\(ACCEL_SEL\)/g) || []).length;
+  assert.strictEqual(inline, 1,
+    `内联读取加速选中出现了 ${inline} 处 —— 必须只经 readAccelSel()，否则"读失败≠没选"迟早被漏掉一处（I6）`);
+  assert.ok(/async function readAccelSel\(\)/.test(src), '缺少 readAccelSel 单一入口');
+  assert.ok(/r\.ok === false\) return \{ ok: false, sel: '' \}/.test(src),
+    'readAccelSel 必须把读失败与"没选"分开（ok:false + 空串），否则调用方无法分辨故障与直连');
+});
+
 test('B5b 清除选中：必须显示「直连 GitHub」，不得渲染成「未知（读取失败）」', async () => {
   // 这条曾经是**源码级扫描**，理由写在 FIXPLAN 34.1 里：「桩跑不通 KB.readFile，
   // 断言永远为真」。2026-09-29 复核证明那个理由是**误判** —— 桩确实会把

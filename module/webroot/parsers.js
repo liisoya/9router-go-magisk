@@ -212,11 +212,13 @@
 
   // ── "先门禁后动作"的计划：顺序是数据，可离线断言 ──
   // 为什么：门禁本身是纯函数、有红绿用例，但**会出事的是怎么被调用** —— "门禁必须在 install-engine
-  // 之前""两个门禁都过才允许安装""快照失败不许删除"这些顺序不变量原先只活在 app.js 的装配流程里，
+  // 之前""两个门禁都过才允许安装""快照失败不许删除"这些顺序不变量原先只活在装配流程里，
   // 离线没有任何断言，只能靠真机 T8b/T8d 兜（而 T8 只能在有设备时跑）。ADR-0007 的核心不变量
-  // 因此长期处在"改 app.js 就可能悄悄破坏"的状态。
-  // 做法：步骤顺序写成数据，planSteps 按序求值，遇到第一个未通过的门禁就停 ——
-  // app.js 不再自己判断"顺序/是否允许执行"，只按求值结果执行；顺序不变量在离线有断言。
+  // 因此长期处在"改调用点就可能悄悄破坏"的状态。
+  // 做法（2026-09-30 C1 重整）：计划常量仍是**顺序与门禁的唯一声明**，运行时由各调用点按计划顺序
+  // 分阶段调用 planGate（每次只持有本阶段 fact），门禁不过即 return；
+  //   · **顺序**由流程用例守（gate-flows/orphan-scan 断言真实命令序列）；
+  //   · **结构**由 parsers.test.js 守（门禁位置 + 调用点阶段名必须存在于计划且是门禁）。
   const ENGINE_UPDATE_PLAN = [
     { id: 'download' },
     { id: 'file-gate', gate: true },   // 像不像一个引擎（体积 + ELF 魔数）
@@ -243,24 +245,16 @@
     { id: 'reload' },                  // 热重载 dnsfwd
   ];
 
-  // facts[id] = { ok, reason? }；**没给 fact 的门禁算未通过**（默认拒绝，不是默认放行）
-  function planSteps(plan, facts) {
-    const f = facts || {};
-    const ran = [];
-    for (const step of plan) {
-      ran.push(step.id);
-      if (!step.gate) continue;
-      const v = f[step.id];
-      if (!v || v.ok !== true) {
-        return { ran, blockedBy: { id: step.id, reason: (v && v.reason) || `门禁 ${step.id} 未通过` } };
-      }
-    }
-    return { ran, blockedBy: null };
-  }
-
-  // 按阶段求值（planSteps 的安全形态）：只求值 id === phase 的那一道门禁。
-  // 为什么存在：调用方在每个阶段只持有该阶段的 fact，而 planSteps 的"缺 fact = 拒绝"
-  // 意味着"传整计划"必然在下一道门禁处假拦 —— scanOrphans/optimize/engUpdate 三次
+  // facts[id] = { ok, reason? }
+  //
+  // 这里曾有一个 `planSteps`（按计划顺序 walk、遇未通过门禁即停）。2026-09-30 架构扫描 C1
+  // 把它删了：它**生产零调用**（生产只用下面的 planGate），只有测试引用 —— 于是那些测试在测一个
+  // 退役的求值器（假信心），而它又给人"顺序由计划保证"的错觉。**顺序的真实保障**是：
+  //   · 各调用点按计划顺序 await（顺序写在流程里）；
+  //   · gate-flows.test.js / orphan-scan.test.js 断言**真实命令序列**（这才是会红的顺序门禁）；
+  //   · parsers.test.js 锁"计划结构"与"调用点阶段名必须存在于计划且是门禁"（防拼错被静默跳过）。
+  // 按阶段求值：只求值 id === phase 的那一道门禁。
+  // 为什么存在：调用方在每个阶段只持有该阶段的 fact，而"缺 fact = 拒绝"的整计划求值
   // 同构事故（2026-09-28，其中两个是走查发现的活体）全部源于此。
   // 跨阶段顺序仍由唯一计划常量承载：各阶段按计划顺序各自调 planGate，顺序不变量
   // 不回到调用方手里。
@@ -335,7 +329,7 @@
     normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans,
     ELF_MAGIC, ENGINE_MIN_BYTES, engineFileGate, checksumGate,
     LIFECYCLE_STATES, TONE_COLORS, stateLabel, engineVersionSourceLabel,
-    ENGINE_UPDATE_PLAN, MODULE_UPDATE_PLAN, ORPHAN_CLEAN_PLAN, DNS_OPTIMIZE_PLAN, planSteps, planGate,
+    ENGINE_UPDATE_PLAN, MODULE_UPDATE_PLAN, ORPHAN_CLEAN_PLAN, DNS_OPTIMIZE_PLAN, planGate,
     parseScanLines, parseCredScan, parseCurlTimings,
   };
 });

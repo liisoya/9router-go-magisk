@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.5-r2",
-  "versionCode": 109051,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.5-r2/9router-go-1.9.5-r2-magisk.zip",
-  "changelog": "修复「可用模型里出现内部节点 ID」（用户反馈：清理孤儿后仍显示 openai-compatible-chat-<uuid>/模型名，而它恰恰是唯一能用的模型）。根因：自定义模型的键按 provider 节点 ID 存（设计如此），列表发布 <前缀>/<模型> 时前缀取自节点 data.prefix（连接路径取连接前缀），取不到就回退成节点 ID；而「有名字没前缀」的历史数据不是孤儿 → 清理按设计不会碰它。修法（改数据而不是改显示 —— 前缀就是客户端要填的模型 ID）：①幂等自愈补回缺失前缀（只补空 / 从节点名派生 / 冲突加后缀 / 单事务 / 不动 updatedAt），启动与读路径（节流 60s）各跑一次；②悬空连接（节点被删、连接还在）按连接上的 provider 补回节点 —— 路由只认节点前缀，只改显示名会得到「能看不能用」的假别名；③内部节点 ID 形状且解析不出名字 → 不发布（任何模式都不再泄漏）；④删节点改为单事务且不再吞错（半状态正是这类数据的源头）。同时修掉「清理孤儿」的一处并发缺陷：快照在途时若又点扫描，DELETE 会换成另一批别名（本批漏删、另一批无快照可回滚，却仍报清理成功）—— 删除改用本批冻结的 targets。模块层：install-engine / install-module 的成功与回滚路径过去无法离线重放（MODDIR 写死），现在 MODDIR 可覆盖 + 只加载模式，新增门禁 INSTALLFLOW（24 例）在临时目录上跑完整安装流程。验证：离线档 17/17、面板 JS 131/131、internal/db 10/10、真机用模块自己的 install-module 装机 + 悬空连接端到端（补回节点后模型显示为正常名）。"
+  "version": "v1.9.5-r3",
+  "versionCode": 109052,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.5-r3/9router-go-1.9.5-r3-magisk.zip",
+  "changelog": "架构深化收尾（5 项，全部先写会红的门禁再改）。①「先门禁后动作」原本有两个求值器：planSteps 会按计划顺序走但**生产零调用**（只有测试引用），生产用的 planGate 只判断阶段是不是门禁 —— 顺序不参与求值，把门禁挪到安装之后不会有任何门禁变红。已删除 planSteps 及其 9 条测退役实现的用例，顺序改由流程用例断言真实命令序列（引擎更新：体积/魔数/校验和都必须早于 install-engine；DNS：回滚点必须早于改写），并新增「计划结构」与「planGate 阶段名必须存在于计划且是门禁」两条不变量（阶段名拼错会让门禁被静默跳过）。②面板的 UUID_ALIAS 与引擎的 IsInternalNodeAlias 是同一形状的两份实现，现在共用一份样本夹具双向断言 —— 首次运行就抓到真实漂移：Go 侧区分大小写、面板带 /i（大写节点 ID 两侧判断不同），已对齐。③加速选中的读取原先内联 5 处，而「空串=直连、读失败≠没选」这条知识没有家（I6 正是漏掉它）→ 收成 readAccelSel() 返回判别式 {ok, sel}。④test-install-gate.sh 用 grep 行号比较「门禁行 < stop_all 行」——文本形状，已删除；坏包是否停服务改由行为断言（那条活着的引擎 pidfile），成功/回滚全路径由 INSTALLFLOW 覆盖。⑤承载性 env 的清单 / 六行 echo / 内联 export 是三份并行实现 → 改为按清单写出（值可空但键必齐），离线新增 L13 断言写出键集合与兜底导出都等于清单。验证：离线档 17/17、面板 JS 128/128、LIFECYCLE 59/0、internal/db 全绿；真机部署 + 重启引擎 + T7 等价检查（6 个承载性 env 在 runtime.env 与引擎进程里都齐）。"
 }
