@@ -114,6 +114,39 @@ life_pid_is_watchdog() {
   esac
   return 1
 }
+life_pid_file_is_bin() {
+  # pidfile → 进程身份校验，供"活着"类谓词使用（与 life_wd_alive → life_pid_is_watchdog
+  # 同一条纪律）。**为什么必须有（2026-09-30 真机事故）**：用户设备上引擎早已死掉、pid 被无关
+  # 进程占用（82 分钟推进了 12943 个号），而面板照报 engine=up、守护 39 分钟不判死不拉起 ——
+  # 自愈形同不存在；连面板显示的"引擎内存 571.7MB"都是**那个无关进程**的内存。守护侧早有这层
+  # （注释里写明"少了这层，面板会误报 up、且永不重新拉起"），引擎/dnsfwd 这半边一直缺。
+  # **安全偏向（与守护一致，宁松勿严）**：
+  #   ① 按 basename 松匹配 —— 模块目录可能经符号链接/相对路径到达，严格全路径匹配会假死
+  #      （把活着的引擎判成不在 → 守护反复重启，杀掉用户正在用的代理）；
+  #   ② 两条身份信息**都读不到**时判"在" —— 读不到（SELinux/权限/tr 不可用）≠ 不是它。
+  # 读 pid 用内建 read（热路径 0 次额外 fork，与 life_pid_alive 同款）；唯一的一次 fork 是
+  # readlink，且只在进程确实活着时发生。
+  _b_f="${1:-}"; _b_want="${2:-}"
+  [ -n "$_b_f" ] && [ -n "$_b_want" ] || return 1
+  [ -f "$_b_f" ] || return 1
+  _b_p=""
+  read -r _b_p 2>/dev/null < "$_b_f" || return 1
+  case "$_b_p" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_b_p" -ge 1 ] || return 1
+  _b_bn="${_b_want##*/}"
+  # ① exe 链接：真二进制走这条；模块更新后二进制被 mv 掉 → 链接带 " (deleted)"，也算它
+  _b_exe="$(readlink "/proc/$_b_p/exe" 2>/dev/null)"
+  case "$_b_exe" in
+    */"$_b_bn"|*/"$_b_bn (deleted)") return 0 ;;
+  esac
+  # ② cmdline 指纹：脚本壳（exe 指向解释器）或 exe 受限时兜底
+  _b_cl="$(tr '\0' '\n' 2>/dev/null < "/proc/$_b_p/cmdline")"
+  case "$_b_cl" in *"$_b_bn"*) return 0 ;; esac
+  # ③ 两条身份信息都读到了、但都不是它 → pid 已被复用（上面那个误报的来源）
+  if [ -n "$_b_exe$_b_cl" ]; then return 1; fi
+  # ④ 什么都读不到 → 宽松：不推翻 pidfile（宁可漏判一次复用，不可错杀活着的引擎）
+  return 0
+}
 life_cgroup_escape() {
   # 把进程从"启动者的 cgroup"里挪出去（连坐免疫）。真机实测：WebUI 经 ksu.exec 启动的
   # 进程落在管理器应用的 cgroup（0::/uid_10235/pid_X），系统清理该应用时整组 SIGKILL；
@@ -387,7 +420,12 @@ life_wd_start() {
 }
 
 # ── 引擎 ────────────────────────────────────────
-life_engine_healthy() { life_pid_alive "$LIFE_ST_ENGINE"; }
+life_engine_healthy() {
+  # "活着"必须同时"是我们的引擎"（与 life_wd_alive 同一条纪律，见 life_pid_file_is_bin）。
+  # 少了这层的代价（2026-09-30 真机实测）：引擎死掉后 pid 被无关进程复用 → 面板永久误报
+  # engine=up、守护永不重新拉起（自愈失效），面板上的"引擎内存"其实是别人进程的内存。
+  life_pid_alive "$LIFE_ST_ENGINE" && life_pid_file_is_bin "$LIFE_ST_ENGINE" "$LIFE_BIN"
+}
 
 life_prep() {
   # 引擎启动前必须为真的一切（幂等）：schema 引导、autoUpdate 压回 false、DNS 上游兜底、
@@ -480,7 +518,10 @@ life_stop_engine() {
 
 # ── dnsfwd ──────────────────────────────────────
 life_dns_disabled() { [ -f "$LIFE_ST_DNS_OFF" ]; }
-life_dns_running() { life_pid_alive "$LIFE_ST_DNS"; }
+life_dns_running() {
+  # 同 life_engine_healthy：pidfile 里的号会被无关进程复用，必须认身份（见 life_pid_file_is_bin）
+  life_pid_alive "$LIFE_ST_DNS" && life_pid_file_is_bin "$LIFE_ST_DNS" "$LIFE_DNSFWD"
+}
 life_dns_healthy() {
   # 谓词的唯一实现：用户关闭 / 在跑 / 已让路（:53 被第三方占用，是正常稳态而非"死了"）
   life_dns_disabled && return 0

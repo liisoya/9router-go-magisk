@@ -225,9 +225,16 @@ while :; do
   # 该不该记由 lifecycle 的策略决定（超阈值 + 12 分钟限流；另有一条每小时基线）；
   # 记账单位是**秒**而不是轮次 —— 否则改周期会把"每小时"静默改成"每 12 小时"。
   log_rotate_all
-  _r="$(life_rss_kb "$(life_engine_pid)")" || _r=""
+  # 内存证据只在确认"确实是我们自己的引擎"时才记 —— pidfile 里的号会被无关进程复用，
+  # 不校验身份就会把**别人进程的内存**当成引擎内存写进日志（2026-09-30 真机：守护和面板
+  # 报的 484MB/571.7MB 全是这种假读数，把内存问题的诊断整个带进沟里）。
+  if life_engine_healthy; then
+    _r="$(life_rss_kb "$(life_engine_pid)")" || _r=""
+  else
+    _r=""
+  fi
   if [ "$(life_rss_log_due "$_r" "$elapsed" "$rss_at")" = "1" ]; then
-    log "引擎内存 ${_r}kB（阈值 ${LIFE_RSS_WARN_KB}kB，已运行 ${elapsed}s）"
+    log "引擎内存 ${_r}kB（阈值 ${LIFE_RSS_WARN_KB}kB，守护已运行 ${elapsed}s）"
     rss_at=$elapsed
   fi
 

@@ -68,6 +68,47 @@ fi
 if life_pid_is_watchdog "$_other"; then no "L3b life_pid_is_watchdog 误认"; else ok "L3b 身份判定为假"; fi
 kill -9 "$_other" 2>/dev/null
 
+echo "== L3c 引擎身份校验：pidfile 被无关进程复用 → 必须判"不在"（2026-09-30 真机事故）=="
+# 真机现场：用户设备 82 分钟内 pid 推进了 12943 个号（6965 → 19908）—— 引擎早已死掉、号被
+# 别的进程占住，而面板照报 engine=up、守护 39 分钟一次都没判死（自愈形同不存在），
+# 连"引擎内存 571.7MB"都是**那个无关进程**的内存。判据与 L3（守护侧）同源，但引擎这半边
+# 一直缺：life_engine_healthy 只看 pidfile 存活。
+sleep 30 &
+_e_other=$!
+printf '%s\n' "$_e_other" > "$LIFE_ST_ENGINE"
+if life_engine_healthy; then
+  no "L3c 把无关进程（pid=$_e_other，活着的 sleep）当成了引擎 —— 面板会误报 up、守护永不拉起"
+else
+  ok "L3c 无关进程不被认作引擎"
+fi
+if [ "$(life_state | sed -n 's/.*engine=\([a-z]*\).*/\1/p')" = down ]; then
+  ok "L3d life_state 报 engine=down"
+else
+  no "L3d life_state 仍报 up（面板会如实告诉用户'引擎在跑'）"
+fi
+kill -9 "$_e_other" 2>/dev/null
+
+echo "== L3e 反向：pidfile 里确实是我们的引擎 → 必须判"在"（防过度严格引发重启风暴）=="
+# 为什么必须锁这条：身份校验一旦过严（模块目录经符号链接到达、二进制被 mv 后带 " (deleted)"、
+# SELinux 下读不到 /proc/<pid>/exe），就会把**活着的**引擎判成不在 → 守护反复重启、
+# 杀掉用户正在用的代理。所以"松"是刻意的：读不到身份信息时判"在"。
+_OLD_LIFE_BIN="$LIFE_BIN"
+LIFE_BIN="$_TMPD/bin/9router-go"
+mkdir -p "$_TMPD/bin"
+printf '#!/bin/sh\nsleep 30\n' > "$LIFE_BIN"
+chmod 0755 "$LIFE_BIN"
+"$LIFE_BIN" &
+_e_fake=$!
+printf '%s\n' "$_e_fake" > "$LIFE_ST_ENGINE"
+if life_engine_healthy; then
+  ok "L3e 自己的引擎 → 判在"
+else
+  no "L3e 自己的引擎被判不在（会反复重启，杀掉用户正在用的代理）"
+fi
+kill -9 "$_e_fake" 2>/dev/null
+LIFE_BIN="$_OLD_LIFE_BIN"
+printf '%s\n' "" > "$LIFE_ST_ENGINE"
+
 echo "== L4 身份校验：非法输入一律判假（不猜）=="
 for bad in '' abc 0 -1 '1 2'; do
   if life_pid_is_watchdog "$bad"; then no "L4 非法 pid [$bad] 被判为真"; else ok "L4 非法 pid [$bad] → 假"; fi

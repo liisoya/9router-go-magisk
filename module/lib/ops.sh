@@ -117,10 +117,19 @@ cmd_panel() {
   _s="$(cmd_status)"
   _mem="$(awk '/^MemTotal:/{mt=$2}/^MemAvailable:/{ma=$2}END{print mt+0, ma+0}' /proc/meminfo 2>/dev/null)"
   _mem="${_mem:-0 0}"
-  _ep="$(life_engine_pid)"
-  _dp="$(life_dns_pid)"
-  _er="$(awk '/^VmRSS:/{print $2+0; exit}' "/proc/$_ep/status" 2>/dev/null)"; _er="${_er:-0}"
-  _dr="$(awk '/^VmRSS:/{print $2+0; exit}' "/proc/$_dp/status" 2>/dev/null)"; _dr="${_dr:-0}"
+  # RSS 只在确认"确实是我们自己的进程"时才读 —— pidfile 里的号会被无关进程复用，
+  # 不校验身份就会把**别人进程的内存**当成引擎/转发器的内存报给面板（2026-09-30 真机：
+  # 面板显示"引擎内存 571.7MB"，实际是另一个 App 的）。不是我们的 → 0（面板渲染成 "-"，
+  # 如实表示"没有可报告的内存"）。
+  _er=0; _dr=0; _ep=""; _dp=""
+  if life_engine_healthy; then
+    _ep="$(life_engine_pid)"
+    _er="$(awk '/^VmRSS:/{print $2+0; exit}' "/proc/$_ep/status" 2>/dev/null)"; _er="${_er:-0}"
+  fi
+  if life_dns_running; then
+    _dp="$(life_dns_pid)"
+    _dr="$(awk '/^VmRSS:/{print $2+0; exit}' "/proc/$_dp/status" 2>/dev/null)"; _dr="${_dr:-0}"
+  fi
   _ub="$(base64 "$DATA_DIR/dns-upstreams.conf" 2>/dev/null | tr -d '\n')"
   _mu="$(cat "$DATA_DIR/module-update-url" 2>/dev/null)"
   _as="$(cat "$DATA_DIR/github-accel" 2>/dev/null)"
