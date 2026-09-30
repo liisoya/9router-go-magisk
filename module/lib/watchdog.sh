@@ -141,9 +141,11 @@ while :; do
       _ec=$?
       log "引擎退出（$(life_exit_reason "$_ec") pid=$eng_ours）"
       # 退出码只回答"怎么死的"（137=SIGKILL），oom_kill 增量回答"是不是被内存回收杀的"——
-      # 两者放在一起，下次不用再考古（2026-09-30：9 次判死零死因的教训）
+      # 两者放在一起，下次不用再考古（2026-09-30：9 次判死零死因的教训）。
+      # 取证行**必须落盘**：真机实测部分设备的根 cgroup 根本没有 memory.events，按
+      # "有值才记"会把这行整个吞掉，取证又一次变成考古（第一次装机验证就踩到了）。
       _c_oom="$(oom_delta "${eng_cg:-/}")"
-      [ -n "$_c_oom" ] && log "死因取证：$_c_oom；引擎最后 cgroup=${eng_cg:-未知}"
+      log "死因取证：退出码=$_ec；${_c_oom:-oom_kill 不可读（本机无 memory.events/权限）}；引擎最后 cgroup=${eng_cg:-未知}"
       eng_ours=""
       confirmed_eng=1
     fi
