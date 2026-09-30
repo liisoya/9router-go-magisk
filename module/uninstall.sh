@@ -11,6 +11,9 @@ case "$0" in
   *)   MODDIR="/data/adb/modules/ninerouter-go" ;;
 esac
 DATA_DIR="${DATA_DIR:-/data/adb/9router-go}"
+# PATH 显式声明（架构审查 S2）：卸载钩子同样会被多上下文执行，date/kill/cat 依赖解析到的
+# 是真实存在的工具 —— 某些上下文的 PATH 里没有可用的 /system/bin applet。
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/sbin:/system/sbin:/system/bin:/system/xbin:/vendor/bin:/odm/bin:/product/bin:$PATH"
 
 if [ -r "$MODDIR/lib/lifecycle.sh" ]; then
   . "$MODDIR/lib/lifecycle.sh"

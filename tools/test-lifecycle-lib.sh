@@ -312,6 +312,27 @@ _fallback="$( ( unset SSL_CERT_DIR AUTO_UPDATE PORT DATA_DIR MODDIR INITIAL_PASS
   || no "L13 兜底与清单不一致：清单[$_list] 兜底[$_fallback]"
 DATA_DIR="$_OLD_DATA"; LIFE_RUNTIME_ENV="$_OLD_ENV"
 
+echo "== L14 死因取证的纯函数：cgroup→memory.events 路径映射 + oom_kill 计数（2026-09-30 教训）=="
+# 判死时进程已消失，唯一能回答「是不是被内存回收杀的」的客观证据是 memory.events 的
+# oom_kill 计数。路径拼错在真机上只会表现为"读不到"，然后被当成"内核不支持"漏过 ——
+# 所以把映射与读取锁在这里（Phase 37 的遗留项①）。
+_e="$(life_cgroup_memory_events /)"
+[ "$_e" = "/sys/fs/cgroup/memory.events" ] && ok "L14 根 cgroup → /sys/fs/cgroup/memory.events" \
+                                          || no "L14 根 cgroup 映射错：[$_e]"
+_e="$(life_cgroup_memory_events /apps/uid_10342/pid_17059)"
+[ "$_e" = "/sys/fs/cgroup/apps/uid_10342/pid_17059/memory.events" ] \
+  && ok "L14 子 cgroup 映射 ✓" || no "L14 子 cgroup 映射错：[$_e]"
+if life_cgroup_memory_events "../etc" >/dev/null 2>&1; then no "L14 相对路径被接受（越权拼接）"; else ok "L14 相对路径 → 拒绝"; fi
+if life_cgroup_memory_events "/a/../b" >/dev/null 2>&1; then no "L14 含 .. 被接受（越权拼接）"; else ok "L14 含 .. → 拒绝"; fi
+if life_cgroup_memory_events "" >/dev/null 2>&1; then no "L14 空参数被接受"; else ok "L14 空参数 → 拒绝"; fi
+_evf="$_TMPD/memory.events"
+printf 'pgscan 1\noom_kill 3\n' > "$_evf"
+[ "$(life_oom_kill_count "$_evf")" = "3" ] && ok "L14 oom_kill 计数读取 ✓" \
+                                          || no "L14 计数读取错：[$(life_oom_kill_count "$_evf")]"
+printf 'pgscan 1\n' > "$_evf"
+if life_oom_kill_count "$_evf" >/dev/null 2>&1; then no "L14 缺 oom_kill 行却报成功（冒充 0）"; else ok "L14 无 oom_kill 行 → 如实失败"; fi
+if life_oom_kill_count "$_TMPD/不存在" >/dev/null 2>&1; then no "L14 文件缺失却报成功"; else ok "L14 文件缺失 → 如实失败"; fi
+
 echo "== 结果：通过 $PASS / 失败 $FAIL / 跳过 $SKIP =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

@@ -2,6 +2,9 @@
 # 9router-go · 管理器「操作」按钮：显示运行状态
 # 数据来自 lib/ops.sh（唯一实现），详细管理请用模块 WebUI
 
+# PATH 显式声明（架构审查 S2）：管理器动作按钮的执行上下文 PATH 不可控，且本文件不 source
+# lifecycle（dirname/cut/grep/curl 都要靠它解析到真实存在的工具）。
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/sbin:/system/sbin:/system/bin:/system/xbin:/vendor/bin:/odm/bin:/product/bin:$PATH"
 MODDIR="$(cd "$(dirname "$0")" && pwd)"
 OPS="$MODDIR/lib/ops.sh"
 

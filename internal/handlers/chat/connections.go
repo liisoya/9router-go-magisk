@@ -323,6 +323,13 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 	if baseCfg == nil {
 		return nil, fmt.Errorf("provider %q has no baseUrl in connection data and is not in KnownProviders", provider)
 	}
+	// 自环守卫：baseUrl 指向自己的监听地址 = 请求链路回到自己（详见 selfloop.go）。
+	// chat/media/responses 全部经 GetProviderConfig 取上游配置 —— 一处守卫覆盖全部转发路径。
+	if isSelfLoopBaseURL(baseCfg.BaseURL) {
+		return nil, fmt.Errorf(
+			"provider %q: baseUrl %q points at this proxy's own listener (self-forward loop); "+
+				"change the baseUrl or this proxy's port", provider, baseCfg.BaseURL)
+	}
 
 	// Check if this connection uses an Edge Relay Proxy Pool (Vercel, Cloudflare, Deno)
 	if connData != nil {

@@ -86,7 +86,9 @@
       g[cbName] = function (chunk) {
         if (settled) return;
         out = appendChunk(out, chunk);
-        const i = out.indexOf(SENTINEL);
+        // 用「最后一次」出现的哨兵（架构审查 S9）：readFile 读任意用户文件时，内容里
+        // 恰好含 __KMOD_DONE__ 会把输出在首次出现处提前截断 —— 命令自己的哨兵才是边界。
+        const i = out.lastIndexOf(SENTINEL);
         if (i !== -1) {
           const m = out.slice(i).match(new RegExp(SENTINEL + '(\\d+)'));
           finish({ code: m ? parseInt(m[1], 10) : 0, out: out.slice(0, i), err: '' });
@@ -118,13 +120,13 @@
       window[cbName] = function (chunk) {
         out = appendChunk(out, chunk);
         if (out.indexOf('KPROBE_' + tag.toUpperCase()) !== -1 && !settled) {
-          settled = true; resolve(true);
+          settled = true; delete window[cbName]; resolve(true);
         }
       };
-      setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, 2500);
+      setTimeout(() => { if (!settled) { settled = true; delete window[cbName]; resolve(false); } }, 2500);
     });
     try { callForm(mode, `echo KPROBE_${tag.toUpperCase()}`, cbName); }
-    catch (e) { return Promise.resolve(false); }
+    catch (e) { delete window[cbName]; return Promise.resolve(false); }
     return done;
   }
 

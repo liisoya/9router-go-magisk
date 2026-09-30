@@ -76,6 +76,10 @@ else
     H="$(health)"
     [ "$H" = "200" ] && ok "T2 已自愈：新 pid=$NEW cgroup=$(cgof "$NEW") /health=200" \
                      || no "T2 进程回来了但 /health=$H（引擎自身问题，看 9router.log）"
+    # T2b 死因取证（2026-09-30：9 次判死零死因，崩溃后只能考古）——判死必须留下证据行
+    grep -q "死因取证" "$DATA_DIR/watchdog.log" 2>/dev/null \
+      && ok "T2b 判死留下了死因取证行（pid 去向 + oom_kill 增量）" \
+      || no "T2b 判死没有死因取证行（下次崩溃还得考古）"
   fi
 fi
 

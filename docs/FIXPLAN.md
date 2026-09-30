@@ -1218,6 +1218,52 @@
   异常的上下文里连 `sleep/date` 都执行不了（`/system/bin/sleep: No such file` ×340，r1 重写
   后未再现）→ 值得显式设 PATH 兜底。
 
+## Phase 38 · 死因取证落地 + 全量架构扫描（9 项，8 修 1 记）✅ 2026-09-30
+
+> 用户决策："把死因取证做了，以后能查到崩溃情况；再扫一遍有 BUG 就修，没有就发包。"
+> 扫描按热区加权（Phase 33–38 连续改动的 module/lib 三件套 + 引擎转发路径 + webroot 桥）。
+
+- [x] **死因取证（Phase 37 遗留①）**：判死时进程已消失，wait 不可得 → 能拿到的客观证据
+  只有两样，现在两条判死路径都记：
+  - **CHLD 路径**：退出码旁增记 `oom_delta`（cgroup `memory.events` 的 oom_kill 相对基线的
+    增量 —— 137=SIGKILL 时它回答"是不是被内存回收杀的"）。
+  - **轮询路径**：`死因取证：pid=… 已消失 / 仍活着但已不是引擎（号被复用）；oom_kill 增量…；
+    引擎最后 cgroup=…`——"号被复用"正是 2026-09-30 事故的形状，没有这行只能考古。
+  - 支撑纯函数（离线可断言）：`life_cgroup_memory_events`（路径映射，拒相对路径/`..`）、
+    `life_oom_kill_count`（读不到**不冒充 0**）；守护侧 `oom_delta`/`mark_engine_alive`。
+  - 基线策略：`oom_base` 在拉起/收养时采样、保持粘性（增量窗口 = 自引擎拉起以来，不因
+    每轮刷新被抹掉）；`eng_cg` 每轮刷新（v2 per-pid cgroup 随旧进程消失，架构审查 S6）。
+  - 真机门禁 **T2b**：强杀引擎自愈后，watchdog.log 必须出现"死因取证"行。
+- [x] **全量扫描修复（8 项，全部带门禁）**：
+  - **S1 自环转发无守卫（高）**：baseUrl 配成本代理监听地址 = 请求链路回到自己，每跳真实
+    消耗记账/落库/goroutine。新增 `internal/handlers/chat/selfloop.go`：**窄比较**（回环主机
+    + 本机端口才判自环；局域网 IP/其他端口不受影响 —— 不复用 AssertPublicURL，它会把合法
+    的本机 Ollama 一并误杀）。守卫放在 `getProviderConfig` —— chat/media/responses 全经它
+    取上游配置，一处覆盖全部转发路径。回归：纯函数表驱动 + `GetProviderConfig` 拒绝/放行
+    两断言。
+  - **S2 全模块不设 PATH（高）**：sleep 失效会让 wait.sh 空转跑满次数（restart 谎报
+    engine=down）。5 个入口脚本（service/ops/action/watchdog/uninstall）各加一行显式 PATH
+    （toybox 已知路径在前、调用方 PATH 追加在后）。
+  - **S3 对非子进程 wait（中）**：ensure 返回 `running`（引擎是别人起的）也记 `*_ours` →
+    死亡时 wait 非子进程 = 伪造"退出码 127"并绕过去抖。现在只有 `started` 才记账。
+  - **S4 ev_chld 清位吞事件（中）**：引擎在处理段死亡 → CHLD 置位后被无条件清零 → 死因
+    永久丢失、自愈退化成最多 120s。现在有 `*_ours` 时保持置位交确认分支消费。
+  - **S5 身份指纹裸子串（中，Phase 37 自己引入的反向口子）**：cmdline 含 "9router-go" 即
+    认亲 —— WebUI 高频跑 `sqlite3 …/9router-go/db/…`，pid 恰被它复用时误报复发。改按
+    **完整参数段**匹配（heredoc 逐行，零 fork）。
+  - **S6 取证锚点陈旧（中）**：eng_cg 只在为空时记 → 引擎被外部替换后 cgroup 是旧的 →
+    死因取证恒"不可读"。现在每轮刷新（oom_base 保持粘性）。
+  - **S7 install-module 顶层 mv 静默失败（中低）**：如实 `install-failed` + 释放维护窗口 +
+    把服务拉回来（目录已换无法完整回滚，至少不谎报）。
+  - **S8 关键文件非原子写（中低）**：runtime.env / dns-upstreams 改 `.tmp + mv`（照抄
+    bridge.js writeFile 的既有惯例）—— 半份 runtime.env 会让下次 source 端口漂移。
+  - **S9 webroot 桥（低）**：哨兵改 `lastIndexOf`（readFile 内容恰含 `__KMOD_DONE__` 时
+    旧实现提前截断；新增回归用例，旧实现必红）；probe() 超时/异常路径补注销全局回调。
+- **观察项（不修，如实记录）**：bridge.js 的 heredoc 定界符与 `${f}` 未走 shq（当前不触发）；
+  库内全局变量纪律的三处既有裸名例外（当前无嵌套使用关系，属脆弱点非现行 bug）。
+- **门禁**：LIFECYCLE **70/0（+1 跳过）**、完整离线档 **17/0**、面板命令层 **27/0**（+1）、
+  Go chat 包（含新增 2 个自环用例）全绿；真机 T2b 随设备门禁验证。
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |

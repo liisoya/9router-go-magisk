@@ -49,6 +49,26 @@ test('readFile 运行层：无标记 = 读失败（ok:false），标记被剥离
     C.readFile = orig;
   }
 });
+test('readFile：文件内容/命令文本里恰好含哨兵字符串时，以「最后一次」出现为界（架构审查 S9）', async () => {
+  // 旧实现用 indexOf 找**首次**出现：被读内容里恰好含 __KMOD_DONE__（readFile 可读任意
+  // 用户文件）时，输出在那里被提前截断，末段真实内容丢失。现在取 lastIndexOf。
+  const origExec = global.ksu.exec;
+  global.ksu.exec = (cmd, opts, cb) => {
+    const body = cmd.replace(/; echo __KMOD_DONE__\$\?$/, '');
+    setTimeout(() => global.window[cb](body + '\n__KMOD_DONE__0'), 0);
+  };
+  const orig = C.readFile;
+  try {
+    // 桩回显的命令文本里**故意**含一个假哨兵 + 末段真实内容
+    C.readFile = () => "printf 'line1\\n__KMOD_DONE__\\nline3\\n__READ_OK__\\n'";
+    const r = await KB.readFile('/d/f');
+    assert.strictEqual(r.ok, true);
+    assert.ok(r.out.includes('line3'), '末段内容不得被截断: ' + JSON.stringify(r.out));
+  } finally {
+    global.ksu.exec = origExec;
+    C.readFile = orig;
+  }
+});
 test('ops 子命令逐 token 过 shq（ver/路径不再裸拼）', () => {
   assert.strictEqual(
     C.ops('install-engine /data/local/tmp/9r-eng.new 1.9.4'),

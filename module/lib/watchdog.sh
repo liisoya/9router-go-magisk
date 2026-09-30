@@ -35,6 +35,12 @@
 MODDIR="$(cd "$(dirname "$0")/.." && pwd)"
 DATA_DIR="${DATA_DIR:-/data/adb/9router-go}"
 
+# PATH 显式声明（架构审查 S2）：本脚本会被 ksud/init、管理器 ksu.exec、Termux 等多上下文
+# 执行，PATH 全靠继承 —— 真机实测某些上下文里 /system/bin/sleep 根本不存在，而 sleep 失效
+# 会让 lib/wait.sh 的循环空转跑满次数（restart 谎报 engine=down、守护谎报"拉起失败"）。
+# 已知的 toybox 路径放前面，调用方 PATH 追加在后（不丢弃它的条目）。
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/sbin:/system/sbin:/system/bin:/system/xbin:/vendor/bin:/odm/bin:/product/bin:$PATH"
+
 # ── 引导证据（写在**任何 source 之前**）──
 # 2026-09-29 真机事故：开机那次守护没起来，日志里连"守护启动"都没有 —— 于是无法区分
 # "它根本没被执行"与"它在 source 库里就死了"。这行先落盘，两种情形立刻可分：
@@ -54,6 +60,24 @@ LOG="$LOG_WATCHDOG_PATH"
 # 路径与上限的唯一声明在 lib/log.sh（C4）；本守护是唯一的长驻进程，因此由它按那份声明
 # 定期轮转（log_rotate_all）。这里只留一行写日志的包装。
 log() { log_write watchdog "[$(date '+%F %T')] $*"; }
+oom_delta() {
+  # 相对基线的 oom_kill 增量（判死取证用）。系统级如实标注：引擎在根 cgroup 时该计数
+  # 是**整机**的，不专指引擎 —— 但它仍是"当时系统里有没有发生内存回收杀"的唯一客观证据。
+  # 读不到（旧内核/权限）→ 输出空，由调用方如实写"不可读"，不冒充 0。
+  _od_cg="${1:-/}"
+  _od_f="$(life_cgroup_memory_events "$_od_cg" 2>/dev/null)" || { echo ""; return; }
+  _od_now="$(life_oom_kill_count "$_od_f" 2>/dev/null)"
+  case "$_od_now" in '') echo ""; return ;; esac
+  case "$oom_base" in
+    ''|*[!0-9]*) echo "oom_kill=$_od_now（无基线）" ;;
+    *) echo "oom_kill 增量=$(( _od_now - oom_base ))（系统级计数，基线 $oom_base）" ;;
+  esac
+}
+mark_engine_alive() {
+  # 记录"引擎活着"时的取证锚点：最后 cgroup + oom 基线（拉起成功 / 首次观测到健康时调用）
+  eng_cg="$(life_cgroup_of "${1:-$(life_engine_pid)}" 2>/dev/null)"
+  oom_base="$(life_oom_kill_count "$(life_cgroup_memory_events "${eng_cg:-/}" 2>/dev/null)" 2>/dev/null)"
+}
 wait_engine() {
   # 引擎起来后要 bind + 载入目录才可用；固定 3s 在高负载时会误报"拉起失败"
   # （真机见过：日志说失败，但 2s 后 /health 200）。轮询到 10s，如实判定。
@@ -88,6 +112,8 @@ rss_at=0           # 上次记内存时的 elapsed
 started_at=""      # B4：墙钟起点（首次采样时填 `date +%s`）
 eng_ours=""        # 本守护亲手拉起的引擎 pid —— 只有它才能 wait 到退出原因
 dns_ours=""
+eng_cg=""          # 引擎最后所在的 cgroup —— 判死时取死因证据用（进程一死 /proc/<pid> 就没了）
+oom_base=""        # oom_kill 计数基线（引擎拉起时采样；判死时算增量回答"是不是被内存回收杀的"）
 confirmed_eng=0    # CHLD 已确认该子进程真的退出 → 跳过"连续两次判死"去抖
 confirmed_dns=0
 ev_chld=0
@@ -114,6 +140,10 @@ while :; do
       wait "$eng_ours" 2>/dev/null
       _ec=$?
       log "引擎退出（$(life_exit_reason "$_ec") pid=$eng_ours）"
+      # 退出码只回答"怎么死的"（137=SIGKILL），oom_kill 增量回答"是不是被内存回收杀的"——
+      # 两者放在一起，下次不用再考古（2026-09-30：9 次判死零死因的教训）
+      _c_oom="$(oom_delta "${eng_cg:-/}")"
+      [ -n "$_c_oom" ] && log "死因取证：$_c_oom；引擎最后 cgroup=${eng_cg:-未知}"
       eng_ours=""
       confirmed_eng=1
     fi
@@ -144,10 +174,14 @@ while :; do
       log "收到 restart 请求：停 → 重拉（免疫上下文）"
       life_stop_all >/dev/null
       eng_ours=""; dns_ours=""       # 旧的都停了：别拿它们的 pid 去 wait（取不到状态）
-      life_ensure_engine >/dev/null 2>&1
+      _ee="$(life_ensure_engine 2>/dev/null)"
       if wait_engine; then
-        eng_ours="$(life_engine_pid)"
-        log "重启完成 pid=$eng_ours cgroup=$(life_cgroup_of "$eng_ours")"
+        # 只有「本守护亲手拉起」(started) 才记 eng_ours —— 引擎若是别人起的（running），
+        # 它不是我们的子进程，wait 不到退出码；记了只会伪造「退出码 127」的死因并绕过
+        # 去抖（架构审查 S3）
+        [ "$_ee" = "started" ] && eng_ours="$(life_engine_pid)"
+        mark_engine_alive "$eng_ours"
+        log "重启完成 pid=$(life_engine_pid) cgroup=$(life_cgroup_of "$(life_engine_pid)")"
       else
         log "重启后引擎仍不在（详见 9router.log）"
       fi
@@ -155,16 +189,16 @@ while :; do
       confirmed_eng=0
       # stop_all 把 DNS 也停了：请求既然停了它，就必须由同一处把它拉回来
       # （否则只能靠下面的监督分支补救，白等一个周期）
-      life_ensure_dns >/dev/null 2>&1
-      dns_ours="$(life_dns_pid)"
+      _de="$(life_ensure_dns 2>/dev/null)"
+      [ "$_de" = "started" ] && dns_ours="$(life_dns_pid)"
       miss_dns=0
       confirmed_dns=0
       ;;
     start)
-      life_ensure_engine >/dev/null 2>&1
-      life_ensure_dns >/dev/null 2>&1
-      eng_ours="$(life_engine_pid)"
-      dns_ours="$(life_dns_pid)"
+      _ee="$(life_ensure_engine 2>/dev/null)"
+      _de="$(life_ensure_dns 2>/dev/null)"
+      [ "$_ee" = "started" ] && eng_ours="$(life_engine_pid)"
+      [ "$_de" = "started" ] && dns_ours="$(life_dns_pid)"
       miss_eng=0
       miss_dns=0
       confirmed_eng=0
@@ -180,16 +214,45 @@ while :; do
     if life_engine_healthy; then
       miss_eng=0
       confirmed_eng=0
+      # 取证锚点：cgroup 会随引擎被外部替换而变（v2 的 per-pid 路径随旧进程消失，架构审查
+      # S6）→ 每轮刷新 eng_cg；oom_base 保持粘性（只在拉起/收养时采样，避免把上次刷新之后
+      # 的击杀证据抹掉）。判死时进程已消失，/proc/<pid>/cgroup 读不到，只能靠这里的缓存。
+      _h_cg="$(life_cgroup_of "$(life_engine_pid)" 2>/dev/null)"
+      if [ "$_h_cg" != "$eng_cg" ]; then
+        eng_cg="$_h_cg"
+        case "$oom_base" in
+          '') oom_base="$(life_oom_kill_count "$(life_cgroup_memory_events "${eng_cg:-/}" 2>/dev/null)" 2>/dev/null)" ;;
+        esac
+      fi
     else
       miss_eng=$((miss_eng + 1))
       if [ "$confirmed_eng" = "1" ] || [ "$miss_eng" -ge 2 ]; then
         _why="连续 $miss_eng 次判死"
         [ "$confirmed_eng" = "1" ] && _why="事件确认已退出"
         log "引擎不在（$_why），拉起"
-        life_ensure_engine >/dev/null 2>&1
+        # ── 死因取证（轮询路径拿不到 wait 的退出码，能拿到的客观证据就这两样）──
+        #   ① pid 的两种死法可区分：「已消失」vs「仍活着但已不是引擎（号被复用）」——
+        #      后者正是 2026-09-30 事故里"面板谎报 up"的形状，没有这行就只能考古
+        #   ② oom_kill 增量：回答"是不是被内存回收杀的"（系统级计数，如实标注）
+        _d_pid="$(life_engine_pid)"
+        _d_alive=0
+        [ -n "$_d_pid" ] && kill -0 "$_d_pid" 2>/dev/null && _d_alive=1
+        _d_z=""
+        [ "$_d_alive" = "1" ] && { read -r _d_z 2>/dev/null < "/proc/$_d_pid/stat" || _d_z=""; }
+        if [ "$_d_alive" = "1" ] && [ -n "$_d_z" ] && ! life_stat_is_zombie "$_d_z"; then
+          _d_ev="pid=$_d_pid 仍活着但已不是引擎（号被无关进程复用）"
+        else
+          _d_ev="pid=$_d_pid 已消失（含刚退出的僵尸态）"
+        fi
+        _d_oom="$(oom_delta "${eng_cg:-/}")"
+        log "死因取证：$_d_ev；${_d_oom:-oom_kill 不可读（旧内核/权限）}；引擎最后 cgroup=${eng_cg:-未知}"
+        eng_cg=""
+        _ee="$(life_ensure_engine 2>/dev/null)"
         if wait_engine; then
-          eng_ours="$(life_engine_pid)"
-          log "引擎已拉起 pid=$eng_ours cgroup=$(life_cgroup_of "$eng_ours")"
+          # 只有「本守护亲手拉起」(started) 才记 eng_ours（架构审查 S3，见 restart 分支注释）
+          [ "$_ee" = "started" ] && eng_ours="$(life_engine_pid)"
+          mark_engine_alive "$eng_ours"
+          log "引擎已拉起 pid=$(life_engine_pid) cgroup=$(life_cgroup_of "$(life_engine_pid)")"
         else
           log "拉起失败（详见 9router.log）"
         fi
@@ -206,8 +269,8 @@ while :; do
       miss_dns=$((miss_dns + 1))
       if [ "$confirmed_dns" = "1" ] || [ "$miss_dns" -ge 2 ]; then
         log "dnsfwd 不在，拉起"
-        life_ensure_dns >/dev/null 2>&1
-        dns_ours="$(life_dns_pid)"
+        _de="$(life_ensure_dns 2>/dev/null)"
+        [ "$_de" = "started" ] && dns_ours="$(life_dns_pid)"
         miss_dns=0
         confirmed_dns=0
       fi
@@ -246,7 +309,15 @@ while :; do
   [ -z "$eng_ours" ] && poll_iv="$iv_fallback"
   # 先清事件位再睡：否则本轮自己 fork 出来的 CHLD 会让下一轮立即空转
   # （真机验证过"fork 之后的下一次 wait 不会被迟到的 CHLD 打断"，清位是免费的保险）。
-  ev_chld=0
+  # 但**有需要确认的子进程时不清 CHLD 位**（架构审查 S4）：引擎若在本段（处理/监督/维护）
+  # 死亡，CHLD 在这里置位、又被无条件清零，它的退出状态就永远没有 wait 消费点 ——
+  # 死因永久丢失、自愈退化成最多 2×60s 轮询。保持置位让下一轮 131 行的确认分支消费；
+  # sleep 的 CHLD 污染由该分支的「pidfile==eng_ours」守卫挡住。
+  if [ -n "$eng_ours" ] || [ -n "$dns_ours" ]; then
+    :
+  else
+    ev_chld=0
+  fi
   ev_usr1=0
   sleep "$poll_iv" & _sp=$!
   wait "$_sp" 2>/dev/null

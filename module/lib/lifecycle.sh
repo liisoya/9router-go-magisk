@@ -139,13 +139,44 @@ life_pid_file_is_bin() {
   case "$_b_exe" in
     */"$_b_bn"|*/"$_b_bn (deleted)") return 0 ;;
   esac
-  # ② cmdline 指纹：脚本壳（exe 指向解释器）或 exe 受限时兜底
+  # ② cmdline 指纹：按「完整参数段」匹配，**不能裸子串** —— WebUI 高频跑
+  #   `sqlite3 …/9router-go/db/…`、`sh …/lib/ops.sh status`，cmdline 都含 "9router-go"
+  #   子串；引擎刚死、pid 恰被这类短命进程复用时，裸子串会把它们认成引擎 →
+  #   Phase 37 要修的误报换个方向复发（架构审查 S5）。
   _b_cl="$(tr '\0' '\n' 2>/dev/null < "/proc/$_b_p/cmdline")"
-  case "$_b_cl" in *"$_b_bn"*) return 0 ;; esac
+  _b_hit=0
+  while IFS= read -r _b_arg; do
+    case "$_b_arg" in "$_b_want"|*/"$_b_bn"|*/"$_b_bn (deleted)") _b_hit=1 ;; esac
+  done <<EOF
+$_b_cl
+EOF
+  [ "$_b_hit" = "1" ] && return 0
   # ③ 两条身份信息都读到了、但都不是它 → pid 已被复用（上面那个误报的来源）
   if [ -n "$_b_exe$_b_cl" ]; then return 1; fi
   # ④ 什么都读不到 → 宽松：不推翻 pidfile（宁可漏判一次复用，不可错杀活着的引擎）
   return 0
+}
+life_cgroup_memory_events() {
+  # cgroup 路径（life_cgroup_of 的输出："0::" 之后的部分，如 "/" 或 "/apps/uid_1/pid_2"）
+  # → 该组的 memory.events 路径。为什么单独成纯函数：**为了能离线断言** —— 路径拼错或越权
+  # 拼接这类错误，真机上只会表现为"读不到"（然后被当成内核不支持而漏过），离线可以精确锁住。
+  # 防御：必须以 / 开头、不得含 ".."（值虽来自 /proc 的内核输出，拼接仍按最坏情况设防）。
+  _cme_c="${1:-}"
+  case "$_cme_c" in
+    /|/*) ;;
+    *) return 1 ;;
+  esac
+  case "$_cme_c" in *..*) return 1 ;; esac
+  echo "/sys/fs/cgroup${_cme_c%/}/memory.events"
+}
+life_oom_kill_count() {
+  # memory.events 里的 oom_kill 计数。读不到（文件缺失/旧内核/没有这一行）→ 如实失败，
+  # **不冒充 0** —— "没读到"和"确实是 0"是两回事（同 lib/ops.sh 那条读数纪律）。
+  _ok_f="${1:-}"
+  [ -n "$_ok_f" ] || return 1
+  _ok_v="$(sed -n 's/^oom_kill //p' "$_ok_f" 2>/dev/null | tail -n 1)"
+  case "$_ok_v" in ''|*[!0-9]*) return 1 ;; esac
+  echo "$_ok_v"
 }
 life_cgroup_escape() {
   # 把进程从"启动者的 cgroup"里挪出去（连坐免疫）。真机实测：WebUI 经 ksu.exec 启动的
@@ -290,7 +321,11 @@ life_write_runtime_env() {
       _v="$(life_carrier_env_value "$_k" 2>/dev/null)"
       echo "$_k=$(life_env_q "$_v")"
     done
-  } > "$LIFE_RUNTIME_ENV" 2>/dev/null || return 1
+  } > "$LIFE_RUNTIME_ENV.tmp" 2>/dev/null || { rm -f "$LIFE_RUNTIME_ENV.tmp"; return 1; }
+  # 原子落盘（与 webroot/bridge.js 的 writeFile 同一条纪律，架构审查 S8）：写一半被杀只会
+  # 留下 .tmp，不会留下半份 runtime.env 等着下次被 source —— 轻则语法错、重则 PORT 缺失
+  # 导致引擎端口漂移。
+  mv "$LIFE_RUNTIME_ENV.tmp" "$LIFE_RUNTIME_ENV" 2>/dev/null || { rm -f "$LIFE_RUNTIME_ENV.tmp"; return 1; }
   chmod 600 "$LIFE_RUNTIME_ENV" 2>/dev/null
   echo "$LIFE_RUNTIME_ENV"
 }
@@ -456,7 +491,9 @@ life_prep() {
       echo "nameserver 223.5.5.5"
       echo "nameserver 119.29.29.29"
       echo "nameserver 1.1.1.1"
-    } > "$LIFE_UPSTREAMS"
+    } > "$LIFE_UPSTREAMS.tmp" 2>/dev/null || rm -f "$LIFE_UPSTREAMS.tmp"
+    # 原子落盘（架构审查 S8）：半份 upstreams 会让 dnsfwd 起不来或解析到坏上游
+    [ -s "$LIFE_UPSTREAMS.tmp" ] && { mv "$LIFE_UPSTREAMS.tmp" "$LIFE_UPSTREAMS" 2>/dev/null || rm -f "$LIFE_UPSTREAMS.tmp"; }
   fi
   if [ ! -f "$DATA_DIR/initial-password" ]; then
     printf '123456\n' > "$DATA_DIR/initial-password"

@@ -9,6 +9,10 @@
 USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port>"
 # 环境变量: DATA_DIR（默认 /data/adb/9router-go）、PORT（显式覆盖端口）
 
+# PATH 显式声明（架构审查 S2）：本脚本被 WebUI(ksu.exec)/管理器/Termux 多上下文执行，
+# 且第 17 行的 dirname 在 source lifecycle 之前就要用 —— PATH 必须在任何工具调用前就位。
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/sbin:/system/sbin:/system/bin:/system/xbin:/vendor/bin:/odm/bin:/product/bin:$PATH"
+
 # MODDIR 可覆盖（与 DATA_DIR 同形）：让 install-engine / install-module 的**成功与回滚路径**
 # 能在临时 MODDIR 上离线端到端重放（2026-09-30 架构扫描 C2）。此前它写死成"脚本所在目录的上级"
 # → 安装只能真写真实模块目录 → 那两条最安全敏感的分支**只在真机上赌**，唯一的顺序保障是
@@ -273,7 +277,17 @@ cmd_install_module() {
   # 顶层文件（module.prop / service.sh / uninstall.sh / …）同样用 mv 换 inode
   for _f in "$_stage"/*; do
     [ -f "$_f" ] || continue
-    mv -f "$_f" "$MODDIR/" 2>/dev/null
+    # 顶层文件 mv 失败不得静默（架构审查 S7）：SELinux 拒绝 / MODDIR 只读时，新 lib 配旧
+    # service.sh 会带着版本错配照常收尾。此时目录已换、无法完整回滚 —— 如实报失败，并
+    # 释放维护窗口、把服务拉回来（别让用户停在"装完了"的假象里）。
+    if ! mv -f "$_f" "$MODDIR/" 2>/dev/null; then
+      rm -rf "$_stage"
+      life_wd_hold_release
+      life_ensure_engine >/dev/null 2>&1
+      life_ensure_dns >/dev/null 2>&1
+      echo "install-failed"
+      return 0
+    fi
   done
   rm -rf "$_stage"
   chmod 0755 "$MODDIR"/*.sh "$MODDIR"/lib/*.sh "$MODDIR"/bin/* 2>/dev/null

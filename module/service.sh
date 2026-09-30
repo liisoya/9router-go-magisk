@@ -9,6 +9,10 @@
 #      127.0.0.1:53（真机实测该文件根本不存在），必须有本地转发器接住；
 #   2) SSL_CERT_DIR：没有它所有 HTTPS 与更新检查都会失败。
 
+# PATH 显式声明（架构审查 S2）：开机路径的 PATH 由 init/ksud 决定，真机实测过某些上下文
+# 连 /system/bin/sleep 都没有 —— 而 ping 等待与引擎拉起全依赖这些工具。
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/sbin:/system/sbin:/system/bin:/system/xbin:/vendor/bin:/odm/bin:/product/bin:$PATH"
+
 # MODDIR 必须解析为绝对路径：以 `sh service.sh`（相对路径）调用时
 # ${0%/*} 会得到 "service.sh"，导致 bin 路径拼错、引擎起不来。
 case "$0" in
