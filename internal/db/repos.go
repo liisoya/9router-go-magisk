@@ -431,11 +431,28 @@ func (r *Repo) UpdateProviderNode(id, name, data string) (*models.ProviderNode, 
 }
 
 // DeleteProviderNode deletes a provider node and its associated connections.
+//
+// **原子 + 不吞错**（2026-09-30）：过去是"先删节点、再删连接"两条独立语句，而且第二条的
+// 错误被丢弃（`_, _ =`）—— 一旦它在中间失败（或进程被打断），库里就留下"节点没了、连接还在"
+// 的半状态：该 provider 的模型只能以**内部节点 ID** 出现在可用模型里（用户的报障现场），
+// 而清理孤儿按"有连接就算活着"的判据永远不会碰它。现在两条删除同处一个事务：
+// 要么都成，要么都不成，不会再有新的半状态；真出错也会如实返回而不是静默。
 func (r *Repo) DeleteProviderNode(id string) error {
-	if _, err := r.db.Exec("DELETE FROM providerNodes WHERE id = ?", id); err != nil {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("delete provider node %s: begin: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec("DELETE FROM providerNodes WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete provider node %s: %w", id, err)
 	}
-	_, _ = r.db.Exec("DELETE FROM providerConnections WHERE provider = ?", id)
+	if _, err := tx.Exec("DELETE FROM providerConnections WHERE provider = ?", id); err != nil {
+		return fmt.Errorf("delete provider connections %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete provider node %s: commit: %w", id, err)
+	}
 	return nil
 }
 

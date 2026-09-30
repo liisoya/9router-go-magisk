@@ -428,6 +428,9 @@ func queryFlagEnabled(v string) bool {
 // The response always carries `mode` and `connections` so a caller can tell a
 // candidate catalog from a usable model list.
 func (h *ChatHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
+	// 自愈历史数据（带节流）：节点/连接缺 prefix 时，模型会以**内部节点 ID** 出现在列表里
+	// （`openai-compatible-chat-<uuid>/模型名`，2026-09-30 用户反馈）。见 prefix_heal.go。
+	h.healCustomModelPrefixes()
 	mode := modelsListModeFromQuery(r)
 	result := h.buildModelsListResult(r.Context(), mode)
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{

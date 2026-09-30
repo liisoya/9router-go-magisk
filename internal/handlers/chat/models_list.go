@@ -9,6 +9,7 @@ import (
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlers/shared"
+	"9router/proxy/internal/log"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
 )
@@ -336,6 +337,19 @@ func (h *ChatHandler) buildModelsListForMode(
 		return disabled[provider][modelID]
 	}
 	filterConnected := mode == modeListConnected && usable != nil
+	// provider → 连接上登记的展示前缀（只有非空才记）。用于自定义模型分支：
+	// 节点前缀取不到时，连接上的前缀是第二个合法来源（与 appendConnectionModels 同源），
+	// 两个都没有时才算"解析不出名字"。必须真查连接，不能假设：本函数在 "无连接" 与
+	// "catalog 模式" 两种情况下都会走到自定义模型分支，而 catalog 模式可能带着连接。
+	connAlias := make(map[string]string, len(allConns))
+	for _, c := range allConns {
+		if c == nil {
+			continue
+		}
+		if p := parseConnectionModelData(c).ProviderSpecificData.Prefix; p != "" {
+			connAlias[c.Provider] = p
+		}
+	}
 
 	// 1. Combos first (upstream pushes them before provider models).
 	data = h.appendCombos(data, seen)
@@ -359,7 +373,7 @@ func (h *ChatHandler) buildModelsListForMode(
 				data = appendStaticModel(data, seen, alias, mID)
 			}
 		}
-		data = h.appendLooseCustomModels(data, seen, disabled, filterConnected, usable)
+		data = h.appendLooseCustomModels(data, seen, disabled, filterConnected, usable, connAlias)
 		return finalizeModels(data)
 	}
 
@@ -425,6 +439,15 @@ func (h *ChatHandler) appendConnectionModels(
 		outputAlias = connData.ProviderSpecificData.Prefix
 	case connData.Prefix != "":
 		outputAlias = connData.Prefix
+	}
+	if outputAlias == providerID && isInternalNodeAlias(providerID) {
+		// 客户端会把这个别名当**模型 ID** 复制走 —— 内部节点 ID 绝不能出现在这里
+		// （2026-09-30 反馈：`openai-compatible-chat-<uuid>/模型名`）。这条连接没有任何可用
+		// 前缀（连接上没有、注册表也没有），说明它的节点还没被自愈补回来（自愈有 60s 节流）
+		// → 这一轮先不发布，等自愈把节点补回来就变成正常名字。
+		log.Warn("models", "暂不发布别名无法解析的连接（避免内部节点 ID 出现在模型列表）",
+			"provider", providerID, "connection", conn.ID)
+		return data
 	}
 
 	ids := connData.ProviderSpecificData.EnabledModels
@@ -637,6 +660,7 @@ func (h *ChatHandler) appendLooseCustomModels(
 	disabled map[string]map[string]bool,
 	filterConnected bool,
 	usable map[string]bool,
+	connAlias map[string]string,
 ) []ModelInfoObject {
 	prefixMap := h.providerNodePrefixMap()
 	customs := h.customModelsByProvider()
@@ -645,8 +669,19 @@ func (h *ChatHandler) appendLooseCustomModels(
 			continue
 		}
 		prefix := providerID
-		if mapped, ok := prefixMap[providerID]; ok && mapped != "" {
-			prefix = mapped
+		switch {
+		case prefixMap[providerID] != "":
+			prefix = prefixMap[providerID]
+		case connAlias[providerID] != "":
+			prefix = connAlias[providerID]
+		case isInternalNodeAlias(providerID):
+			// **内部节点 ID 绝不出现在用户面前**（2026-09-30 反馈）：两个合法来源
+			// （节点前缀、连接前缀）都解析不出名字时，宁可这条不发布 —— 发布出去
+			// 用户看到的就是 `openai-compatible-chat-<uuid>/模型名` 这种实现细节。
+			// 自愈（db.HealProviderNodePrefixes）会尽力先把节点/前缀补回来，这里是最后兜底；
+			// 真走到这一步说明连**连接的名字**都没有，无从命名 → 记日志便于排查。
+			log.Warn("models", "跳过解析不出名字的自定义 provider（不发布内部节点 ID）", "provider", providerID)
+			continue
 		}
 		for _, cm := range list {
 			if !isLLMCustomModel(cm.Type) {

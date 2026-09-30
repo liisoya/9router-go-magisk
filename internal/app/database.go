@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 
 	"go.uber.org/fx"
 
@@ -53,6 +54,22 @@ func ProvideDatabase(lc fx.Lifecycle, cfg *config.Config) (*sql.DB, error) {
 		if statErr == nil {
 			return nil, fmt.Errorf("database leases: %w", err)
 		}
+	}
+
+	// 展示前缀自愈：给"有名字但缺 prefix"的节点及其连接补回前缀。
+	// 为什么在启动时做：模型列表发布 `openai-compatible-chat-<uuid>/模型名` 这类**内部 ID**
+	// 就是因为前缀缺失（2026-09-30 用户反馈），而这类历史数据（旧版本建的节点 / 恢复的备份 /
+	// 别的客户端建的节点）不会自己好起来。纯补空（绝不覆盖已有前缀）、单事务、幂等；
+	// 读路径另有一份带节流的同款自愈（handlers/chat/prefix_heal.go），这里是"开机即修"。
+	// 与 leases 同款 best-effort：共享测试二进制可能拿着已删除临时文件的连接。
+	if res, err := db.NewRepo(conn).HealProviderNodePrefixes(); err != nil {
+		_, statErr := conn.Exec("SELECT 1")
+		if statErr == nil {
+			log.Printf("[db] 展示前缀自愈失败（不影响启动）：%v", err)
+		}
+	} else if res.Nodes > 0 || res.Connections > 0 || res.Resurrected > 0 {
+		log.Printf("[db] 展示前缀自愈：补回节点 %d 个 / 连接 %d 个 / 悬空连接补回节点 %d 个",
+			res.Nodes, res.Connections, res.Resurrected)
 	}
 
 	lc.Append(fx.Hook{
