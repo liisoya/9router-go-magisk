@@ -151,6 +151,20 @@ test('孤儿判定：内置别名（oc/qd/openrouter）结构性豁免', () => {
   assert.ok(!orphans.includes('qd'));
   assert.ok(!orphans.includes('openrouter'));
 });
+// 2026-09-30 用户反馈（清理孤儿后模型仍以内部 ID 出现）把边界暴露出来：
+// "节点已删、但连接还在"的 UUID 别名**仍然可路由**（provider 就是连接上的 provider）→
+// 它绝不能进孤儿清单。改"存活集合只认节点"看起来更干净，实际会误删能用的模型。
+test('孤儿判定：只剩连接（节点已删）的 UUID 别名不算孤儿 —— 它仍可路由', () => {
+  const dangling = 'openai-compatible-chat-b5b35395-3025-4810-90cd-5473475261b8';
+  const aliases = KP.extractAliases([dangling + '|some-model|llm']);
+  assert.deepStrictEqual(KP.computeOrphans(aliases, new Set([dangling])), [],
+    '只剩连接的别名被判成孤儿 → 清理会误删仍可路由的模型');
+});
+test('存活集合：连接 provider 必须计入（扫描行里不含 |）', () => {
+  const { live } = KP.parseScanLines(['deepseek', 'openai-compatible-chat-069fdcc2-f29b-41da-b3b9-11f4702667ac']);
+  assert.ok(live.has('deepseek') && live.has('openai-compatible-chat-069fdcc2-f29b-41da-b3b9-11f4702667ac'),
+    '连接 provider 没进存活集合 → 该 provider 的自定义模型会被误删');
+});
 
 // ── 引擎更新装前门禁（2026-09-26 事故 fixture）──
 // 事故现场：加速节点对 release 资产返回 404，正文 "Not Found"（9 字节）被装成引擎，

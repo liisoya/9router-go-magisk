@@ -199,6 +199,13 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/test-install-gate.sh ]; then
       run "INSTALLGATE 装包门禁先于动作（坏包不得停服务）" sh tools/test-install-gate.sh
     fi
+    # INSTALLFLOW：install-engine / install-module 的**成功与回滚**全路径（2026-09-30 架构扫描 C2）
+    # 起因：安装是最安全敏感的动作，但这两条分支过去无法离线重放（MODDIR 写死）→ 只在真机上赌。
+    # 现在把 MODDIR 指到临时目录 + OPS_LIB_ONLY 只加载定义，就能在真实文件系统上跑完整流程：
+    # 成功才写版本/刷 .bak、起不来就回滚且**绝不谎报版本**、不合格源绝不碰现有二进制。
+    if [ -f tools/test-install-flow.sh ]; then
+      run "INSTALLFLOW 安装全路径（成功/回滚/门禁/装包）" sh tools/test-install-flow.sh
+    fi
   fi
 fi
 

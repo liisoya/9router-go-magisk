@@ -9,7 +9,12 @@
 USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port>"
 # 环境变量: DATA_DIR（默认 /data/adb/9router-go）、PORT（显式覆盖端口）
 
-MODDIR="$(cd "$(dirname "$0")/.." && pwd)"
+# MODDIR 可覆盖（与 DATA_DIR 同形）：让 install-engine / install-module 的**成功与回滚路径**
+# 能在临时 MODDIR 上离线端到端重放（2026-09-30 架构扫描 C2）。此前它写死成"脚本所在目录的上级"
+# → 安装只能真写真实模块目录 → 那两条最安全敏感的分支**只在真机上赌**，唯一的顺序保障是
+# tools/test-install-gate.sh 的 grep 行号（文本形状，不是结构）。回归：tools/test-install-flow.sh。
+# 默认值不变（真实调用方不设这个变量 → 行为与过去完全一致）。
+MODDIR="${MODDIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 DATA_DIR="${DATA_DIR:-/data/adb/9router-go}"
 DB_FILE="$DATA_DIR/db/data.sqlite"
 SQLITE3="$MODDIR/bin/sqlite3"
@@ -345,6 +350,16 @@ cmd_seed_key() {
     echo "user-deleted"
   fi
 }
+
+# ── 只加载模式（测试专用）────────────────────────────────────────────
+# `OPS_LIB_ONLY=1` 时只取本文件的函数定义、不跑下面的 dispatch。存在的理由：本文件的编排逻辑
+# （install-engine / install-module）是全仓最安全敏感的动作，而它过去**无法被 source**
+# （裸 dispatch 会直接 usage+exit）→ 成功/回滚分支没有任何测试。回归工具用它把定义加载进
+# 临时 shell、覆盖掉"进程那一层"的 lifecycle 函数，然后在临时 MODDIR 上重放整个安装流程
+# （tools/test-install-flow.sh）。真机上没人设这个变量 → 行为完全不变。
+if [ "${OPS_LIB_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "${1:-}" in
   status)          cmd_status ;;

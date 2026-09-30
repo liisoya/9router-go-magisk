@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.5-r1",
-  "versionCode": 109050,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.5-r1/9router-go-1.9.5-r1-magisk.zip",
-  "changelog": "引擎基线升到上游 v1.9.5：新增 /v1/responses 翻译器（Chat↔Responses 双向）；Dashboard 更新弹窗四个缺陷与备份流修复（#32/#34）、issue #27/#28、配额读取节流（#30）、mimo reasoning_effort 按模型级别降级、全仓 gofmt。模块层修 11 个缺陷：门禁入口严格模式空转（报成功却一条都没跑）、管理器「操作」按钮状态全空/端口串成整行、无守护时重启丢 DNS、引擎崩溃自愈退化到 60s、改端口谎报成功、回滚点缺失仍改写配置；装包门禁先于动作、start-user 如实自报、「回滚上一版」实际回到首版、热重载失败被吞、清选中假故障。生命周期守护改事件驱动：唤醒 17280→1440 次/天、崩溃恢复 ≤12s→1.2s，并记录引擎退出原因。验证：离线全绿（JS 128 / LIFECYCLE 56 / OPSSTATUS 14 / CHECKFLAGS 10 / INSTALLGATE 7）、真机 T*36 + A*7 全绿。"
+  "version": "v1.9.5-r2",
+  "versionCode": 109051,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.5-r2/9router-go-1.9.5-r2-magisk.zip",
+  "changelog": "修复「可用模型里出现内部节点 ID」（用户反馈：清理孤儿后仍显示 openai-compatible-chat-<uuid>/模型名，而它恰恰是唯一能用的模型）。根因：自定义模型的键按 provider 节点 ID 存（设计如此），列表发布 <前缀>/<模型> 时前缀取自节点 data.prefix（连接路径取连接前缀），取不到就回退成节点 ID；而「有名字没前缀」的历史数据不是孤儿 → 清理按设计不会碰它。修法（改数据而不是改显示 —— 前缀就是客户端要填的模型 ID）：①幂等自愈补回缺失前缀（只补空 / 从节点名派生 / 冲突加后缀 / 单事务 / 不动 updatedAt），启动与读路径（节流 60s）各跑一次；②悬空连接（节点被删、连接还在）按连接上的 provider 补回节点 —— 路由只认节点前缀，只改显示名会得到「能看不能用」的假别名；③内部节点 ID 形状且解析不出名字 → 不发布（任何模式都不再泄漏）；④删节点改为单事务且不再吞错（半状态正是这类数据的源头）。同时修掉「清理孤儿」的一处并发缺陷：快照在途时若又点扫描，DELETE 会换成另一批别名（本批漏删、另一批无快照可回滚，却仍报清理成功）—— 删除改用本批冻结的 targets。模块层：install-engine / install-module 的成功与回滚路径过去无法离线重放（MODDIR 写死），现在 MODDIR 可覆盖 + 只加载模式，新增门禁 INSTALLFLOW（24 例）在临时目录上跑完整安装流程。验证：离线档 17/17、面板 JS 131/131、internal/db 10/10、真机用模块自己的 install-module 装机 + 悬空连接端到端（补回节点后模型显示为正常名）。"
 }

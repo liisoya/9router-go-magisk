@@ -63,6 +63,12 @@ test('dbOps：孤儿 SQL 形状（不翻倍引号；别名进入 LIKE/EXISTS）'
   const re = C.recheckOrphansSql([a]);
   assert.ok(re.includes(`SELECT '${a}' WHERE EXISTS (SELECT 1 FROM providerNodes WHERE id='${a}')`), re);
   assert.ok(C.scanOrphansSql().includes("SELECT id FROM providerNodes;"));
+  // 连接 provider 必须计入存活集合：只有连接（节点已删）的别名**仍然可路由**，
+  // 若有人把这条 SELECT 删掉/收窄成"只认节点"，清理会误删仍能用的模型（2026-09-30 边界）。
+  assert.ok(C.scanOrphansSql().includes("SELECT DISTINCT provider FROM providerConnections;"),
+    '扫描 SQL 丢了连接 provider → 有连接无节点的模型会被误判成孤儿并删除');
+  assert.ok(C.recheckOrphansSql([a]).includes("EXISTS (SELECT 1 FROM providerConnections WHERE provider='" + a + "')"),
+    '复查 SQL 丢了连接判据 → 删前复查会放行误删');
   assert.ok(C.credScanSql().includes('FROM providerConnections WHERE isActive=1'));
 });
 

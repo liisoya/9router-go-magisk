@@ -1038,6 +1038,99 @@
   - **已知副作用（用户确认接受）**：`versionCode` 保持 109050 → 更新器不会对**已装 r1** 的设备提示更新
     （比的是 versionCode，不是字节）；新装/手动重装不受影响。
 
+## Phase 36 · 可用模型里出现内部节点 ID（用户反馈，v1.9.5-r1）✅ 2026-09-30
+
+> 反馈：「最新的版本里，清理孤儿数据之后，还是会出现 `openai-compatible-chat-.......` 的模型」。
+> **拿不到他的数据、也无法在他的环境复现** → 按 `diagnosing-bugs` 的纪律改成**离线夹具**建回路：
+> 用他数据的形状（节点 ID 形状 + kv 键 = `<节点ID>|<模型>|llm`）+ 真实代码路径。
+
+- [x] **反馈回路（先红后绿）**：`go test ./internal/handlers/chat/ -run TestHandleModels_NoRawNodeID -v`
+  - 修复前**红**，且输出与截图**逐字一致**：`openai-compatible-chat-63ab874d-…/deepseek-flash`、`…/识图模式`
+    （覆盖"有连接"与"无连接"两条路径）；修复后**绿** ✓ 0.07s 确定性 ✓
+- [x] **根因（三层，全部读码确认）**：
+  - `kv.customModels` 的键按**节点 ID** 存（设计如此）；列表发布 `<前缀>/<模型>`，前缀来自
+    `providerNodes.data.prefix`（连接路径用连接 `providerSpecificData.prefix`），
+    **取不到就回退成节点 ID**（`models_list.go:641-650` / `appendConnectionModels` 的 `providerID` 兜底）。
+  - `ProviderNodeData` 结构连 `name` 都没有 → 历史数据（旧版本 / 恢复备份 / 别的客户端建的节点）
+    只要有 name 没 prefix，就**永久**以内部 ID 出现。
+  - 这类行**不是孤儿**（节点或连接还在）→ 清理按设计不会删 → **"清理了也没用"是必然**，清理没坏。
+- [x] **修法（改数据，不是改显示）**：前缀**就是客户端要填的模型 ID**（路由按前缀解析，
+  `resolution_test.go:157` 为证）→ 只改显示会出现"列表写 A、调用必须用 B"。
+  - `internal/db/heal.go` `HealProviderNodePrefixes`：只补空、name 派生（`/`→`-`、空白→`-`）、
+    冲突加 `-2`…、单事务、幂等、**不动 `updatedAt`**（那是"用户编辑过"的语义）。
+  - `internal/handlers/chat/prefix_heal.go`：读路径自愈，**节流 60s**（列表可能被高频轮询）；
+    `internal/app/database.go` 启动时也跑一次（best-effort，与 leases 同风格）。
+  - `appendLooseCustomModels`：**节点 ID 形状且既无节点又无连接**的别名不再发布（它路由不了）；
+    **有连接的绝不在此列**（悬空连接仍可路由，删掉就是误伤）。
+- [x] **不误伤（守卫测试 8 条）**：已有前缀不覆盖 / 幂等第二次 0 改动 / 同名冲突解 / 无 name 不猜 /
+  名字含 `/`与空白被规整 / 内置 provider（无节点）不碰 / **json 往返不丢 apiKey** / 悬空连接的模型仍在列表。
+- [x] **真机验证（同一形状）**：设备库插一个"有 name 无 prefix"的探针节点 → 装新引擎 →
+  日志 `[db] 展示前缀自愈：补回节点 1 个 / 连接 1 个`（那个连接是**库里原本就有的同类历史数据** ✓）→
+  探针 `prefix=ZZHealProbe` ✓ → 完整性：`customModels` **978 行不变**、18 条连接凭据完整
+  （3 条 oauth 的 access/refresh token 仍在）→ 探针已删、节点数回到 13 ✓。
+- [x] **面板侧守卫**：新增两条（`parsers.test.js`：只剩连接的 UUID 别名不算孤儿 + 连接 provider 必须进存活集合；
+  `bridge-commands.test.js`：扫描/复查 SQL 必须含 `providerConnections`）。面板 JS **130/130** ✓。
+- **有意不做（否则会产生新问题）**：① 不改"有连接=存活"的清理判据 —— 改成"无节点即孤儿"会误删
+  内置 provider 的自定义模型（本机库里有 `openrouter/oc/qd` 共 31 行这种合法数据）；② 不给没有 name
+  的节点编前缀（猜出来的前缀会改变模型 ID 却没人知道它从哪来）。
+- **既有的测试隔离问题（如实记，非本次引入）**：`chat` 包全量跑时 `TestHandleChangelog` 会红，
+  与两条外网 E2E（`TestLiveE2E_Cline_SmartCombo` / `TestIntegration_OpenCode_MuseSpark13`，403 RegionError）
+  同跑时出现；单独跑绿（0.4s）。本次改动未触及 changelog/update，`-skip 'TestLiveE2E|TestIntegration'`
+  后整包 `ok`（100s）。
+- **门禁**：`go build ./...` ✓、`go vet` ✓、离线档 **16/16** ✓、面板 JS **130/130** ✓、新回归红→绿 ✓。
+
+### Phase 36.1 · 用户澄清后收紧：内部 ID **彻底不再出现**（不是"旧 ID 仍可用"）✅ 2026-09-30
+
+> 用户原话：*"openai-compatible-chat-<uuid> 旧的 ID 需要彻底不再出现，把问题彻底解决，并且不会再发生"*
+> —— 不接受"显示正常但旧 ID 仍可用"作为终点。据此把目标改成**硬不变量 + 根因预防**。
+
+- [x] **硬不变量（显示层兜底）**：客户端拿到的模型 ID 里**绝不允许**出现内部节点 ID 形状。
+  - `appendConnectionModels`：连接解析不出任何前缀（连接上没有、注册表也没有）且 provider 是内部 ID 形状 → **不发布** + 记日志 ✓
+  - `appendLooseCustomModels`：解析顺序改为 节点前缀 → **连接前缀**（与连接路径同源）→ 内部 ID 形状则**不发布** ✓
+  - 形状判定收成**唯一所有者** `db.IsInternalNodeAlias`（chat 包只是短名字转发 ✓）；面板 JS 那份要保持同形状 ✓
+- [x] **悬空连接不是"改名"，是"补回节点"**：读码确认路由**只认节点前缀**
+  （`resolvePrefixProvider` → `GetProviderNodeByPrefix` ✓）→ 只换显示名会得到一个**能看不能用的假名字** ✗
+  （比内部 ID 更糟）。修法：按连接上的 provider（原节点 ID ✓）**补回节点** —— name 取连接名 ✓，
+  `apiType`/`baseUrl` 从连接的 `providerSpecificData` 继承 ✓，prefix 由 name 派生（冲突加后缀 ✓）。
+  **测试同时断言"能列出"与"能路由"**（`resolveModel("<名字>/<模型>")` → 原节点 ID + 该连接 ✓）。
+- [x] **无名字的悬空连接**：宁可不发布（列表侧藏起来）也**绝不编假名字** ✓（测试锁住 ✓）。
+- [x] **根因预防（"不会再发生"）**：`DeleteProviderNode` 改成**单事务 + 不再吞第二条语句的错误** ✓——
+  过去的"先删节点、再删连接（`_, _ =` 丢错）"正是半状态的来源 ✓；回归测试锁"节点与连接一起没 + 不误删别的 provider" ✓。
+- [x] **自愈里我自己踩的坑（如实记）**：早退条件 `len(plans)==0 && len(known)==0` 会跳过
+  **一个节点都没有的库** ✗ —— 而悬空连接恰恰只在这种库里出现 ✓（于是"补回节点"永远不执行 ✗）。
+  修法：连接列表改成事务前先读 ✓，早退条件补上 `&& len(connList)==0` ✓，并由"悬空连接"用例锁住 ✓。
+- [x] **测试**：`internal/db` **10 条全绿**（补空/不覆盖/幂等/冲突/无名字跳过/规整/内置不碰/**悬空补回节点**/**无名字不补**/**原子删除**）；
+  chat 侧四条（有连接/无连接/悬空可路由/无名字不发布）+ 不变量 `assertNoInternalAlias` ✓；整包 `-skip 外网E2E` **ok** ✓。
+
+## Phase 37 · 架构扫描：C2 深化（install 全路径可测）+ B1 并发残留 ✅ 2026-09-30
+
+> 起因：用户问"还有其他 bug 或者该提升的地方吗"（附架构扫描技能）。扫描给出 6 个候选 +
+> 1 个疑似真 bug；用户选择按 **Top 推荐（C2）** 修，并明确"确认修复完成后再发布"。
+
+- [x] **B1（扫描抓到的真 bug，已核实并修）**：`cleanOrphans` 的快照用本批**冻结的 `targets`** ✓，
+  删除却用 **`state.orphans`** ✗ —— 而「检查孤儿数据」按钮在清理期间**未被禁用** ✗ → 在快照的
+  await 窗口点它会换批：本批漏删、另一批**没有快照可回滚却被删**，界面照样报「✅ 已一次性清理 N 项」
+  （谎报成功）；批次变空时 DELETE 退化成 `... AND ()` 语法错，仍然报成功。
+  **这是 I5（2026-09-29）只做了一半的残留**（当时只让快照用了 `targets`）。
+  修：删除改用 `targets` + 空批守卫 ✓；回归 `orphan-scan.test.js`「快照在途时并发扫描」——修复前**精确红** ✓。
+- [x] **C2（Strong，用户选定）**：`ops.sh` 把 `MODDIR` 写死成"脚本所在目录的上级" → install 的
+  **成功与回滚**两条路只能真写设备 → **零测试**；唯一顺序保障是 `test-install-gate.sh` 的 grep 行号
+  （文本形状 ✗，重排 `ops.sh` 会静默撤掉护栏）。
+  - 改：`MODDIR="${MODDIR:-…}"`（与 `DATA_DIR` 同形，真实调用方不设该变量 → 行为不变 ✓）+
+    `OPS_LIB_ONLY=1` 只加载定义（此前**裸 dispatch** 让 `ops.sh` 无法被 source ✗）→ 可在临时
+    MODDIR 上重放整个安装流程 ✓。
+  - 新增门禁 **INSTALLFLOW（24 例）**：成功路径（引擎起来**才**写版本、**才**刷 `.bak`、清 `.prev`）／
+    回滚路径（起不来 → 二进制回滚 + **绝不谎报版本**）／门禁（太小、非 ELF、缺源 → 绝不碰现有二进制；
+    当前二进制本身不合格时**不把它当回滚点**）／装包（`module.prop` 换新 + 包内引擎版本落盘 + 留档）。
+  - **安全护栏**：测试先断言 `MODDIR` 真的指向临时目录，否则**直接失败** ✓ —— 绝不写仓库里的真实 `module/`。
+  - 踩坑（如实记）：三份假引擎内容原本完全相同 → cksum 分不出"新装的那份"与"回滚回去的那份" →
+    "失败的新引擎还在"会**假绿** ✓ 已让每份带唯一标记 ✓。
+- **层次归属（用户关心的那件事）**：本 Phase 改的是 `module/**` + `tools/**` —— **我们自己的层** ✓，
+  上游更新不会碰 ✓；而 Phase 36 / 36.1 改的是引擎（`internal/**`）与 Dashboard（`web/src/**`）——
+  **属于上游** ✓ → 已按 ADR-0003 登记（补丁存档 ×2 + ADR 表两行 + `AGENT-CONVENTIONS §10.2` 两行含复核点）✓。
+- **门禁**：离线档 **17/17**（新增 INSTALLFLOW）✓、面板 JS **131/131**（新增并发扫描不变量）✓、
+  `internal/db` 10/10 ✓、真机冒烟（deploy + `panel`/`get-port`）+ 装机实测见 Phase 38 ✓。
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 | 功能 | 操作 | 期望 |

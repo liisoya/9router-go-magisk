@@ -48,6 +48,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | CHECKFLAGS | 门禁入口自身：档位选择（无参/单档/全档）+ **严格模式必须同时选档** + 无设备时「非严格 SKIP / 严格必红」的对照（并且"跑不起来"不算"拦住了"） | `sh tools/test-check-flags.sh` | sh | 严格模式空转 → CI 报成功却一条 `T*`/`A*`/parity 都没跑（2026-09-29 走查 A1，最高级别假绿） |
 | OPSSTATUS | `ops.sh` 的单行契约（`status`/`panel` 各一行、token 全为 `k=v`）+ 键访问器 `get <key>`（行首键/中间键/多键/缺键/非法键名）+ `action.sh` 端到端值与 `status` 对齐 | `sh tools/test-ops-get.sh` | sh | 管理器「操作」按钮状态全空、端口串成整行残余（2026-09-29 走查 A4：`action.sh` 自己重写了"怎么解析这一行"） |
 | INSTALLGATE | 装包**门禁先于动作**：坏包/截断包必须被挡在 `life_stop_all` 之前（断言 pidfile 仍在 = 服务没被停）、文件缺失仍回 `no-src`；成功路径用"门禁行早于 stop_all"的顺序断言兜住（测试里绝不真装包） | `sh tools/test-install-gate.sh` | sh | 装个坏包先把引擎/DNS 停掉，守护未武装时服务**永不回来**（2026-09-29 第二轮诊断 I1） |
+| INSTALLFLOW | **install-engine / install-module 的成功与回滚全路径**（当前 **24 例**）：把 `MODDIR` 指到临时目录 + `OPS_LIB_ONLY=1` 只加载定义，在真实文件系统上重放 —— 成功路径（引擎起来**才**写版本、**才**刷 `.bak`、清 `.prev`）、回滚路径（起不来 → 二进制回滚且**绝不谎报版本**）、门禁（太小/非 ELF/缺源 → 绝不碰现有二进制；当前二进制不合格时**不把它当回滚点**）、装包（`module.prop` 换新、包内引擎版本落盘、留档） | `sh tools/test-install-flow.sh` | sh | 安装是唯一"做错就变砖"的动作，而这两条分支过去**零测试**（`MODDIR` 写死 → 只能真写设备）；顺序保障只有 grep 行号，重排 `ops.sh` 会静默撤掉护栏（2026-09-30 架构扫描 C2） |
 
 ### 2.3 真机断言（`tools/check.sh --device`）
 

@@ -74,7 +74,13 @@ async function cleanOrphans() {
       toast('⚠️ 快照失败，已中止删除（安全优先）', 3200); return;
     }
     // 单语句 OR 链式删除：一次点击全清（不逐条）
-    await KB.sqlFile(KB._cmds.orphanDeleteSql(state.orphans));
+    // **必须用本批冻结的 targets，不是 state.orphans**（2026-09-30 架构扫描发现：
+    // I5 修复只让快照用了 targets，删除漏了）。「检查孤儿数据」按钮在清理期间没有被禁用，
+    // 用户在快照的 await 窗口里点它就会改写 state.orphans → DELETE 换成另一批别名：
+    // 本批漏删、另一批没有快照可回滚，界面却照样报"已一次性清理 N 项"（谎报成功）；
+    // 批次变空时 DELETE 甚至退化成 `... AND ()` 语法错，仍然报成功。
+    if (!n) return; // 本批为空：不发 SQL（空 IN 列表是语法错，且无事可做）
+    await KB.sqlFile(KB._cmds.orphanDeleteSql(targets));
     toast(`✅ 已一次性清理 ${n} 项（删除前快照已存 $DATA_DIR/backups/）`, 3600);
     state.orphans = [];
     scanOrphans();
