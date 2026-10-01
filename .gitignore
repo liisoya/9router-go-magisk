@@ -32,3 +32,6 @@ node_modules/
 web/node_modules/
 stitch-screens/
 stitch-screenshots/
+
+# IDE local data
+.workbuddy-ai/

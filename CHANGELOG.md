@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.9.5-r4] - 2026-10-01
 
 ### 🐛 Module — restart and start returned before DNS had settled; the module update source is now fixed
 

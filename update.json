@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.5-r3",
-  "versionCode": 109052,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.5-r3/9router-go-1.9.5-r3-magisk.zip",
-  "changelog": "两轮修复：①「崩溃 + 内存 571MB」根因 —— 引擎 pid 被复用后面板谎报 engine=up、守护不判死不拉起（自愈失效），且面板把别人进程的内存当引擎内存。现在面板/守护认进程身份（basename 指纹，宁松勿严），RSS 只在身份确认后读取；并新增死因取证：判死时记录 pid 去向（消失 vs 被复用）与 cgroup oom_kill 增量（回答是不是被内存回收杀的），真机门禁 T2b 断言。②全量架构扫描 9 项修 8：自环转发守卫（baseUrl 指向自己监听口 = 请求链路回到自己，每跳真实消耗记账/落库/goroutine —— 窄比较，不影响局域网自建节点）；5 个入口脚本显式声明 PATH（真机实测过 /system/bin/sleep 缺失会让重启谎报失败）；守护不再对非子进程 wait（伪造退出码 127）；CHLD 置位不再被无条件清零（死亡事件落在处理段时死因丢失、自愈退化 120s）；install-module 顶层 mv 失败不再静默；runtime.env/upstreams 原子落盘；面板桥哨兵改 lastIndexOf（读到的文件恰含哨兵串时不再截断）+ 探测回调注销。验证：离线档 17/0、LIFECYCLE 70/0、面板命令层 27/0、Go chat 全绿（含自环新用例）；真机 T2b + 端到端复现事故形状（面板如实 engine=down）。"
+  "version": "v1.9.5-r4",
+  "versionCode": 109053,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.5-r4/9router-go-1.9.5-r4-magisk.zip",
+  "changelog": "①重启/启动不再在 DNS 就绪前返回：原先只等引擎 PID 消失与新引擎健康，没等 dnsfwd（守护是异步拉起的），面板在调用返回那一刻读取，就出现「引擎绿 + DNS 红」的假失败（真机实测 8s 后 dns=up）。现在重启/启动两条路径都先等 DNS 到终态（running / 用户禁用 / 让位），两张卡片描述同一瞬间；等不到终态就如实报 dns-pending，而不是谎报成功。②模块更新源改为只读：它决定覆盖整个模块目录的 zip 来自哪里，填错或填第三方 URL 意味着装进来无法归属的代码，面板输入框与保存按钮已移除（只读展示），ops.sh status 不再回显 mod_url。③自环转发守卫：连接 baseUrl 指向代理自己的监听口时，请求链路会重新进入自己的 chat handler，每一跳真实消耗轮换记账 / 用量落库 / goroutine 直至客户端超时；getProviderConfig 加了窄守卫（回环地址 + 恰好自身监听端口才算自环），局域网 IP 与其他端口（自建 Ollama / 自建节点）不受影响。④写操作不再静默谎报成功：promise exec 形态下 stderr 被丢弃、退出码被强制为 0，writeFile/appendLine 把设备端写失败判成成功——端口、DNS 保存 / 优选、加速器选择 / 新增、模块更新 URL 的失败分支全是死代码。桥命令改为自报（write-ok / append-ok），sqlFile 发出 __SQL_OK__ 暴露读失败；写端口失败不再重启引擎，扫描失败不再伪造「未发现孤儿数据」。⑤架构扫描又揪出两个同族活 bug —— DNS 优选与引擎更新在真机上都是死的：optimize/engUpdate 只用第一道闸的 fact评估整个计划，紧接着那道无 fact 的闸 fail-closed，于是优选报「没有可用率 ≥50%」、引擎更新在校验和之前就中止（install-engine 不可达）。闸门求值器新增相位切片接口 planGate(plan, phase, fact)，七个调用点全部迁移。⑥Shell / SQL 拼装收敛进桥：ops() 用 shq 引用脚本路径与每个 token，readFile 自报 __READ_OK__（「读失败」与「文件为空」可区分），五条内联 SQL 移入 _cmds 构造器获得同等离线断言；install-module 的内联版本写入改为 engine_version_sync --from-package，运行期版本文件回到单一所有者。"
 }
