@@ -54,6 +54,15 @@ _Avoid_: 检查、校验（太泛，会把"只是打印一下"也算成门禁）
 标记由桥剥离，调用方只见干净输出；成败判据 = 输出含标记，且"查无/齐全"类结论以 `r.ok` 为前提。
 _Avoid_: 退出码判断、stderr 解析（在这层环境里两者都不可靠）
 
+**动作回执词（action word）**
+动作动词（`start-user` / `restart-engine` / `enable-dns` / `install-module`…）结束时 shell
+吐出的状态词（`engine=up` / `dns-pending` / `started` / `stopped`…）。JS 侧 `runOpsAction`
+按**缺省拒绝**消费：回词 ∈ `ACTION_WORDS[subcmd].ok` 才算成功；词表唯一所有者是
+`parsers.js`，与 shell 侧 emit 由 contract-keys 门禁双向对齐（2026-10-01 架构走查候选 2）。
+三态词（`engine=up|running` / `dns-pending` / `engine=down`）由 `life_settle_report`
+唯一产生：等引擎健康 + DNS 终态才报好，半启动如实报 `dns-pending`。
+_Avoid_: 状态词（与 `life_state` 的展示词混淆——那是"现在什么状态"，这是"动作成没成"）
+
 **计划（PLAN）**
 "先门禁后动作"的步骤顺序数据：`parsers.js` 的 `ENGINE_UPDATE_PLAN` / `MODULE_UPDATE_PLAN` /
 `ORPHAN_CLEAN_PLAN` / `DNS_OPTIMIZE_PLAN`。顺序不变量离线可断言；求值用

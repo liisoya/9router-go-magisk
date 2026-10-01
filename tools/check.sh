@@ -181,6 +181,12 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/test-lifecycle-lib.sh ]; then
       run "LIFECYCLE 生命周期原语离线自证（lifecycle.sh）" sh tools/test-lifecycle-lib.sh
     fi
+    # WATCHDOG：守护判定核（去抖 / S3 记账 / S4 位保持 / 死因取证）——
+    # 起因：2026-10-01 架构走查候选 3，主循环 336 行此前离线零覆盖，
+    # A2/A3/S3/S4 四条审查规则的"测试"是真机档 + 注释
+    if [ -f tools/test-watchdog-decision.sh ]; then
+      run "WATCHDOG 守护判定核离线自证（watchdog.sh）" sh tools/test-watchdog-decision.sh
+    fi
     # CHECKFLAGS：**门禁入口自己**的档位选择与严格模式
     # 起因：2026-09-29 架构走查 A1 —— `--require-device/--require-parity` 只设 REQ_* 不选档位，
     # 于是「严格模式」在 PICKED=0 时退回离线档，真机/对照档从不执行却报成功（最高级别假绿）。

@@ -206,6 +206,14 @@ test('probeDns：MODDIR 来自 CFG，-P -j 8', () => {
   assert.strictEqual(C.probeDns('/d/dns-candidates.tmp'),
     "/data/adb/modules/ninerouter-go/bin/dnsfwd -f '/d/dns-candidates.tmp' -P -j 8 2>&1");
 });
+test('openUrl：VIEW intent，URL 过 shq（WebView 不处理 _blank 时的兜底）', () => {
+  assert.strictEqual(C.openUrl('https://github.com/x/y'),
+    "am start -a android.intent.action.VIEW -d 'https://github.com/x/y'");
+});
+test('remove：自报 rm-ok（promise 形态下 rm 失败对 exec 层不可见，不自报 = 永远 true）', () => {
+  const c = C.remove('/d/x');
+  assert.ok(c.includes('rm -f') && c.includes('echo rm-ok'), c);
+});
 test('sqlSnapshot：mkdir + .mode insert + 重定向', () => {
   const cmd = C.sqlSnapshot("SELECT * FROM kv WHERE key='a';", '/data/adb/9router-go/backups/snap.sql');
   assert.ok(cmd.startsWith("mkdir -p '/data/adb/9router-go/backups'; "));

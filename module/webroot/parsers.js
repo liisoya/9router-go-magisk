@@ -53,26 +53,34 @@
   // 为什么集中：同一套词表两侧各写一遍，加一个意图态时 app.js 会静默落到 else 显示"未运行"
   // —— 与键契约同源的静默漂移，只是漂的是**值**而不是键。门禁（test/contract-keys.test.js）
   // 把 shell 实际 emit 的词与这张表的键**双向**对齐，两侧任何一侧多/少一个词都会红。
+  //
+  // 四档严重度（界面底色直接用它）：
+  //   ok  绿 = 正常在跑      off 灰 = **用户要它别跑**（退出，不是故障）
+  //   warn 琥珀 = 需要留意     err 红 = 真故障
+  // 2026-09-30：`dns.disabled` 原挂 err（把"用户关掉的"画成故障）、`engine.stopped`/`watchdog.down`
+  // 原挂 warn —— 三处统一归到 off：它们都不是故障，界面不该报警。
   const LIFECYCLE_STATES = {
     dns: {
-      up:       { tone: 'ok',   text: pid => `运行中 (PID ${pid})` },
-      disabled: { tone: 'err',  text: () => '已关闭（用户设置）' },
-      yielded:  { tone: 'warn', text: () => '已让路（:53 被其他转发器占用）' },
-      down:     { tone: 'err',  text: () => '未运行' },
+      up:       { tone: 'ok',   text: pid => `运行中 (PID ${pid})`, short: '运行中' },
+      disabled: { tone: 'off',  text: () => '已关闭（用户设置）',   short: '已关闭' },
+      yielded:  { tone: 'warn', text: () => '已让路（:53 被其他转发器占用）', short: '已让路' },
+      down:     { tone: 'err',  text: () => '未运行',               short: '未运行' },
     },
     engine: {
-      up:      { tone: 'ok',   text: pid => `运行中 (PID ${pid})` },
+      up:      { tone: 'ok',   text: pid => `运行中 (PID ${pid})`, short: '运行中' },
       // 用户显式停服：守护尊重该意图，不会自动拉起 —— 所以文案与颜色都不是"故障"
-      stopped: { tone: 'warn', text: () => '已停止（用户设置）' },
-      down:    { tone: 'err',  text: () => '未运行' },
+      stopped: { tone: 'off',  text: () => '已停止（用户设置）',   short: '已停止' },
+      down:    { tone: 'err',  text: () => '未运行',               short: '未运行' },
     },
     watchdog: {
-      up:    { tone: 'ok',   text: pid => `运行中 (PID ${pid})` },
-      stale: { tone: 'warn', text: () => '未运行（已武装，下次重启生效）' },
-      down:  { tone: 'warn', text: () => '未启用' },
+      up:    { tone: 'ok',   text: pid => `运行中 (PID ${pid})`, short: '运行中' },
+      stale: { tone: 'warn', text: () => '未运行（已武装，下次重启生效）', short: '待重启' },
+      down:  { tone: 'off',  text: () => '未启用',                short: '未启用' },
     },
   };
-  const TONE_COLORS = { ok: 'var(--ok)', warn: 'var(--warn)', err: 'var(--err)' };
+  const TONE_COLORS = {
+    ok: 'var(--ok)', warn: 'var(--warn)', err: 'var(--err)', off: 'var(--dim-2)',
+  };
 
   // 未登记的词**不冒充正常**（同"不伪造版本号"原则）：显式报未知并把原词透出来，
   // 让人一眼看到"shell 说了个界面不认识的词"，而不是安静地显示成"未运行"。
@@ -86,11 +94,74 @@
              color: TONE_COLORS[hit.tone], unknown: false };
   }
 
+  /** 概览三块状态读数的**短形态**：底色表状态，数值只留 PID。
+   *
+   * 为什么另起一个函数而不是复用 stateLabel：那里的文案是给 DNS 页 kv 行用的完整句
+   * （"运行中 (PID 101)"、"未运行（已武装，下次重启生效）"），三块并排时太长、显得乱。
+   * 同一份状态知识需要两种呈现粒度 —— 粒度差异收在这一处，页面层不再自己拼字符串。
+   *
+   * 在跑时一律只给 PID（那才是用户想看的数字）；没在跑时给 short 短词。
+   * 未登记的词与 stateLabel 同一条纪律：不冒充正常，报 '未知' 且挂 err。
+   */
+  function stateTile(kind, value, pid) {
+    const hit = (LIFECYCLE_STATES[kind] || {})[value];
+    if (!hit) return { tone: 'err', text: '未知' };
+    if (value === 'up') return { tone: hit.tone, text: pid ? `PID ${pid}` : '运行中' };
+    return { tone: hit.tone, text: hit.short };
+  }
+
+  /** RSS（kB）→ 面板文案。
+   *
+   * 唯一所有者：概览的引擎/DNS 读数牌与 DNS 页的状态牌都要显示内存，
+   * 各写一份格式化就会漂（2026-10-01 架构评审 #2 收口时抽出）。
+   * 0 / 读不到 → `-`：如实表示"没有可报告的内存"，不冒充 0 kB。
+   */
+  function fmtMem(kb) {
+    const n = parseInt(kb, 10) || 0;
+    return !n ? '-' : n >= 1024 ? (n / 1024).toFixed(1) + ' MB' : n + ' kB';
+  }
+
   // 引擎版本"来源"文案（Phase 26 的派生状态自检）：告诉用户这个版本号是从哪读到的、
   // 是不是本次读取刚自愈过来的 —— 否则一旦面板照旧文件念（"假更新"观感），用户无从判断。
   function engineVersionSourceLabel(src, healed) {
     const base = ({ runtime: '运行期记录', package: '包内', none: '无来源' })[src] || `未知来源(${src})`;
     return healed ? `${base} · 刚自愈` : base;
+  }
+
+  /** 启动类动作的回执：是不是"本来就在跑"（幂等分支）。
+   *
+   * shell 侧 ensure_* / start-user 在"目标已在跑"时走幂等分支，回的是 `running`（dnsfwd）
+   * 或 `engine=running`（服务），**不是** started / engine=up。界面若只认后者，就会把
+   * "本来就在跑"判成失败、弹「❌ 启动失败」—— 而真相是它好端端跑着，用户读到"失败"
+   * 会以为引擎/DNS 起不来（2026-10-01 真机）。两处页面各写一遍 `=== 'running'` 迟早会漂
+   * （与键契约同源的静默漂移，只是漂的是值），判定收在这里；文案仍由调用方按自己语境给。
+   */
+  function isAlreadyRunning(got) {
+    const s = stripCr(got).trim();
+    return s === 'running' || s === 'engine=running';
+  }
+
+  // ── 动作回执词（ACTION_WORDS）：subcmd → 算"成功"的 shell 回词，唯一所有者 ──
+  // 为什么它必须是数据（2026-10-01 架构走查候选 2）：expect 原先在每个调用点手抄（7+ 处），
+  // shell 加一个幂等/失败词时门禁一条不会红、只能真机点按钮发现（dnsOn 只认 started、
+  // start-user 泄漏第二行，两起事故面）。shell 侧对齐由 contract-keys 的词表门禁守着：
+  // 表里出现 shell 不吐的词 → 红；动词的回词变了而表没认 → 红。
+  // 未知动词不在表里 → actionOk 缺省拒绝（与 planGate 同一条纪律：静默放行比失败更坏）。
+  const ACTION_WORDS = {
+    'start-user':     { ok: ['engine=up', 'engine=running'] },
+    'restart-engine': { ok: ['engine=up'] },
+    'stop-user':      { ok: ['stopped'] },
+    'enable-dns':     { ok: ['started', 'running'] },
+    'stop-dns':       { ok: ['stopped'] },
+    'install-engine': { ok: ['engine=up'] },
+    'install-module': { ok: ['engine=up'] }
+  };
+  /** 判定一个动作回词是否算成功（trim 后全等命中成功词集之一）。runOpsAction 与
+   *  手工路径（install 流程）共用这一个判定 —— "哪个词算成功"不许再有第二个家。 */
+  function actionOk(subcmd, out) {
+    const w = ACTION_WORDS[subcmd];
+    const got = stripCr(out).trim();
+    return !!w && w.ok.indexOf(got) !== -1;
   }
 
   // ── /proc/meminfo ──
@@ -260,7 +331,13 @@
   // 不回到调用方手里。
   function planGate(plan, phase, fact) {
     const step = (plan || []).find(s => s.id === phase);
-    if (!step || !step.gate) return { ok: true, reason: '' };  // 非门禁阶段不拦
+    // 未知阶段名**必须拒绝**（2026-10-01 架构评审 #6）。原先 `!step` 与「非门禁阶段」一起放行，
+    // 于是**阶段名拼错 = 门禁静默失效**（fail-open）—— 一个永不拦人的门禁比没有更坏，
+    // 因为它会被当成"已经守住了"。拼错属于计划与调用点不一致，是必须红的形状。
+    if (!step) {
+      return { ok: false, reason: `计划里没有阶段「${phase}」（阶段名拼错，或计划改了没同步调用点）` };
+    }
+    if (!step.gate) return { ok: true, reason: '' };  // 非门禁阶段不拦
     if (!fact || fact.ok !== true) {
       return { ok: false, reason: (fact && fact.reason) || `门禁 ${phase} 未通过` };
     }
@@ -328,7 +405,8 @@
     parseDnsProbeLine, parseDnsProbeOutput,
     normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans,
     ELF_MAGIC, ENGINE_MIN_BYTES, engineFileGate, checksumGate,
-    LIFECYCLE_STATES, TONE_COLORS, stateLabel, engineVersionSourceLabel,
+    LIFECYCLE_STATES, TONE_COLORS, stateLabel, stateTile, fmtMem, engineVersionSourceLabel, isAlreadyRunning,
+    ACTION_WORDS, actionOk,
     ENGINE_UPDATE_PLAN, MODULE_UPDATE_PLAN, ORPHAN_CLEAN_PLAN, DNS_OPTIMIZE_PLAN, planGate,
     parseScanLines, parseCredScan, parseCurlTimings,
   };

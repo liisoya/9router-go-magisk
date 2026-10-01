@@ -102,6 +102,9 @@
 
   // 形态探测：结果持久缓存到 localStorage——此前每次打开页面都重新探测，且
   // 串行各等 4s（降级形态的管理器上光探测就吃 8 秒），曾是面板慢的主因之一。
+  // 不要改这个键名。测试桩（test/lib/app-harness.js）预置的就是它 ——
+  // 曾为了"让已装模块重新探测"而改名，结果 15 条用例全红（桩的预置值对不上）。
+  // 重新探测靠下面的空输出自愈（clearModeCache），不需要动键名。
   const MODE_CACHE_KEY = '__kmod_exec_mode';
   function readModeCache() {
     try {
@@ -159,12 +162,28 @@
     return Promise.resolve({ code: -1, out: '', err: 'ksu.exec 返回异常' });
   }
 
+  // 每页只自愈一次：否则"正常空输出"的命令（rm / 读不存在的文件）每次都要重探一遍
+  let _reprobed = false;
+
   async function rawExec(cmd, timeoutMs) {
     const tmo = timeoutMs || 120000;
     const mode = await detectMode();
     let r = await execForm(mode, cmd, tmo);
+    // 缓存的形态失灵：超时 → 清缓存重新探测后重试一次（原逻辑）
     if (r.err === 'exec timeout' && readModeCache()) {
-      // 缓存的形态失联（如管理器升级改变了回调形态）：清缓存重新探测后重试一次
+      clearModeCache();
+      _mode = null;
+      r = await execForm(await detectMode(), cmd, tmo);
+      return r;
+    }
+    // 真机 2026-10-01：还有一种更隐蔽的形态 —— 命令**不报错、但输出是空的**。
+    // 那不是"命令没输出"，而是"这个 exec 形态收不到输出"（回调没被管理器调用，或
+    // promise 形态拿不到 stdout）。表现就是面板三块读数牌全「未知」，而 shell、解析、
+    // base64 全都正常（我逐项验过）。所以：**用缓存形态跑出空输出时**，也重探一次。
+    // 安全性：会重复执行的只有 appendLine（追加一行），而它正常会回 `append-ok`（非空），
+    // 不会走到这条；remove / readFile 的空输出重跑一次是幂等的。
+    if (!r.err && !String(r.out || '').trim() && readModeCache() && !_reprobed) {
+      _reprobed = true;
       clearModeCache();
       _mode = null;
       r = await execForm(await detectMode(), cmd, tmo);
@@ -184,7 +203,11 @@
   // -list 强制管道输出；对 database is locked 等错误自动重试（引擎与 WebUI 共库）。
   // 自报成败：sqlite3 失败（locked/语法错）时输出为空且 promise 形态下 stderr 被丢弃、
   // 退出码不可见 —— 必须由命令自己吐 __SQL_OK__，调用方凭 r.ok 区分"空结果"与"读失败"。
-  function sqlFile(sql, timeoutMs) {
+  //
+  // `onRetry(n)`（可选）：每次重试前回调。**为什么需要**：失败要重试 3 次、每次隔 1 秒，
+  // 期间调用方的按钮一直停在"扫描中…"（2026-10-01 用户反馈"像卡死"）。
+  // 进度由这里报出去，而不是让调用方自己猜时间 —— 重试节奏只有这一个家。
+  function sqlFile(sql, timeoutMs, onRetry) {
     const f = cfg().DATA_DIR + '/cc.sql';
     const moddir = cfg().MODDIR;
     const run = () => sh(`cat > ${f} <<'__EOSQL__'\n${sql}\n__EOSQL__\n${moddir}/bin/sqlite3 -list ${cfg().DATA_DIR}/db/data.sqlite < ${f} && echo __SQL_OK__`, timeoutMs);
@@ -192,6 +215,7 @@
       const ok = r.out.includes('__SQL_OK__');
       const failed = (r.err && /locked|SQL error|unable/i.test(r.err)) || !ok;
       if (failed && n < 3) {
+        if (typeof onRetry === 'function') onRetry(n + 1);
         return new Promise(res => setTimeout(res, 1000)).then(() => attempt(n + 1));
       }
       // 标记由桥自己剥掉：调用方只见干净的 SQL 输出（标记行无 '|'，
@@ -203,6 +227,9 @@
 
   function ops(subcmd, timeoutMs) {
     return sh(_cmds.ops(subcmd), timeoutMs);
+  }
+  async function openUrl(url) {
+    return sh(_cmds.openUrl(url), 10000);
   }
 
   // ═══════════ 命名操作层 ═══════════
@@ -219,7 +246,9 @@
     // 追加单行（换行折叠为空格，防止一行变多行），同 writeFile 自报成败
     appendLine: (p, line) =>
       `printf '%s\\n' ${shq(String(line == null ? '' : line).replace(/\n/g, ' '))} >> ${shq(p)} && echo append-ok`,
-    remove: p => `rm -f ${shq(p)}`,
+    // 删除自报成败（rm-ok = 删了或本来就没有）：promise 形态下 rm 失败对 exec 层不可见，
+    // 不自报 remove 就"永远 true" —— 与 backupOnce 曾经的病同族（写族必须自报，见上）。
+    remove: p => `rm -f ${shq(p)} && echo rm-ok`,
     // 备份一次（dst 存在即跳过）——"恢复初始默认"的回滚点
     // 备份一次（dst 已存在则不覆盖）→ 回滚点是否可用**由输出回答**（不再是"永远 true"）：
     //   ok=刚备份成功 / exists=已有备份 / no-src=没有原配置（没有可丢的东西）→ 都算可用
@@ -265,6 +294,10 @@
     fileSize: p => `wc -c < ${shq(p)} 2>/dev/null | tr -d '[:space:]'`,
     elfMagic: p => `head -c 4 ${shq(p)} 2>/dev/null | od -An -tx1 | tr -d '[:space:]'`,
     zipList: p => `unzip -l ${shq(p)}`,
+    // 用系统浏览器打开外链。为什么走 shell：WebUI 宿主的 WebView 不一定处理
+    // target="_blank"（真机实测点「项目地址」没反应），root shell 的 am start
+    // 是不依赖宿主行为的路。成功输出 Starting: Intent …，调用方据此给回执。
+    openUrl: url => `am start -a android.intent.action.VIEW -d ${shq(url)}`,
     // SQL 结果以 INSERT 语句形式落盘（误删回滚快照）。
     // 必须**自己判成败**：sqlite3 出错时 `>` 仍会创建 0 字节文件，而 exec 层拿不到 stderr、
     // 退出码也不被 sentinelExec 上报（只有 code 字段）。真机实证：坏 SQL → `rc=1 size=0`，
@@ -323,7 +356,12 @@
     const r = await sh(_cmds.appendLine(path, line), 30000);
     return !r.err && r.out.includes('append-ok');
   }
-  async function remove(path) { await sh(_cmds.remove(path)); return true; }
+  // 诚实返回：只有 shell 明确回了 rm-ok 才算删掉（rm -f 对不存在的目标也算成功，所以
+  // "false" = 真失败：权限/只读 fs 等，调用方据此如实回执）
+  async function remove(path) {
+    const r = await sh(_cmds.remove(path), 15000);
+    return !r.err && r.out.includes('rm-ok');
+  }
   // 诚实返回：只有 shell 明确回了 ok / exists / no-src 才算"回滚点可用"
   async function backupOnce(src, dst) {
     const r = await sh(_cmds.backupOnce(src, dst), 30000);
@@ -366,8 +404,27 @@
     return !r.err && r.out.includes('snap-ok');
   }
 
+  // ── 生产的命名接口：db / diag ──
+  // 为什么另开这一层（2026-10-01 架构评审 #3）：`_cmds` 的下划线声明"纯函数构造器，供离线测试"，
+  // 但页面直接伸手进去（`KB.sqlFile(KB._cmds.scanOrphansSql())`），于是同一对象**既是测试私有表
+  // 又是生产 API** —— 改它要同时理解两套读者，而"生产该怎么调"这件事没有一处能一眼看到。
+  // 现在：页面只说"我要做这件事"，`sqlFile` 与构造器的配对（以及 onRetry 的传递）收在这里。
+  // `_cmds` 保持原样留给测试断言命令形状。
+  const db = {
+    scanOrphans: onRetry => sqlFile(_cmds.scanOrphansSql(), undefined, onRetry),
+    recheckOrphans: aliases => sqlFile(_cmds.recheckOrphansSql(aliases)),
+    credScan: onRetry => sqlFile(_cmds.credScanSql(), undefined, onRetry),
+    deleteOrphans: targets => sqlFile(_cmds.orphanDeleteSql(targets)),
+    // 快照走 sqlSnapshot（写文件 + 只认 snap-ok），与上面几个**不是**同一个执行器 ——
+    // 这个配对关系原先散在调用点（页面得自己知道该用 sqlFile 还是 sqlSnapshot），
+    // 现在收在这里，调用方只说"给这批别名留个快照"。
+    snapshotOrphans: (targets, outFile) => sqlSnapshot(_cmds.orphanSnapshotSql(targets), outFile)
+  };
+  // 诊断用（不是业务动作）：列出模块目录内容，供 diag 文案说明"缺了什么"
+  const diag = { libListing: () => sh(_cmds.libListing()) };
+
   return {
-    sh, sqlFile, ops, detectMode,
+    sh, sqlFile, ops, openUrl, detectMode, db, diag,
     readFile, writeFile, appendLine, remove, backupOnce, restoreBackup,
     probeDns, curlTimingBatch, fetch, download, sha256, zipList, sqlSnapshot,
     fileSize, elfMagic,

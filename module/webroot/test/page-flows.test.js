@@ -32,10 +32,17 @@ function boot(opts) {
       if (cmd.includes('start-user')) return opts.start || 'engine=up';            // KB.ops
       if (cmd.includes('stop-user')) return opts.stop || 'stopped';                // KB.ops
       if (cmd.includes('reload-dns')) return opts.reload === undefined ? 'reloaded' : opts.reload;
-      if (cmd.includes('panel')) return PANEL_OK;                                  // refresh()
+      // refresh()：opts.panel 让用例能注入"面板带回来的字段"（例：验证 mod_url 不被采纳）
+      if (cmd.includes('panel')) return opts.panel || PANEL_OK;
+      if (cmd.includes('-P -j 8')) return opts.probe || '';   // dnsfwd 探测输出（优选用）
+      if (cmd.includes('rm -f')) return 'rm-ok';   // KB.remove 自报标记（2026-10-01 起写族自报）
+      if (cmd.includes('am start')) return 'Starting: Intent { act=android.intent.action.VIEW }';
       return '';
     }
   });
+  // 观察模式间隔可注入（CFG.observeMs）：必须在 createHarness 之后设（它重置 global.window）、
+  // loadApp 之前设（vm 上下文取的是这份引用）
+  if (opts.observeMs) global.window.CFG.observeMs = opts.observeMs;
   return { els: h.loadApp(), cmds };
 }
 
@@ -160,12 +167,141 @@ test('B5b 清除选中：必须显示「直连 GitHub」，不得渲染成「未
     '清除选中后应显示「直连 GitHub」；无参去读刚被删掉的文件会渲染成「未知（读取失败）」');
 });
 
-test('B1b 源码顺序：optimize 必须先删旧 .prev 再备份（否则“回滚上一版”永远回到首版）', () => {
+test('B1b 源码顺序：DNS_STORE.refreshPrev 必须先删旧 .prev 再备份（否则“回滚上一版”永远回到首版）', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'page-dns.js'), 'utf8');
-  const iRemove = src.indexOf("KB.remove(UPSTREAMS + '.prev')");
-  const iBackup = src.indexOf("backupOnce(UPSTREAMS, UPSTREAMS + '.prev')");
+  // 2026-10-01 架构评审 #7：这条次序知识从 optimize 的体内搬进了 DNS_STORE.refreshPrev ——
+  // **断言跟着 seam 走**：守的仍是同一条不变量，只是它的家换了地方。
+  const at = src.indexOf('const DNS_STORE');
+  assert.ok(at > 0, '找不到 DNS_STORE（次序的唯一所有者）');
+  const store = src.slice(at, src.indexOf('};', at));
+  const iRemove = store.indexOf('KB.remove(DNS_PREV)');
+  const iBackup = store.indexOf('KB.backupOnce(UPSTREAMS, DNS_PREV)');
   assert.ok(iRemove > 0, '没有找到「删旧 .prev」这一步（backupOnce 对已存在的目标会跳过 cp）');
   assert.ok(iBackup > iRemove, `顺序反了：删(${iRemove}) 必须在备份(${iBackup}) 之前`);
+  // 而且这条次序真的在优选路径上 —— 模块写对了却没人用等于没有
+  assert.ok(src.includes('await DNS_STORE.refreshPrev()'), 'optimize 必须走 DNS_STORE.refreshPrev');
+});
+
+// ── 优选排序契约（2026-10-01）：以本机实测为准，而不是"推荐顺序" ──────────
+// 问过的问题是"按推荐做还是按实测做"。答案落到可执行事实：
+// 内置清单里「腾讯」排在「阿里」之前（DNS_CANDIDATES 的排列），这里让阿里快得多 ——
+// 若哪天优选改成"按清单顺序"，阿里会被压到腾讯后面，这两条会红。
+const PROBE_FAST_ALI = [
+  '  119.29.29.29                       v4  www.baidu.com              300ms  2/2  1.2.3.4',
+  '  223.6.6.6                          v4  www.baidu.com                8ms  2/2  1.2.3.4'
+].join('\n');
+// 候选清单与最终配置都经 KB.writeFile，取最后一条 = 真正落盘的那份。
+// 内容是 base64 过 shell 的（printf '%s' '<b64>' | base64 -d），断言顺序必须先解出来 ——
+// 否则比的是编码串，顺序断言等于没断言。
+const lastWrite = cmds => {
+  const c = cmds.filter(c => c.includes('write-ok')).pop() || '';
+  const m = c.match(/printf '%s' '([A-Za-z0-9+/=]+)'/);
+  return m ? Buffer.from(m[1], 'base64').toString('utf8') : c;
+};
+
+test('优选排序：按本机实测评分降序（内置清单的排列顺序不参与排序）', async () => {
+  const { els, cmds } = boot({ probe: PROBE_FAST_ALI, backup: true });
+  await els.get('btn-opt').onclick();
+  const w = lastWrite(cmds);
+  const iAli = w.indexOf('223.6.6.6'), iTx = w.indexOf('119.29.29.29');
+  assert.ok(iAli >= 0 && iTx >= 0, `写入内容里缺上游：${w}`);
+  assert.ok(iAli < iTx,
+    `阿里 8ms 必须排在腾讯 300ms 之前 —— 现在按清单顺序排了（推荐值压过了实测）：${w}`);
+});
+
+test('优选排序：手写的自定义项保留在最前（契约②的例外，即使它没过门槛）', async () => {
+  const { els, cmds } = boot({ probe: PROBE_FAST_ALI, backup: true });
+  els.get('upstreams').value = 'nameserver 1.1.1.1';   // 不在探针输出里 = 本次没通过门槛
+  await els.get('btn-opt').onclick();
+  const w = lastWrite(cmds);
+  const iCustom = w.indexOf('1.1.1.1'), iAli = w.indexOf('223.6.6.6');
+  assert.ok(iCustom >= 0, `自定义项被丢了（用户手写的不能被一次优选淘汰）：${w}`);
+  assert.ok(iCustom < iAli, `手写项必须留在最前，实际顺序：${w}`);
+});
+
+// ── 更新源必须固定（2026-10-01）：不接受用户自定义 ──────────────────────
+// 为什么锁死：更新源决定"从哪儿下载那份会覆盖整个模块目录的 zip"。留一个输入框，
+// 就等于把"装谁的代码"变成可配置项 —— 而它出事时的形状是"模块更新异常"，无从归因。
+test('更新源：面板不提供任何入口，也不再展示（改不了的地址摆出来没有信息量）', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.ok(!/id="in-modurl"/.test(html), '仍有更新源输入框（用户又能改了）');
+  assert.ok(!/id="btn-mod-seturl"/.test(html), '仍有「保存」按钮');
+  assert.ok(!/id="mod-url"/.test(html),
+    '仍在页面展示更新源（2026-10-01 用户要求去掉：固定与否由 upstream.js + 测试保证，不靠给人看）');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'page-update.js'), 'utf8');
+  assert.ok(!/module-update-url/.test(src), '仍在读写 module-update-url（可写的更新源 = 可指向任意 zip）');
+  assert.ok(!/setModUrl|setSnapshotModUrl/.test(src), '仍在提供「改更新源」的入口');
+});
+
+test('更新页的项目地址：由 KU.PROJECT_URL 填入（且是新窗口打开的安全外链）', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  // 结构性安全：target="_blank" 不带 rel=noopener，目标页能经 window.opener 反向操作本页
+  assert.ok(!/target="_blank"(?![^>]*\brel=)/.test(html),
+    '有 target="_blank" 却没带 rel（缺 noopener 会把 opener 交出去）');
+  // 行为：地址由 KU 现取，首屏就填上（不等第一份快照）
+  const { els } = boot({});
+  const a = els.get('mod-project');
+  assert.strictEqual(a.href, 'https://github.com/liisoya/9router-go-magisk',
+    '项目地址没被填上（地址必须由 KU.PROJECT_URL 现取，不许写死在 HTML 里）');
+  assert.strictEqual(a.textContent, 'liisoya/9router-go-magisk', '一行里塞完整 URL 在手机上必换行');
+});
+
+test('观察模式：点开立即刷 + 周期刷 + 状态亮起；再点关闭即停；不记忆', async () => {
+  const { els, cmds } = boot({ observeMs: 40 });   // 注入短间隔：生产默认 5000（app-boot.js）
+  const cntPanel = () => cmds.filter(c => c.includes('panel')).length;
+  // 防挂死：定时器只有"再点一次"才清 —— 断言失败抛错时若不清，setInterval 会挂住整个
+  // node --test 进程（真踩过：变异验证时用例红在半路、进程永不退出，看起来像卡死）。
+  let opened = false;
+  try {
+    await els.get('btn-observe').onclick();
+    opened = true;
+    await tick();
+    assert.ok(cntPanel() >= 1, '点开应立即刷新一次，不等第一个周期');
+    await new Promise(r => setTimeout(r, 120));   // 跨 2 个以上 40ms 周期
+    const during = cntPanel();
+    assert.ok(during >= 3, `周期刷新没跑（panel 共 ${during} 次）`);
+    assert.ok(els.get('btn-observe').classList._calls.some(c => c[0] === 'add' && c[1] === 'on'),
+      '开着却没把开关标 on（开关本身即状态，没有状态牌）');
+    assert.strictEqual(els.get('btn-observe').textContent, '观察中', '开着却没把胶囊文案切成「观察中」');
+    await els.get('btn-observe').onclick();   // 再点 = 关闭
+    opened = false;
+    await tick();
+    const stopped = cntPanel();
+    await new Promise(r => setTimeout(r, 120));
+    assert.strictEqual(cntPanel(), stopped, '关闭后仍在刷新（定时器没被清掉）');
+    assert.ok(els.get('btn-observe').classList._calls.some(c => c[0] === 'remove' && c[1] === 'on'),
+      '关闭后没摘 on 状态');
+    assert.strictEqual(els.get('btn-observe').textContent, '观察', '关闭后文案没切回「观察」');
+  } finally {
+    if (opened) await els.get('btn-observe').onclick();
+  }
+});
+
+test('项目地址：点击走 root shell 的 am start（WebView 不一定处理 _blank，真机点不动）', async () => {
+  const { els, cmds } = boot({});
+  await els.get('mod-project').onclick({ preventDefault() {} });
+  const c = cmds.find(c => c.includes('am start -a android.intent.action.VIEW'));
+  assert.ok(c, `没发打开浏览器的命令：${cmds.join(' | ')}`);
+  assert.ok(c.includes('https://github.com/liisoya/9router-go-magisk'), `URL 不对：${c}`);
+  assert.ok(els.get('toast').textContent.includes('已在浏览器打开'),
+    `应给成功回执，实际：「${els.get('toast').textContent}」`);
+});
+
+test('更新源：面板快照带回任何 mod_url 都不许改变实际请求的源', async () => {
+  const evil = PANEL_OK.replace('mod_url=', 'mod_url=https://evil.example/x.json');
+  const { els, cmds } = boot({ panel: evil });
+  await els.get('btn-mod-check').onclick();
+  await tick(); await tick();
+  const reqs = cmds.filter(c => c.includes('curl'));
+  assert.ok(reqs.length, '检查更新没有发出任何请求（断言没落在真实行为上）');
+  assert.ok(reqs.some(c => c.includes('liisoya/9router-go-magisk')),
+    `没有请求内置更新源，实际命令：${reqs.join(' | ')}`);
+  assert.ok(!reqs.some(c => c.includes('evil.example')),
+    '用了面板带回 / 残留文件里的 mod_url —— 更新源必须固定，不得被任何外部值顶掉');
 });

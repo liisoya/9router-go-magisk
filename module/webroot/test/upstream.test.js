@@ -62,7 +62,14 @@ test('仓库与资产名：引擎资产只在引擎仓库（模块仓库的 rele
   assert.strictEqual(KU.SUMS_ASSET, 'SHA256SUMS.txt');
   // 清单地址落在各自仓库的 main 分支
   assert.ok(KU.ENGINE_VERSION_URL.includes(`/${KU.ENGINE_REPO}/`));
-  assert.ok(KU.DEFAULT_MOD_UPDATE_URL.includes(`/${KU.MODULE_REPO}/`));
+  assert.ok(KU.MOD_UPDATE_URL.includes(`/${KU.MODULE_REPO}/`));
+});
+// 项目地址（更新页那个链接）必须与更新源**同一个仓库**：主页给人看、update.json 给机器读，
+// 两处指向不同仓库时，"点了项目地址看到的版本"和"检查更新拿到的版本"就会对不上。
+test('PROJECT_URL：由仓库名派生，与模块更新源同仓库', () => {
+  assert.strictEqual(KU.PROJECT_URL, `https://github.com/${KU.MODULE_REPO}`);
+  assert.ok(KU.PROJECT_URL.includes(`/${KU.MODULE_REPO}`));
+  assert.ok(KU.MOD_UPDATE_URL.includes(`/${KU.MODULE_REPO}/`));
 });
 
 // ── 加速前缀：只有 GitHub 域才加（自定义更新源可能根本不是 GitHub）──

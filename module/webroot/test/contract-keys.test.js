@@ -21,6 +21,25 @@ const { scriptFiles, WEBROOT } = require('./lib/app-harness.js');
 const LIB = path.join(__dirname, '..', '..', 'lib');
 const shell = ['ops.sh', 'lifecycle.sh']
   .map(f => fs.readFileSync(path.join(LIB, f), 'utf8')).join('\n');
+
+// ── 动作回执词契约：KP.ACTION_WORDS（JS 消费侧）↔ shell echo（emit 侧）──
+// runOpsAction 是"缺省拒绝"消费：表里的词 shell 不吐了 = 用户会看到假失败；shell 加了
+// 新回词而表没认 = 幂等/诚实分支被判失败（2026-10-01 dnsOn 两起事故面）。
+// 抽取模式沿用上面的 shellEmitKeys / shellStateWords：只认动词函数体，不扫全文件。
+const VERB_EMITTERS = {
+  'start-user': ['life_start_user', 'life_settle_report'],
+  'restart-engine': ['life_restart_engine', 'life_settle_report'],
+  'stop-user': ['life_stop_user'],
+  'enable-dns': ['life_ensure_dns'],
+  'stop-dns': null,             // 回词由 ops.sh 分派行内联 echo（见断言内的特例）
+  'install-engine': ['cmd_install_engine'],
+  'install-module': ['cmd_install_module']
+};
+function verbWords(fn) {
+  const m = shell.match(new RegExp('(^|\\n)' + fn + '\\(\\)\\s*\\{([\\s\\S]*?)\\n\\}', 'm'));
+  assert.ok(m, `找不到动词函数 ${fn}()（改名了吗？本门禁需要同步）`);
+  return [...m[2].matchAll(/echo\s+"?([a-z][a-z0-9-]*(?:=[a-z0-9-]+)?)"?/g)].map(x => x[1]);
+}
 // 面板是多文件、清单唯一来源 = index.html 的 <script src>：键消费必须扫**全部**脚本。
 // 按文件名写死会漏掉新增的页面文件 —— 那些页面读的键就不再受契约约束（静默失覆盖）。
 const app = scriptFiles()
@@ -62,6 +81,10 @@ const EMIT_ONLY = new Set([
                     // 人读的运维接口，且 Phase 0.2 的"读失败必须显式 err 不许冒充 0"判据在它身上
   'apikeys_total',  // 同上（与 factory_key 同一次 sqlite 调用读取，成对保留）
   'bind',           // DNS 绑定范围：绑定范围 UI 已删除（FIXPLAN 3.3 deletion test），仅作状态展示
+  'mem_total',      // 2026-09-30：概览的「资源占用」卡片取消（内存并入运行状态读数牌），
+  'mem_avail',      // 系统可用/总量不再显示 —— 但这两个字段是 OOM 排查的第一手材料，
+                    // 且 cmd_panel 是人读的运维接口（`su -c '.../ops.sh panel'`），故保留 emit。
+                    // 要彻底删：连 ops.sh 里 _mem 的读取一起去掉（那属于 shell 变更，需同步台账）
 ]);
 
 const emitted = shellEmitKeys(shell);
@@ -84,6 +107,21 @@ test('shell emit 的每个键要么被 WebUI 消费、要么在 EMIT_ONLY 里有
   const unused = [...emitted].filter(k => !consumed.has(k) && !EMIT_ONLY.has(k)).sort();
   assert.deepStrictEqual(unused, [],
     `emit 了但没人读的键：${unused.join(', ')}（删掉，或加进 EMIT_ONLY 并写理由）`);
+});
+
+test('动作回执词：ACTION_WORDS 认下的每个词都必须真的被 shell 吐出来', () => {
+  for (const [verb, w] of Object.entries(KP.ACTION_WORDS)) {
+    const emitters = VERB_EMITTERS[verb];
+    assert.ok(emitters !== undefined, `未知动词 ${verb}（VERB_EMITTERS 需要同步）`);
+    for (const word of w.ok) {
+      // stop-dns 特例：回词由 ops.sh 分派行内联 echo（`stop-dns) life_disable_dns; echo "stopped"`），
+      // 没有独立函数体可扫 —— 全文存在性检查保底（弱一点，但 shell 源就这两个文件）
+      const hit = emitters === null
+        ? shell.includes(`echo "${word}"`)
+        : emitters.some(f => verbWords(f).includes(word));
+      assert.ok(hit, `${verb} 期待回词「${word}」，但它的 emit 方没有吐过这个词（shell 改词了？ACTION_WORDS 需要同步）`);
+    }
+  }
 });
 
 // ── 值枚举契约：状态词（life_state 是唯一 emit 方 ↔ KP.LIFECYCLE_STATES 是唯一文案映射）──

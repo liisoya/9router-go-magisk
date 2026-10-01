@@ -9,8 +9,8 @@
 #
 # 接口（调用方只需要知道这些动词；加粗项是给用户表达意图的，其余是给守护/运维用的）：
 #   意图：life_boot            开机：清"用户关闭"、武装并启动守护（只能在 init/ksud 上下文）
-#         life_stop_user       用户显式停服务：停进程 + 记住意图（守护不再复活）
-#         life_start_user      用户显式启服务：清意图 + 拉起
+#         life_stop_user       用户显式停服务：**全停**（引擎 + DNS + 守护）+ 记住意图
+#         life_start_user      用户显式启服务：**全启**（守护 + 引擎 + DNS），清意图
 #         life_restart_engine  停 →（有守护则委托它）→ 起，内置等待，echo engine=up|down
 #         life_stop_all [--user]
 #   幂等：life_ensure_engine / life_ensure_dns（在跑就返回 running，尊重用户意图）
@@ -427,9 +427,10 @@ life_wd_retire() {
 life_shutdown() {
   # 卸载语义：记住"用户要它停" + 关守护 + 停进程（保留数据目录）
   printf 'stop\n' > "$LIFE_ST_USER_OFF"
-  printf 'off\n' > "$LIFE_ST_WD_OFF"
   life_stop_all >/dev/null
-  rm -f "$LIFE_ST_WD_PID" "$LIFE_ST_WD_HOLD" "$LIFE_ST_WD_REQ"
+  # 停守护走唯一实现（life_wd_stop）：卸载时"关守护"也该是同一套三件事，
+  # 否则这里少清一个文件，卸载后重装就会撞上"stale 的 armed"这种幽灵状态。
+  life_wd_stop >/dev/null
   echo "shutdown"
 }
 life_wd_start() {
@@ -453,6 +454,39 @@ life_wd_start() {
   wait_for 30 0.1 life_wd_alive && { echo "started"; return 0; }
   echo "start-failed"
 }
+life_wd_stop() {
+  # 守护的停止实现。**三件事缺一不可**，少一件"停止"就是假的：
+  #   · 只写 watchdog-off 不 kill → 守护最多 60s 后才轮到自尽，这一分钟里它仍登记着 pid，
+  #     面板 watchdog=up，与"用户点了停止"直接打架（2026-10-01 验收项）；
+  #   · 只 kill 不写 off        → 守护若被别处（监督分支）叫醒，会立刻回来；
+  #   · 不清 pidfile / armed    → life_state 的口径是"不在但已武装 → stale"，
+  #     面板显示 stale，用户读成故障 —— 而停止要的是干干净净的 down。
+  # 武装标志在这里清是安全的：它由 life_boot（开机）与 life_wd_ensure_started（用户启动）
+  # 重新写入，不是一次性资源。
+  printf 'off\n' > "$LIFE_ST_WD_OFF"
+  _wsp="$(life_pid_of "$LIFE_ST_WD_PID")"
+  if [ -n "$_wsp" ] && kill -0 "$_wsp" 2>/dev/null; then
+    # 身份校验：pidfile 里的号可能被无关进程复用，而 kill 下去没有第二次机会
+    if life_pid_is_watchdog "$_wsp"; then
+      kill "$_wsp" 2>/dev/null
+    else
+      life_log "stop-watchdog: pidfile 里的 $_wsp 不是本模块守护，跳过（防误杀）"
+    fi
+  fi
+  wait_gone 50 0.2 "$_wsp"
+  rm -f "$LIFE_ST_WD_PID" "$LIFE_ST_WD_ARMED" "$LIFE_ST_WD_HOLD" "$LIFE_ST_WD_REQ"
+  echo "stopped"
+}
+life_wd_ensure_started() {
+  # 用户要服务时，把自愈能力一并还给这台机器（与 life_stop_user 的"全停"对称）。
+  # 取舍（ADR-0004）：非开机上下文起的守护会落在**启动者的 cgroup**，可能随启动者被清理 ——
+  # 但"点了启动却没有守护"比"守护可能活不久"更糟：前者是确定的损失，后者下次开机
+  # （service.sh → life_boot）会自动补回，且 life_cgroup_escape 已尽量让它脱组。
+  life_wd_alive && { echo "running"; return 0; }
+  rm -f "$LIFE_ST_WD_OFF"
+  : > "$LIFE_ST_WD_ARMED"
+  life_wd_start
+}
 
 # ── 引擎 ────────────────────────────────────────
 life_engine_healthy() {
@@ -460,6 +494,20 @@ life_engine_healthy() {
   # 少了这层的代价（2026-09-30 真机实测）：引擎死掉后 pid 被无关进程复用 → 面板永久误报
   # engine=up、守护永不重新拉起（自愈失效），面板上的"引擎内存"其实是别人进程的内存。
   life_pid_alive "$LIFE_ST_ENGINE" && life_pid_file_is_bin "$LIFE_ST_ENGINE" "$LIFE_BIN"
+}
+life_engine_process_exists() {
+  # 引擎进程是否已在（**不看 pidfile**）—— "启动中"的重复点击保护就靠它。
+  # 为什么不能只看 pidfile：进程刚被 setsid 拉起、pidfile 尚未落盘那一瞬，pidfile 判据
+  # 会说"不在"，于是再起一个 → 两个进程抢同一端口，后起的 bind 失败退出，pidfile 里
+  # 留下一个死号，界面报"启动失败"（2026-10-01 验收项：不允许重复运行）。
+  # 命令行锚定 ^...$（与 life_stop_engine 的兜底同一条纪律）：裸子串会把
+  # `sqlite3 …/9router-go/db/…` 这类 WebUI 高频短命进程也算成引擎。
+  # pgrep 不可用（某些精简环境）时返回 1 —— 那是"没证据说它在"，退回原行为，不误伤。
+  for _epe in $(pgrep -f "^$LIFE_BIN\$" 2>/dev/null); do
+    case "$_epe" in ''|*[!0-9]*) continue ;; esac
+    [ "$_epe" != "$$" ] && return 0
+  done
+  return 1
 }
 
 life_prep() {
@@ -508,6 +556,13 @@ life_ensure_engine() {
   if life_engine_healthy; then
     life_cgroup_escape "$(life_pid_of "$LIFE_ST_ENGINE")"   # 已在跑的那个也补一次逃逸
     echo "running"; return 0
+  fi
+  # 已在启动中 → **等它就绪，绝不投第二个**（见 life_engine_process_exists）。
+  # 起两个实例的下场：后者 bind 端口失败退出，pidfile 被它覆盖成死号，
+  # 守护下一轮判死再拉 —— 用户侧就是"点了一下启动，服务反而不稳"。
+  if life_engine_process_exists; then
+    life_wait_engine_ready >/dev/null 2>&1
+    echo "starting"; return 0
   fi
   _prep="$(life_prep)"
   [ "$_prep" = "ok" ] || life_log "ensure-engine: prep=$_prep（后果见上方日志）"
@@ -566,6 +621,14 @@ life_dns_healthy() {
   life_port53_busy && return 0
   return 1
 }
+# 等 DNS 到**终态**，而不是"问一次就走"。
+# 为什么必须等（真机 2026-10-01）：重启/启动是委托守护**异步**执行的，dnsfwd 比引擎晚到 ——
+# restart 返回那一刻（实测 13s）dns 还是 down，再过 8s 才 up（≈21s；dnsfwd 自己还有 5s
+# 让位宽限窗）。引擎那侧等了"旧 pid 消失 + 健康"才返回，DNS 不等的话，界面在返回瞬间
+# 刷新就会把"还在起"画成"未运行"（红）—— 而引擎是绿的，两块并排自相矛盾。
+# 两项同级别，显示就必须同一逻辑：**都等真实终态再交给界面**。
+# 上限 30 次 ×1s：真机约 21s 到位，留足余量，又不至于让按钮长时间转圈。
+life_wait_dns_settled() { wait_for "${1:-30}" 1 life_dns_healthy; }
 life_ensure_dns() {
   life_user_stopped && { echo "off-by-user"; return 0; }
   life_dns_disabled && { echo "disabled"; return 0; }
@@ -648,34 +711,90 @@ life_stop_all() {
   echo "stopped"
 }
 life_stop_user() {
-  # 用户显式停服务：记住意图，守护不再复活（这正是"意图有主"的价值）
+  # 用户显式停服务 = **全停**：引擎 + dnsfwd + 守护（2026-10-01 验收项）。
+  # 守护此前根本不参与"停止"：它只是尊重停止意图、不再复活，于是界面 watchdog 仍是 up，
+  # 与"我已经停了"的直觉直接打架。停止的含义是"这台机器上属于它的都停"——
+  # 守护由 life_wd_stop 一并收掉，用户再点「启动」时由 life_start_user 把它起回来。
   # **顺序不能倒**：意图必须先落盘，再动进程。
   # 为什么（Phase 33.12 真机 T4 抓到）：守护改成事件驱动后，引擎一死 CHLD 会**毫秒级**
   # 唤醒它。若先停后写，守护醒来时 service-off 还不存在 → 它会立刻把用户刚停掉的服务复活。
   # 旧代码（5s 轮询 + 连续两次判死 ≈ 10s 窗口）刚好掩盖了这个竞态 —— 是"变快"把它暴露的。
   printf 'stop\n' > "$LIFE_ST_USER_OFF"
   life_stop_all >/dev/null
+  life_wd_stop >/dev/null
   echo "stopped"
 }
+# ── settle-and-report：等真实终态并诚实汇报（唯一实现，2026-10-01 架构走查）────────
+# 三态词协议（runOpsAction 全等消费，词表唯一所有者 = parsers.js 的 ACTION_WORDS）：
+#   engine=up|running  引擎健康**且** DNS 到终态（running = start-user 幂等：本来就在跑）
+#   dns-pending        引擎起了但 DNS 没到终态 —— 如实回报，不许谎报全好（A5/L19 的教训）
+#   engine=down        引擎没起来
+# 为什么收成一个 module：这段编排原在 start-user / restart-engine 各抄一遍（20 行逐行同构），
+# 两段等待的时限、hold 释放时机、三态词全要各写一份 —— L17（谎报 engine=up）与 L19（DNS
+# 空窗）两起事故都发生在这段逻辑里。动词现在只回答"怎么把服务拉起来"，等与报都在这里。
+# 等引擎健康（时限只写这一处）：settle 的"等自己拉起的就绪"与 ensure 的"等别人启动完"
+# （已在启动中 → 绝不投第二个）共用同一原语与同一时限。
+life_wait_engine_ready() { wait_for "${LIFE_ENGINE_WAIT_LIMIT:-30}" 2 life_engine_healthy; }
+life_settle_report() {
+  _sr_running="${1:-}"    # 非空 = 本来就在跑（只影响 up vs running 的措辞）
+  _sr_who="${2:-settle}"  # 日志归属（start-user / restart-engine）
+  if life_wait_engine_ready; then
+    # 引擎起来 ≠ 服务起来：dnsfwd 由守护异步拉起、比引擎晚（真机 ≈21s）。不等 DNS 到终态
+    # 就返回，界面刷新会把"还在起"画成红 —— 引擎/DNS 同级别，必须同一口径交同一时刻的事实。
+    if life_wait_dns_settled "${LIFE_DNS_SETTLE_LIMIT:-30}"; then
+      life_wd_hold_release
+      [ -n "$_sr_running" ] && echo "engine=running" || echo "engine=up"
+      return 0
+    fi
+    life_wd_hold_release
+    life_log "$_sr_who: 引擎已起，但 DNS 在 ${LIFE_DNS_SETTLE_LIMIT:-30}s 内未到终态"
+    echo "dns-pending"
+    return 0
+  fi
+  life_wd_hold_release
+  echo "engine=down"
+  return 0
+}
 life_start_user() {
+  # 用户显式启服务 = **全部启动**（引擎 + DNS + 守护），与 life_stop_user 的"全停"对称。
+  # 输出**只能有一行**：UI 是按全等匹配状态词的（runOpsAction 的 expect），多吐一行就会被
+  # 判成失败 —— 此前 life_ensure_engine 的 started/running 泄漏进 stdout，界面拿到的是
+  # "running\nengine=up"，于是恒报「❌ 服务未启动」（真机 2026-10-01）。
   rm -f "$LIFE_ST_USER_OFF"
-  life_ensure_engine
-  life_ensure_dns >/dev/null
+  _su_was_up=0
+  life_engine_healthy && _su_was_up=1
+  _su_w="$(life_wd_ensure_started)"
+  [ "$_su_w" = "start-failed" ] && life_log "start-user: 守护未起来（$_su_w），本次在本上下文启动"
+  if life_wd_alive; then
+    # 守护在场 → 委托它起：进程天然落在免疫上下文，且不会与本上下文抢同一个进程
+    life_wd_hold 180
+    life_wd_request start
+  else
+    life_ensure_engine >/dev/null
+    life_ensure_dns >/dev/null 2>&1
+  fi
   # 如实自报（2026-09-29 诊断）：过去无论引擎有没有起来都 echo started，面板于是无条件报
-  # 「✅ 服务已启动」—— 而同文件的 restart-engine 一直会回 engine=up/down。端口被占/二进制损坏时
-  # 用户看到的是"成功"与状态卡"未运行"互相打脸。改成与 restart 同一口径（等一会儿再判）。
-  if wait_for 20 2 life_engine_healthy; then echo "engine=up"; else echo "engine=down"; fi
+  # 「✅ 服务已启动」。本来就在跑 → engine=running：界面据此说"已在正常运行"，不谎称"刚启动"。
+  # 等待编排（引擎健康 → DNS 终态 → 释放 hold → 三态词）收在 life_settle_report，唯一实现。
+  life_settle_report "$_su_was_up" "start-user"
+}
+# 「停了它就要负责拉回全套」的**唯一清单**（2026-10-01 架构走查；A3 是它的第一课：
+# 无守护分支漏拉 DNS = 域名解析全挂）。此前这条知识有多个手写家。守护的 start/restart
+# 请求分支**不走这里**：它们需要 _ee/_de 的返回值做 eng_ours/dns_ours 记账（S3），
+# 那属于守护决策核的收口范围。
+life_ensure_stack() {
+  # LIFE_CALLER 只影响日志归属，透传调用方的名字
+  ( LIFE_CALLER="${1:-ensure-stack}"; export LIFE_CALLER; life_ensure_engine ) >/dev/null
+  ( LIFE_CALLER="${1:-ensure-stack}"; export LIFE_CALLER; life_ensure_dns ) >/dev/null 2>&1
 }
 life_restart_all() {
   # 「停了它，就由同一处负责把它起回来」—— stop_all 会**连同 DNS 一起停**，所以这里必须
   # 也把 DNS 拉回来。为什么要有这个 module（2026-09-29 架构走查 A3）：
   # 无守护分支过去只 ensure_engine，DNS 静默停摆 —— 而 Android 无 /etc/resolv.conf、
   # 引擎只认 127.0.0.1:53，DNS 不在就等于**域名解析全挂**；按钮文案写的却是「重启引擎 + DNS」。
-  # 收进一个函数后，两条分支（有守护/无守护）不会再各自漏掉一项。
+  # 拉回清单收进 life_ensure_stack 后，本函数与 ops.sh 装包失败分支共用同一份。
   life_stop_all >/dev/null
-  # LIFE_CALLER 只影响日志归属，透传调用方的名字
-  ( LIFE_CALLER="${1:-restart-all}"; export LIFE_CALLER; life_ensure_engine ) >/dev/null
-  ( LIFE_CALLER="${1:-restart-all}"; export LIFE_CALLER; life_ensure_dns ) >/dev/null 2>&1
+  life_ensure_stack "${1:-restart-all}"
 }
 life_restart_engine() {
   # 有守护时**委托守护**执行停止+启动：重启后的进程天然落在免疫上下文里；
@@ -684,21 +803,24 @@ life_restart_engine() {
   # （它在本文件里，不读那些守护态变量）；**但两侧"停就负责起"的语义必须一致** ——
   # 无守护这一侧走 life_restart_all，DNS 不再被漏掉。
   rm -f "$LIFE_ST_USER_OFF"
-  if ! life_wd_alive && life_wd_armed; then life_wd_start >/dev/null; fi
+  # 重启 = 用户要服务 → 自愈能力一并回来（停止时它被 life_wd_stop 连 armed 一起清掉了）
+  life_wd_ensure_started >/dev/null
+  # **旧 pid 必须先记下来**：委托守护重启是**异步**的 —— 请求发出后守护才去停旧引擎，
+  # 此刻旧引擎还在跑。若立刻 `wait_for healthy`，第一次检查就撞见"旧引擎还在" →
+  # 0 秒返回 engine=up（真机取证：elapsed=0s），而界面随后刷新正好落在
+  # "旧已停、新未起"的空窗 —— 重启被显示成红色，且不手动刷新就永不恢复。
+  # 所以：**先等旧进程真的消失，再等新引擎起来**。
+  _re_old="$(life_pid_of "$LIFE_ST_ENGINE")"
   life_wd_hold 180
   if life_wd_alive; then
     life_wd_request restart
   else
     life_restart_all restart-engine
   fi
-  if wait_for 20 2 life_engine_healthy; then
-    life_wd_hold_release
-    echo "engine=up"
-    return 0
-  fi
-  life_wd_hold_release
-  echo "engine=down"
-  return 0
+  [ -n "$_re_old" ] && wait_gone 50 0.2 "$_re_old"
+  # 等待编排与 start-user 同一口径（唯一实现 life_settle_report）：引擎健康 + DNS 终态才回
+  # engine=up，否则 dns-pending / engine=down 如实上报。
+  life_settle_report "" "restart-engine"
 }
 life_state() {
   # 只读：机器可读一行（值都不含空格），供 ops.sh status 组合。dnsfwd/引擎/守护三个状态

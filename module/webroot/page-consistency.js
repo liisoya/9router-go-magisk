@@ -14,7 +14,14 @@ async function scanOrphans() {
     const btn = $id('btn-clean-orphans');
     btn.disabled = true; btn.style.display = 'none';
     box.innerHTML = '<div class="hint">扫描中…</div>';
-    const r = await KB.sqlFile(KB._cmds.scanOrphansSql());
+    // 数据库被引擎占用时 sqlFile 会重试 3 次、每次隔 1 秒 —— 进度报给台面，
+    // 否则按钮停在"扫描中…"三秒，看着像卡死（2026-10-01 用户反馈）
+    const busy = n => {
+      const b = $id('btn-scan');
+      if (b) b.textContent = `扫描中…（重试 ${n}/3）`;
+      box.innerHTML = `<div class="hint">数据库正被引擎占用，第 ${n} 次重试…</div>`;
+    };
+    const r = await KB.db.scanOrphans(busy);
     const { live, aliases } = KP.parseScanLines(r.out.split('\n'));
     // 安全护栏：有模型别名却读不到任何节点/连接 = 扫描结果不可信（撞上引擎写事务等），
     // 绝不在这种状态下判定孤儿 —— 宁可扫不出，不可误删。
@@ -33,9 +40,12 @@ async function scanOrphans() {
       return;
     }
     box.innerHTML = state.orphans.map(a =>
-      `<div class="list-item"><span class="tag err">孤儿</span><span style="flex:1;word-break:break-all">${esc(a)}</span></div>`).join('');
+      `<div class="list-item"><span class="tag err">孤儿</span><span class="grow">${esc(a)}</span></div>`).join('');
     btn.disabled = false; btn.style.display = '';
-    btn.textContent = `确认清理孤儿（${state.orphans.length} 项，一次全清）`;
+    // 文案收短（2026-09-30）：原来那句「确认清理孤儿（N 项，一次全清）」太长，
+    // 把按钮挤到扫描按钮的下一行去了 —— 两个按钮是同一组动作，必须并排。
+    // 「一次全清」的语义移到卡片说明里，不再占按钮宽度。
+    btn.textContent = `确认清理 ${state.orphans.length} 项`;
   });
 }
 async function cleanOrphans() {
@@ -43,7 +53,7 @@ async function cleanOrphans() {
   return withBusy($id('btn-clean-orphans'), '清理中…', async () => {
     // 删除前二次确认：逐别名复查它是否真的不在存活节点/连接里
     // （扫描瞬间可能撞上引擎写事务导致误判——曾误删 Import from /models 刚导入的模型）
-    const confirm = await KB.sqlFile(KB._cmds.recheckOrphansSql(state.orphans));
+    const confirm = await KB.db.recheckOrphans(state.orphans);
     // 复查读失败 = 结果不可信，与扫描门禁同一判据纪律（不得把空输出当"查无存活"放行删除）
     const recheck = { ok: confirm.ok === true, reason: '复查读取失败（结果不可信）' };
     if (!KP.planGate(KP.ORPHAN_CLEAN_PLAN, 'recheck', recheck).ok) {
@@ -66,8 +76,7 @@ async function cleanOrphans() {
     // SQL 来自 _cmds.orphanSnapshotSql（唯一所有者，离线断言"不翻倍引号"——
     // 2026-09-28 事故：装配层内联 SQL 把单引号翻倍 → sqlite3 Parse error → 快照永远失败）。
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const snapOk = await KB.sqlSnapshot(
-      KB._cmds.orphanSnapshotSql(targets),
+    const snapOk = await KB.db.snapshotOrphans(targets,
       `${CFG.DATA_DIR}/backups/kv-before-orphan-clean-${ts}.sql`);
     // 快照门禁在 delete 之前（顺序不变量见 KP.ORPHAN_CLEAN_PLAN，离线有断言）
     if (!KP.planGate(KP.ORPHAN_CLEAN_PLAN, 'snapshot', { ok: snapOk, reason: '快照失败' }).ok) {
@@ -80,7 +89,7 @@ async function cleanOrphans() {
     // 本批漏删、另一批没有快照可回滚，界面却照样报"已一次性清理 N 项"（谎报成功）；
     // 批次变空时 DELETE 甚至退化成 `... AND ()` 语法错，仍然报成功。
     if (!n) return; // 本批为空：不发 SQL（空 IN 列表是语法错，且无事可做）
-    await KB.sqlFile(KB._cmds.orphanDeleteSql(targets));
+    await KB.db.deleteOrphans(targets);
     toast(`✅ 已一次性清理 ${n} 项（删除前快照已存 $DATA_DIR/backups/）`, 3600);
     state.orphans = [];
     scanOrphans();
@@ -91,7 +100,12 @@ async function scanCred() {
     const box = $id('cred-list');
     box.innerHTML = '<div class="hint">扫描中…</div>';
     // 单查询拿全凭据列（曾逐连接二次查询，N+1 次串行 root shell）
-    const conns = await KB.sqlFile(KB._cmds.credScanSql());
+    // 进度同 scanOrphans：重试期间必须让台面知道它在动，而不是"卡死"
+    const conns = await KB.db.credScan(n => {
+      const b = $id('btn-scan-conn');
+      if (b) b.textContent = `扫描中…（重试 ${n}/3）`;
+      box.innerHTML = `<div class="hint">数据库正被引擎占用，第 ${n} 次重试…</div>`;
+    });
     // 读失败不得冒充"凭据齐全"（空输出的假阴性比没有结果更危险）
     if (conns.ok === false) {
       box.innerHTML = '<div class="hint">⚠️ 数据库读取失败（引擎可能正忙），请稍后重试。</div>';
@@ -99,7 +113,7 @@ async function scanCred() {
     }
     const rows = KP.parseCredScan(conns.out);
     box.innerHTML = rows.length
-      ? rows.map(r => `<div class="list-item"><span class="tag err">${esc(r.authType)}</span><span style="flex:1">${esc(r.provider)}</span></div>`).join('')
+      ? rows.map(r => `<div class="list-item"><span class="tag err">${esc(r.authType)}</span><span class="grow">${esc(r.provider)}</span></div>`).join('')
       : '<div class="hint">✅ 活跃连接凭据齐全</div>';
   });
 }

@@ -3,225 +3,726 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1a1a">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <title>9Router Go · 模块管理</title>
+<!--
+  设计语言与 Dashboard（web/src/index.css）同源，面板离线可用：
+  · 品牌 terracotta #e56a4a；暖纸（浅）/ 炭黑（深）两套主题
+  · 字体只用系统栈 + 内联 SVG 图标 —— WebUI 在 KernelSU 里是**离线** webview，
+    任何外链字体/图标 CDN 都加载不到（这也是不能用 Material Symbols 的原因）
+
+  版面约定（组件化，不写死尺寸）：
+  · 宽度靠 auto-fit 栅格与 flex 自适应，尺寸靠 clamp()/token，**不在标记里写行内 px**
+    （真机上只有极少数必须由 JS 覆写的例外，如 `#btn-clean-orphans` 的初始 display）
+  · `.ro`  = 状态读数牌（底色表状态）  `.big` = 主数值  `.btnbar` = 等宽动作条
+  · `.fold` = 「读数在前、编辑折起来」：同一份数据只显示一遍，编辑按需展开
+  · 文案：台面只留「现在是什么状态 / 点下去会发生什么」；更长的理由进按钮 title
+
+  ⚠️ 改本文件前先读 module/webroot/test/dom-id-contract.test.js：
+     · 脚本 getElementById 用到的每个 id 都必须在 HTML 里存在（拼错 = 真机整页死）
+     · HTML 里每个 btn- 开头的 id 都必须被脚本绑定（死按钮）
+     · nav 的 data-page 必须指向存在的 id
+     · <script src> 清单顺序是**唯一来源**（test/lib/app-harness.js 与 build.sh verify_zip 都从它派生）
+     · 绑定走 withBusy 的按钮里**不能放 SVG**：withBusy 会用 textContent 覆写并还原，图标会被抹掉
+     · 注释里不要出现「id 加等号再加引号」的字面量，也不要出现任何脚本文件名 ——
+       门禁是拿正则/IndexOf 从本文件现取的，注释同样会被扫到（踩过两次）
+-->
 <style>
-  :root {
-    --bg: #0f1115; --card: #171a21; --line: #262b36; --txt: #e6e9ef;
-    --dim: #8b93a3; --acc: #4f8cff; --ok: #3fb96f; --warn: #e0a53a; --err: #e05a5a;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--txt); font: 14px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 14px; padding-bottom: 40px; }
-  h1 { font-size: 17px; margin-bottom: 2px; }
-  .sub { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
-  nav { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
-  nav button { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 7px 14px; font-size: 13px; color: var(--dim); }
-  nav button.on { background: var(--acc); border-color: var(--acc); color: #fff; }
-  .page { display: none; } .page.on { display: block; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 13px; }
-  .card h2 { font-size: 14px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
-  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); } .dot.warn { background: var(--warn); }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .kv { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; gap: 12px; align-items: center; }
-  .kv b { font-weight: 600; text-align: right; word-break: break-all; }
-  .kv span { color: var(--dim); flex: none; }
-  button { background: #222734; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
-  button:active { opacity: .7; }
-  button.primary { background: var(--acc); border-color: var(--acc); color: #fff; }
-  button.danger { background: transparent; border-color: var(--err); color: var(--err); }
-  button:disabled { opacity: .45; cursor: default; }
-  input[type=text] { width: 100%; background: #0d0f14; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 13px/1.4 ui-monospace, monospace; }
-  textarea { width: 100%; min-height: 110px; background: #0d0f14; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 12px/1.5 ui-monospace, monospace; resize: vertical; }
-  .hint { color: var(--dim); font-size: 12px; margin-top: 6px; }
-  pre { background: #0d0f14; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 11px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; margin-top: 8px; display: none; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
-  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); word-break: break-all; }
-  th { color: var(--dim); font-weight: 500; }
-  .bar { height: 8px; background: #0d0f14; border-radius: 5px; overflow: hidden; margin: 4px 0 10px; }
-  .bar i { display: block; height: 100%; background: var(--acc); border-radius: 5px; }
-  .bar i.warn { background: var(--warn); } .bar i.err { background: var(--err); }
-  .list-item { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 12px; }
-  .list-item:last-child { border-bottom: 0; }
-  .tag { font-size: 11px; border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; color: var(--dim); flex: none; }
-  .tag.err { color: var(--err); border-color: var(--err); }
-  .tag.ok { color: var(--ok); border-color: var(--ok); }
-  .tag.acc { color: var(--acc); border-color: var(--acc); }
-  .chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 14px; padding: 3px 10px; font-size: 12px; margin: 3px 4px 3px 0; cursor: pointer; }
-  .chip:active { opacity: .7; }
-  .chip.added { color: var(--ok); border-color: var(--ok); }
-  #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: #222734; border: 1px solid var(--line); color: var(--txt); padding: 8px 16px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; max-width: 90vw; z-index: 9; }
-  #toast.show { opacity: 1; }
-  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .seg button { border: 0; border-radius: 0; background: transparent; }
-  .seg button.on { background: var(--acc); color: #fff; }
+/* ══════════════════════════════════════════════════════════════════
+   1. 设计 token —— 与 Dashboard 对齐
+   ══════════════════════════════════════════════════════════════════ */
+:root {
+  /* 品牌（terracotta，与 web/src/index.css 的 --color-brand-* 同值） */
+  /* 品牌阶整体比官方 Dashboard 深一档：#e56a4a 上白字只有 3.2:1（AA 需 4.5），压到
+     #c14a2c 后 primary 按钮 / 激活页签的白字 4.9:1 达标；600 再深一档供 hover 与浅色主题
+     强调文字（白底上 6.2:1）。深色主题的强调文字走 300（视觉与旧 500 相同，观感不变）。
+     imperfect trade-off：与 Dashboard 的"同值"变成"同系" —— 识别仍在，读得清优先。 */
+  --brand-300: #e56a4a; --brand-400: #cc5236; --brand-500: #c14a2c;
+  --brand-600: #a83f24;
+  /* 形状 / 字体 / 节奏 */
+  --r-sm: 8px; --r: 10px; --r-lg: 14px;
+  --pad-page: clamp(12px, 3.6vw, 24px);      /* 页面左右留白随宽度流体变化 */
+  --pad-card: clamp(13px, 3.2vw, 18px);
+  --gap: 12px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+          "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* ── 深色（默认；面板历来是深色，保持默认观感不变） ── */
+  color-scheme: dark;
+  --bg: #1a1a1a;
+  --card: #262626;
+  --card-2: #303030;
+  --card-3: #3a3a3a;
+  --line: #333333;
+  --line-soft: #2a2a2a;
+  --txt: #ededed;
+  --dim: #9ca3af;
+  --dim-2: #6b7280;
+  --acc: var(--brand-300);              /* 链接/强调文字（深色底上要够亮） */
+  --acc-soft: rgba(229, 106, 74, .14);
+  --acc-line: rgba(229, 106, 74, .34);
+  /* 状态色按主题分别取值：`--ok/--warn/--err` 会被 JS 直接写进 style.color
+     （纯函数层的 TONE_COLORS），所以它们必须在本主题的底色上真的读得清 ——
+     Dashboard 那套 #cf222e 在炭黑卡片上只有约 2.6:1，照搬会把“故障”显示成一片暗红 */
+  --ok: #10b981; --warn: #f59e0b; --err: #f87171;
+  --ok-soft: rgba(16, 185, 129, .18);
+  --warn-soft: rgba(245, 158, 11, .18);
+  --err-soft: rgba(248, 113, 113, .22);
+  --sh-soft: 0 1px 2px rgba(0, 0, 0, .3);
+  --sh-warm: 0 2px 14px -2px rgba(229, 106, 74, .22);
+  --sh-elev: 0 14px 32px -6px rgba(0, 0, 0, .55);
+  --topbar-bg: rgba(26, 26, 26, .82);
+}
+.light {
+  /* ── 浅色（暖纸，与 Dashboard light 主题同值） ── */
+  color-scheme: light;
+  --bg: #fdfaf6;
+  --card: #ffffff;
+  --card-2: #f4f4f5;
+  --card-3: #e7e7e9;
+  --line: #e5e7eb;
+  --line-soft: #f1f1f3;
+  --txt: #0a0a0a;
+  --dim: #6b7280;
+  --dim-2: #9ca3af;
+  --acc: var(--brand-600);              /* 白底上需要更深才够对比度 */
+  --acc-soft: rgba(229, 106, 74, .10);
+  --acc-line: rgba(229, 106, 74, .30);
+  /* 浅色底要压深，否则绿/琥珀在暖纸底上同样读不清 */
+  --ok: #047857; --warn: #b45309; --err: #dc2626;
+  --ok-soft: rgba(4, 120, 87, .14);
+  --warn-soft: rgba(180, 83, 9, .14);
+  --err-soft: rgba(220, 38, 38, .16);
+  --sh-soft: 0 1px 2px rgba(0, 0, 0, .04);
+  --sh-warm: 0 2px 12px -2px rgba(229, 106, 74, .18);
+  --sh-elev: 0 12px 28px -4px rgba(60, 50, 45, .10);
+  --topbar-bg: rgba(253, 250, 246, .85);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2. 基础
+   ══════════════════════════════════════════════════════════════════ */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--txt);
+  font: 13px/1.6 var(--font);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  padding-bottom: calc(44px + env(safe-area-inset-bottom, 0px));
+  /* 切主题时底色渐变过渡，不要整屏硬跳（各卡片/按钮各自也有 transition） */
+  transition: background-color .2s, color .2s;
+}
+/* 纯色底：正式面板不要网格纹理（曾按 Dashboard 的 landing-grid 加过，2026-09-30 去掉） */
+::selection { background: rgba(229, 106, 74, .22); }
+a { color: var(--acc); text-decoration: none; }
+a:active { opacity: .75; }
+:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 2px; border-radius: var(--r-sm); }
+
+/* 容器宽度自适应：手机满宽，平板/桌面到 900px 收住 */
+.app { width: 100%; max-width: 900px; margin: 0 auto; padding: 0 var(--pad-page); }
+
+/* ══════════════════════════════════════════════════════════════════
+   3. 顶栏 + 页签（同一块 sticky）
+   ══════════════════════════════════════════════════════════════════ */
+.sticky {
+  position: sticky; top: 0; z-index: 6;
+  margin: 0 calc(-1 * var(--pad-page)) var(--gap);
+  padding: 0 var(--pad-page);
+  padding-top: env(safe-area-inset-top, 0px);
+  background: var(--topbar-bg);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  backdrop-filter: saturate(180%) blur(14px);
+  border-bottom: 1px solid var(--line-soft);
+}
+.top { display: flex; align-items: center; gap: 12px; padding: 11px 0 9px; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+/* 品牌标：直接用官方 icon（favicon.svg），不自己画 —— 它自带圆角深底，不再叠渐变底 */
+.mark {
+  flex: none; display: block; width: 34px; height: 34px;
+  border-radius: var(--r); overflow: hidden;
+}
+.mark img { display: block; width: 100%; height: 100%; }
+.brand-txt { min-width: 0; }
+.brand-txt h1 {
+  font-size: clamp(14px, 3.6vw, 15px); font-weight: 650; letter-spacing: -.01em; line-height: 1.25;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.brand-txt h1 span { color: var(--dim); font-weight: 500; }
+
+/* 图标按钮：**必须**把 button 的 padding 归零 —— 否则 36px 的方框里内容盒只剩 6px，
+   17px 的图标放不下、被挤到起始边（实测偏右 5.5px，用户反馈"图标不居中"）。
+   40px 也顺带把触控目标抬到接近 44px 的推荐值。 */
+.icon-btn {
+  flex: none; display: grid; place-items: center; padding: 0;
+  width: 40px; height: 40px;
+  border-radius: var(--r); border: 1px solid var(--line); background: var(--card);
+  color: var(--dim); cursor: pointer; transition: color .16s, border-color .16s, background .16s;
+}
+.icon-btn:hover { color: var(--txt); border-color: var(--card-3); }
+.icon-btn:active { transform: scale(.94); }
+.icon-btn svg { width: 17px; height: 17px; }
+.i-moon { display: none; }
+.light .i-sun { display: none; }
+.light .i-moon { display: block; }
+
+/* 页签：横向可滚动的分段控件（手机上 4 个中文页签不会挤成两行） */
+.tabs {
+  display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
+  padding-bottom: 9px; margin: 0 calc(-1 * var(--pad-page)); padding-inline: var(--pad-page);
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  height: 38px; padding: 0 13px; cursor: pointer;
+  font: 500 12.5px/1 var(--font); color: var(--dim); white-space: nowrap;
+  background: var(--card); border: 1px solid var(--line-soft); border-radius: var(--r);
+  transition: color .16s, background .16s, border-color .16s, transform .12s;
+}
+.tabs button svg { width: 15px; height: 15px; flex: none; opacity: .9; }
+.tabs button:active { transform: scale(.97); }
+.tabs button.on {
+  color: #fff; background: var(--brand-500); border-color: var(--brand-500);
+  box-shadow: var(--sh-warm);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   4. 页面 / 卡片 / 栅格
+   ══════════════════════════════════════════════════════════════════ */
+.page { display: none; }
+.page.on { display: block; animation: page-in .22s cubic-bezier(.22, .61, .36, 1) both; }
+@keyframes page-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.card {
+  position: relative; overflow: hidden;
+  background: var(--card); border: 1px solid var(--line-soft); border-radius: var(--r-lg);
+  padding: var(--pad-card); margin-bottom: var(--gap); box-shadow: var(--sh-soft);
+  transition: background-color .2s, border-color .2s;
+}
+/* 卡片左侧品牌细轨：让整页有一致的“仪表”识别度，不靠重阴影堆砌 */
+.card::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2.5px;
+  background: linear-gradient(to bottom, var(--brand-500), transparent 85%);
+  opacity: .55;
+}
+.card-h {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  font-size: 13.5px; font-weight: 650; letter-spacing: -.005em; margin-bottom: 11px;
+}
+.ico {
+  flex: none; display: grid; place-items: center; width: 26px; height: 26px;
+  border-radius: var(--r-sm); background: var(--acc-soft); color: var(--acc);
+}
+.ico svg { width: 15px; height: 15px; }
+/* 「运行状态」卡的观察开关：**胶囊**而不是方框图标按钮 —— 与右侧版本号 .ver 同一构造
+   （mono 11px 胶囊），标题行里两种形状会打架。off = .tag 的静默语言、on = .ver 的品牌语言；
+   文案在「观察 / 观察中」间切换 —— 开关本身即状态（用户拍板不另设状态牌）。
+   纯文字无 SVG：文案要经 textContent 切换，图标会被抹掉（见第 5 节按钮区的警告）。
+   auto 空隙只给按钮（按钮+版本号一起靠右、版本号贴着它）；min-height 归零压掉基础按钮的 36px。 */
+.card-h #btn-observe {
+  margin-left: auto; flex: none; min-height: 0;
+  padding: 3px 10px; border-radius: 999px;
+  font: 600 11px/1.6 var(--mono); color: var(--dim);
+  background: var(--card-2); border: 1px solid var(--line);
+  transition: color .16s, border-color .16s, background .16s;
+}
+.card-h #btn-observe.on { color: var(--acc); background: var(--acc-soft); border-color: var(--acc-line); }
+.card-h #btn-observe + .ver { margin-left: 8px; }
+/* 卡片头里的标签一律右对齐（`margin-left:auto`）—— 与「DNS 上游 · 自定义最优先」同一处，
+   贴到标题后面会显得挤（2026-09-30 用户反馈）。引擎版本用 .ver，但位置规则共用这一条。 */
+.card-h .tag, .card-h .ver { margin-left: auto; }
+/* 引擎版本：跟在卡片头右侧的小标签，用品牌色点出来（不另开卡片、也不占读数行） */
+.card-h .ver {
+  flex: none; padding: 3px 9px; border-radius: 999px;
+  font: 600 11px/1.5 var(--mono); color: var(--acc);
+  background: var(--acc-soft); border: 1px solid var(--acc-line);
+}
+
+/* 栅格：手机单列；宽到放得下两栏时才并排（阈值用内容宽度而非设备名）。
+   align-items:start 让每张卡片贴合自身内容 —— 等高拉伸会把只有一行大字的
+   卡片撑出一片空白（引擎版本 vs 引擎端口 就是这种组合）。 */
+.grid { display: grid; gap: var(--gap); align-items: start; }
+.grid > .card { margin-bottom: 0; }
+@media (min-width: 720px) { .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ── 读数牌：底色表状态，数值只留关键数字 ── */
+.readout {
+  display: grid; gap: 8px; margin-bottom: 12px;
+  /* 96px 下限让 360px 手机也排得下三块（可用宽 = 视口 − 页面留白 − 卡片内边距）；
+     更窄（≤320）自动落成 2+1 —— 放不下就别硬塞。 */
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+}
+.ro {
+  min-width: 0; padding: 8px 10px; border-radius: var(--r);
+  background: var(--card-2); border: 1px solid var(--line-soft);
+  transition: background .2s, border-color .2s;
+}
+.ro.ok { background: var(--ok-soft); border-color: var(--ok-soft); }
+.ro.warn { background: var(--warn-soft); border-color: var(--warn-soft); }
+.ro.err { background: var(--err-soft); border-color: var(--err-soft); }
+.ro.off { background: var(--card-2); border-color: var(--line); }
+.ro > span { display: block; color: var(--dim); font-size: 11px; letter-spacing: .02em; }
+.ro > b {
+  display: block; margin-top: 4px; color: var(--txt);
+  font: 600 clamp(11.5px, 3.1vw, 13px)/1.4 var(--mono); word-break: break-all;
+}
+/* 灰档（用户主动停服）的值用 --dim 而不是 --dim-2：后者在炭黑底上只有 3.1:1，
+   而这行是这块牌子的主数值，不能为了"显得弱"牺牲可读性（底色已经在表达弱了）。 */
+.ro.off > b { color: var(--dim); }
+/* 读数牌里的附注行（内存等）：比主数值低一档，不抢眼但同一张牌里可读 */
+.ro-mem { margin-top: 3px; color: var(--dim); font: 500 11.5px/1.4 var(--mono); word-break: break-all; }
+
+/* 其余读数行：左标签 / 右数值 */
+.kv {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  padding: 6px 0; font-size: 12.5px; border-bottom: 1px dashed var(--line-soft);
+}
+.kv > span { color: var(--dim); flex: none; }
+.kv > b { font: 600 12.5px/1.5 var(--mono); text-align: right; word-break: break-all; }
+
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.row.mt { margin-top: 11px; }
+/* 输入 + 按钮：输入自适应占满剩余宽度（按钮因此贴右边缘，与「服务地址」那几行的复制按钮同一形态） */
+.addrow { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+.addrow > input[type=text] { flex: 1 1 170px; width: auto; min-width: 0; }
+.addrow > button { flex: 0 0 auto; }
+
+/* ══════════════════════════════════════════════════════════════════
+   5. 按钮（绑定走 withBusy 的按钮只能放文字 —— 图标会被 textContent 抹掉）
+   ══════════════════════════════════════════════════════════════════ */
+button {
+  font: 500 12.5px/1 var(--font); color: var(--txt); cursor: pointer;
+  background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r);
+  min-height: 36px; padding: 8px 14px;
+  transition: background .16s, border-color .16s, color .16s, transform .1s, opacity .16s;
+}
+button:active { transform: scale(.975); }
+button:disabled { opacity: .42; cursor: default; transform: none; }
+button.primary {
+  color: #fff; background: var(--brand-500); border-color: var(--brand-500);
+  font-weight: 600; box-shadow: var(--sh-warm);
+}
+button.primary:hover:not(:disabled) { background: var(--brand-600); border-color: var(--brand-600); }
+button.danger { color: var(--err); background: transparent; border-color: var(--err-soft); }
+button.danger:hover:not(:disabled) { background: var(--err-soft); border-color: var(--err); }
+
+/* 等宽动作条：同一组动作用同一形状，一行排完；列数由 class 决定，按钮自适应收缩 */
+.btnbar { display: grid; gap: 6px; margin-top: 11px; }
+.btnbar { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.btnbar.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.btnbar.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.btnbar > button { padding: 8px 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 停止只把字染成危险色 —— 形状/底色与同排按钮一致，避免一行里蹦出一个异类 */
+.btnbar > button.danger { background: var(--card-2); border-color: var(--line); }
+.btnbar > button.danger:hover:not(:disabled) { background: var(--err-soft); border-color: var(--err); }
+
+/* ══════════════════════════════════════════════════════════════════
+   6. 输入 / 输出块
+   ══════════════════════════════════════════════════════════════════ */
+input[type=text] {
+  width: 100%; min-height: 36px; padding: 8px 11px;
+  font: 12.5px/1.45 var(--mono); color: var(--txt);
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r);
+  caret-color: var(--brand-500);   /* 光标也是界面：边框与焦点环都主题化了，光标别留默认色 */
+  transition: border-color .16s, box-shadow .16s;
+}
+textarea {
+  width: 100%; min-height: 104px; padding: 10px 11px; resize: vertical;
+  font: 12px/1.6 var(--mono); color: var(--txt);
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r);
+  caret-color: var(--brand-500);
+  transition: border-color .16s, box-shadow .16s;
+}
+input[type=text]:focus, textarea:focus {
+  outline: none; border-color: var(--brand-500);
+  box-shadow: 0 0 0 3px var(--acc-soft);
+}
+input::placeholder, textarea::placeholder { color: var(--dim-2); }
+pre {
+  display: none; margin-top: 9px; padding: 10px 11px; max-height: 300px; overflow: auto;
+  font: 11px/1.6 var(--mono); color: var(--dim);
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r);
+  white-space: pre-wrap; word-break: break-all;
+}
+/* 操作回执（检查更新/更新进度）：默认不占版面，JS 有结果时才 display:block。
+   样式是**小字**不是日志框 —— 只有原始日志才配 pre 的边框与底色（见 DNS 页的探测输出）。 */
+.note {
+  display: none; margin-top: 8px; color: var(--dim);
+  font: 11.5px/1.7 var(--mono); white-space: pre-wrap; word-break: break-all;
+}
+
+/* ── 说明文字：台面只留可执行的一句 ── */
+.hint { color: var(--dim); font-size: 11.5px; line-height: 1.65; margin-top: 7px; }
+.hint b { color: var(--txt); font-weight: 600; }
+
+/* ── 折叠区：读数在前、编辑折起来（同一份数据不显示两遍） ── */
+.fold { margin-top: 11px; padding-top: 11px; border-top: 1px dashed var(--line-soft); }
+.fold > summary {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  color: var(--dim); font-size: 11.5px; list-style: none;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::after { content: '▾'; font-size: 9px; transition: transform .2s; }
+.fold[open] > summary { color: var(--acc); }
+.fold[open] > summary::after { transform: rotate(180deg); }
+.fold > *:not(summary) { margin-top: 9px; }
+
+/* 小节标签（"当前生效 / 添加 / 明文"…）：统一一处，别处不再各写字号。
+   用 --dim 而非 --dim-2：10.5px 的小字配 3.1:1 的对比度读不清（审计实测）。 */
+.field-k, .chips-k {
+  display: block; color: var(--dim); font-size: 10.5px;
+  letter-spacing: .06em; margin-bottom: 5px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   7. 徽标 / 芯片 / 列表
+   ══════════════════════════════════════════════════════════════════ */
+.tag {
+  flex: none; display: inline-block; padding: 2px 7px; border-radius: 999px;
+  font: 600 10.5px/1.5 var(--mono); letter-spacing: .01em; color: var(--dim);
+  background: var(--card-2); border: 1px solid var(--line);
+}
+.tag.acc { color: var(--acc); background: var(--acc-soft); border-color: var(--acc-line); }
+/* 「当前加速」地址用胶囊标签显示（观感对齐 DNS 页「自定义最优先」标签，2026-10-01）。
+   地址可能很长：在 / . - 等自然断点换行，不用 break-all 的任意断 —— 那会把地址切得七零八落。
+   word-break 必须在这里覆盖：.kv > b 的 break-all 会继承进胶囊。 */
+.kv .tag { word-break: normal; overflow-wrap: anywhere; }
+.tag.ok { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-soft); }
+.tag.err { color: var(--err); background: var(--err-soft); border-color: var(--err-soft); }
+
+/* 候选池：三类各一行，芯片按类别归位（原来九个平铺分不出结构） */
+.chipgroup { margin-top: 9px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  display: inline-flex; align-items: center; padding: 5px 12px;
+  border-radius: 999px; cursor: pointer; white-space: nowrap;
+  font-size: 12px; color: var(--dim);
+  background: var(--card-2); border: 1px dashed var(--line);
+  transition: color .16s, border-color .16s, background .16s, transform .1s;
+}
+.chip:active { transform: scale(.96); }
+.chip.added { color: var(--ok); background: var(--ok-soft); border-style: solid; border-color: var(--ok-soft); }
+
+.listbox { margin-top: 9px; }
+.list-item {
+  display: flex; gap: 9px; align-items: center; padding: 7px 0;
+  font-size: 12px; border-bottom: 1px dashed var(--line-soft);
+}
+.list-item:last-child { border-bottom: 0; }
+.list-item > span:not(.tag) { color: var(--txt); min-width: 0; }
+/* 行内"占满剩余宽度 + 任意断行"的唯一写法（此前散落成 4 处行内 style） */
+.grow { flex: 1; min-width: 0; word-break: break-all; }
+/* 地址是可点/可复制的信息主体，字号比普通说明大一档 */
+.list-item > a.addr, .addr {
+  flex: 1; min-width: 0; font-family: var(--mono);
+  font-size: clamp(12.5px, 3.4vw, 13.5px); word-break: break-all;
+}
+.list-item button { min-height: 32px; padding: 4px 12px; font-size: 11.5px; flex: none; }
+
+table { width: 100%; margin-top: 9px; border-collapse: collapse; font-size: 11.5px; }
+th, td { padding: 6px 7px; text-align: left; border-bottom: 1px solid var(--line-soft); word-break: break-all; }
+th {
+  color: var(--dim); font-weight: 500; font-size: 10.5px; letter-spacing: .04em;
+  text-transform: uppercase; background: var(--card-2);
+}
+th:first-child { border-top-left-radius: var(--r-sm); }
+th:last-child { border-top-right-radius: var(--r-sm); }
+td { font-family: var(--mono); }
+tr:last-child td { border-bottom: 0; }
+td b { color: var(--acc); font-weight: 600; }
+
+/* ══════════════════════════════════════════════════════════════════
+   8. 诊断区 / toast
+   ══════════════════════════════════════════════════════════════════ */
+.diag {
+  display: none; margin-top: 10px; padding: 9px 11px; border-radius: var(--r);
+  color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-soft);
+  font: 11px/1.6 var(--mono); white-space: pre-wrap; word-break: break-all;
+}
+#toast {
+  position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  transform: translate(-50%, 8px); z-index: 20; max-width: calc(100vw - 28px);
+  padding: 10px 16px; border-radius: var(--r); pointer-events: none;
+  font-size: 12.5px; line-height: 1.5; color: var(--txt);
+  background: var(--card-2); border: 1px solid var(--line); box-shadow: var(--sh-elev);
+  opacity: 0; transition: opacity .22s, transform .22s cubic-bezier(.22, .61, .36, 1);
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ══════════════════════════════════════════════════════════════════
+   9. 无障碍 / 大屏微调（版面本身已自适应，这里只调密度）
+   ══════════════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+@media (min-width: 620px) {
+  body { font-size: 13.5px; }
+}
 </style>
+<!-- 主题在首帧前定好，避免闪白/闪黑（读取失败一律按深色，面板默认观感不变） -->
+<script>
+(function () {
+  try {
+    var saved = localStorage.getItem('9r-panel-theme');
+    var light = saved === 'light'
+      || (!saved && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
+    if (light) document.documentElement.classList.add('light');
+  } catch (e) { /* localStorage 不可用时保持深色 */ }
+})();
+</script>
 </head>
 <body>
-<h1>9Router Go 模块管理</h1>
-<div class="sub">dnsfwd · 模块层功能 · 引擎零魔改</div>
+<div class="app">
 
-<nav>
-  <button data-page="p-overview" class="on">概览</button>
-  <button data-page="p-dns">DNS</button>
-  <button data-page="p-consistency">一致性检查</button>
-  <button data-page="p-update">更新</button>
-</nav>
+  <div class="sticky">
+    <header class="top">
+      <div class="brand">
+        <span class="mark">
+          <!-- 官方 icon（与 Dashboard 同一个 web/public/favicon.svg，构建时随 webroot 一起打包）。
+               它自带圆角深底，所以 .mark 不再叠自己的渐变底。
+               alt 留空：紧接着的 h1 已经念出产品名，这里再念一遍是重复。 -->
+          <img src="favicon.svg" alt="">
+        </span>
+        <div class="brand-txt">
+          <h1>9Router Go <span>· 模块管理</span></h1>
+        </div>
+      </div>
+      <button type="button" id="theme-toggle" class="icon-btn" title="切换浅色 / 深色" aria-label="切换浅色 / 深色主题">
+        <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4.2"/>
+          <path d="M12 2.6v2.2M12 19.2v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.4 19.6 6 18M18 6l1.6-1.6"/>
+        </svg>
+        <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.5 14.3A8.6 8.6 0 0 1 9.7 3.5a8.7 8.7 0 1 0 10.8 10.8z"/>
+        </svg>
+      </button>
+    </header>
 
-<!-- ═══════════════ 概览 ═══════════════ -->
-<div class="page on" id="p-overview">
-  <div class="card">
-    <h2><span class="dot" id="dot-dns"></span>运行状态</h2>
-    <div class="kv"><span>引擎</span><b id="st-eng">检测中…</b></div>
-    <div class="kv"><span>DNS 转发器</span><b id="st-dns">检测中…</b></div>
-    <div class="kv"><span>生命周期守护</span><b id="st-wd">检测中…</b></div>
-    <div class="kv"><span>引擎端口</span><b id="st-port">-</b></div>
-    <div class="kv"><span>引擎版本</span><b id="st-ver">-</b> <span class="hint" id="ver-src"></span></div>
-    <div class="row" style="margin-top:10px">
-      <button class="primary" id="btn-refresh">刷新</button>
-      <button class="danger" id="btn-restart-all">重启引擎 + DNS</button>
-      <button id="btn-start-svc">启动服务</button>
-      <button class="danger" id="btn-stop-svc">停止服务</button>
-    </div>
-    <div class="hint">「停止服务」是<b>用户意图</b>：守护不会把它自动拉回来（此前只有重启，想停就停不下来）。</div>
-    <div id="diag" class="hint" style="display:none;white-space:pre-wrap;word-break:break-all;margin-top:8px;color:var(--warn)"></div>
+    <nav class="tabs" aria-label="模块功能">
+      <button type="button" data-page="p-overview" class="on">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 11h4l2.5-6 3.5 11 2.5-5h4"/></svg>
+        <span>概览</span>
+      </button>
+      <button type="button" data-page="p-dns">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M3 10h14M10 3c2 2.2 3 4.4 3 7s-1 4.8-3 7c-2-2.2-3-4.4-3-7s1-4.8 3-7"/></svg>
+        <span>DNS</span>
+      </button>
+      <button type="button" data-page="p-consistency">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.4 4 5v5c0 3.4 2.4 6.4 6 7.6 3.6-1.2 6-4.2 6-7.6V5z"/><path d="M7.4 10.2 9.3 12l3.3-3.6"/></svg>
+        <span>一致性检查</span>
+      </button>
+      <button type="button" data-page="p-update">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v9M6.2 8.6 10 12.4l3.8-3.8"/><path d="M3.2 16h13.6"/></svg>
+        <span>更新</span>
+      </button>
+    </nav>
   </div>
 
-  <div class="card">
-    <h2>服务地址</h2>
-    <div id="addr-list"><div class="hint">加载中…</div></div>
-    <div class="hint">引擎监听所有网卡，局域网设备可直接访问 Dashboard（首次需登录）。点地址复制，点链接在浏览器打开。</div>
-  </div>
+  <main>
 
-  <div class="card">
-    <h2>资源占用</h2>
-    <div class="kv"><span>引擎内存</span><b id="mem-eng">-</b></div>
-    <div class="bar"><i id="bar-eng" style="width:0%"></i></div>
-    <div class="kv"><span>dnsfwd 内存</span><b id="mem-dns">-</b></div>
-    <div class="bar"><i id="bar-dns" style="width:0%"></i></div>
-    <div class="kv"><span>系统可用 / 总量</span><b id="mem-sys">-</b></div>
-    <div class="bar"><i id="bar-sys" style="width:0%"></i></div>
-    <div class="hint">引擎 > 300MB 或系统可用 < 150MB 时告警（阈值沿用旧版）。</div>
-  </div>
+    <!-- ═══════════════ 概览 ═══════════════
+         概览页刻意不放小字提示：这一页只回答"现在什么状态、能点哪几个按钮"。
+         每条动作的语义进按钮 title，来龙去脉在其它页里讲。 -->
+    <section class="page on" id="p-overview">
+      <div class="card">
+        <h2 class="card-h">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 11h4l2.5-6 3.5 11 2.5-5h4"/></svg></span>
+          运行状态
+          <!-- 观察模式（每 5 秒自动刷新）：它监测的就是这行读数，所以住在这行 —— 默认关、
+               不记忆；胶囊形状的理由见样式区 #btn-observe 的注释 -->
+          <button type="button" id="btn-observe" title="观察模式：每 5 秒自动刷新状态与内存（排查内存变化用；再点一次关闭，重进面板自动关闭）" aria-label="切换观察模式（每 5 秒自动刷新）">观察</button>
+          <span class="ver" id="ver-tip"><span id="st-ver">-</span></span>
+        </h2>
+        <div class="readout">
+          <div class="ro" id="ro-eng"><span>引擎</span><b id="st-eng">检测中…</b><div class="ro-mem" id="mem-eng"></div></div>
+          <div class="ro" id="ro-dns"><span>DNS 转发器</span><b id="st-dns">检测中…</b><div class="ro-mem" id="mem-dns"></div></div>
+          <div class="ro" id="ro-wd"><span>守护进程</span><b id="st-wd">检测中…</b></div>
+        </div>
+        <!-- 动作按操作顺序排：先看状态 → 启动 → 重启 → 停止 -->
+        <div class="btnbar">
+          <button id="btn-refresh" title="刷新状态">刷新</button>
+          <button id="btn-start-svc" title="启动服务（清除「停止」意图）">启动</button>
+          <button id="btn-restart-all" title="重启引擎 + DNS">重启</button>
+          <button class="danger" id="btn-stop-svc" title="停止服务（守护不会自动拉起）">停止</button>
+        </div>
+        <div class="diag" id="diag"></div>
+      </div>
 
-  <div class="card">
-    <h2>引擎端口</h2>
-    <div class="row">
-      <input type="text" id="in-port" style="max-width:160px" inputmode="numeric" placeholder="20130">
-      <button class="primary" id="btn-port">保存并重启引擎</button>
-    </div>
-    <div class="hint">写入 $DATA_DIR/port 持久化，重启引擎后生效（DNS 转发器不受影响）。</div>
-  </div>
+      <div class="card">
+        <h2 class="card-h">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8.2 11.8a3.6 3.6 0 0 0 5.1 0l2.6-2.6a3.6 3.6 0 0 0-5.1-5.1L9.6 5.3"/><path d="M11.8 8.2a3.6 3.6 0 0 0-5.1 0L4.1 10.8a3.6 3.6 0 0 0 5.1 5.1l1.2-1.2"/></svg></span>
+          服务地址
+        </h2>
+        <div id="addr-list"><div class="hint">加载中…</div></div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-h">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 2.5v5M13 2.5v5M4.2 7.5h11.6v2.6a5.8 5.8 0 0 1-11.6 0z"/><path d="M10 15.9v1.6"/></svg></span>
+          引擎端口
+        </h2>
+        <div class="addrow">
+          <input type="text" id="in-port" inputmode="numeric" placeholder="20130" aria-label="引擎端口">
+          <button class="primary" id="btn-port">保存并重启</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════ DNS ═══════════════ -->
+    <section class="page" id="p-dns">
+      <div class="card">
+        <h2 class="card-h">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5v7"/><path d="M5.6 5.2a6.6 6.6 0 1 0 8.8 0"/></svg></span>
+          转发器开关
+        </h2>
+        <div class="ro" id="ro-dnsw"><span>DNS 转发器</span><b id="dnsw-state">-</b><div class="ro-mem" id="mem-dnsw"></div></div>
+        <div class="btnbar two">
+          <button class="primary" id="btn-dns-on" title="启动 dnsfwd（占用 :53；已被其他转发器占用时自动让路）">开启</button>
+          <button class="danger" id="btn-dns-off" title="关闭 dnsfwd（本模块不再占用 :53，引擎改用设备上已有的 DNS 方案）">关闭</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-h">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 6.2h14.4M2.8 13.8h14.4"/><circle cx="8" cy="6.2" r="2.1"/><circle cx="13" cy="13.8" r="2.1"/></svg></span>
+          DNS 上游 <span class="tag acc">自定义最优先</span>
+        </h2>
+
+        <span class="field-k">当前生效</span>
+        <div id="cur-upstreams"><div class="hint">加载中…</div></div>
+
+        <div class="chipgroup">
+          <span class="field-k">添加</span>
+          <div class="addrow">
+            <input type="text" id="in-add" placeholder="114.114.114.114 或 doh https://doh.pub/dns-query" aria-label="自定义 DNS 上游">
+            <button id="btn-add-upstream">添加</button>
+          </div>
+        </div>
+
+        <div id="cand-chips"></div>
+
+        <div class="hint">每行一条：nameserver IP / doh URL / dot host；禁止 127.0.0.1 与 ::1。点上方芯片可直接加入。</div>
+        <div class="btnbar three">
+          <button class="primary" id="btn-save">保存</button>
+          <button id="btn-probe">探测</button>
+          <button id="btn-restore-init">恢复默认</button>
+        </div>
+        <pre id="probe-out"></pre>
+
+        <details class="fold">
+          <summary>直接编辑配置文件</summary>
+          <textarea id="upstreams" spellcheck="false"></textarea>
+          <div class="hint">与上方列表是同一份数据，只是原始文本形态；改完点「保存」。</div>
+        </details>
+      </div>
+
+      <div class="card">
+        <h2 class="card-h">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2.2 4 11.2h5l-1 6.6 7-9H10z"/></svg></span>
+          优选 <span class="tag">测速后自动应用</span>
+        </h2>
+        <div class="row">
+          <button class="primary" id="btn-opt" title="候选池 = 内置可达清单 ∪ 你的自定义项 ∪ 当前配置；评分 = 可用率×100 − RTT/50 − fake-ip 罚 100；排序只看本机实测评分（内置清单的排列只是分组，不是推荐优先级）；手写项保留在最前">候选池测速</button>
+          <button id="btn-rollback" title="回到上一版（.prev）">回滚上一版</button>
+        </div>
+        <div id="opt-table"></div>
+      </div>
+    </section>
+
+    <!-- ═══════════════ 一致性检查 ═══════════════ -->
+    <section class="page" id="p-consistency">
+      <!-- 出厂 key 卡片已移除：全新安装由 service.sh 开机自动补入；备份导入后仪表盘
+           走会话鉴权（引擎 /api/models/test 不再依赖 apiKeys 表），用户全程无感。
+           出厂 key 被用户主动删除时不自动复活（安全特性），外部 CLI 需要时在
+           Dashboard 的 keys 页手动添加。 -->
+
+      <div class="grid two">
+        <div class="card">
+          <h2 class="card-h">
+            <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h12M8.2 6V3.8h3.6V6"/><path d="M6.2 6l.9 11h5.8l.9-11"/></svg></span>
+            孤儿数据
+          </h2>
+          <div class="row">
+            <button class="primary" id="btn-scan" title="扫描「已删节点的 openai-compatible-chat-<uuid> 残留」；内置别名永不清理">检查孤儿数据</button>
+            <button class="danger" id="btn-clean-orphans" disabled style="display:none" title="一次性全清；删除前会先把将被删除的行快照到 $DATA_DIR/backups/">确认清理</button>
+          </div>
+          <div id="orphan-list" class="listbox"></div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-h">
+            <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.4" cy="13.6" r="3.2"/><path d="M8.9 11.1 16.6 3.4M14.2 5.8l2.4 2.4M16.6 3.4 19 5.8"/></svg></span>
+            无凭据的活跃连接
+          </h2>
+          <div class="row"><button class="primary" id="btn-scan-conn" title="扫描缺 token / key 的活跃连接（仅警告，不自动处理）">扫描</button></div>
+          <div id="cred-list" class="listbox"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════ 更新 ═══════════════
+         这一页不放小字备注：动作语义进按钮 title，结果由 #eng-out / #mod-out 出（默认不占版面）。 -->
+    <section class="page" id="p-update">
+      <div class="card">
+        <h2 class="card-h">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14a7 7 0 0 1 14 0"/><path d="M10 13.6 14 9.4"/><circle cx="10" cy="14" r="1.2"/></svg></span>
+          GitHub 加速
+        </h2>
+        <!-- 胶囊标签显示（观感对齐 DNS 页「自定义最优先」）；长地址在自然断点换行，见 .kv .tag -->
+        <div class="kv"><span>当前加速</span><b><span class="tag" id="accel-cur">直连 GitHub</span></b></div>
+        <div class="row mt">
+          <button class="primary" id="btn-speed" title="对候选节点发真实文件请求计时（每批 8 并发，连接超时 3s）；不用先选节点也能测">本机测速</button>
+          <button id="btn-accel-clear" title="清除选中，回到直连 GitHub">清除选中</button>
+        </div>
+        <div id="accel-list" class="listbox"></div>
+        <details class="fold">
+          <summary>添加自定义节点</summary>
+          <div class="addrow">
+            <input type="text" id="in-accel" placeholder="https://gh-proxy.com/"
+                   title="以 / 结尾，GitHub URL 会拼在后面" aria-label="自定义加速节点前缀">
+            <button class="primary" id="btn-accel-add">添加</button>
+          </div>
+        </details>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h2 class="card-h">
+            <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v9M6.2 8.6 10 12.4l3.8-3.8"/><path d="M3.2 16h13.6"/></svg></span>
+            引擎更新 <span class="tag" id="eng-cur">-</span>
+          </h2>
+          <div class="kv"><span>上游最新版</span><b id="eng-latest">未检查</b></div>
+          <div class="btnbar two">
+            <button class="primary" id="btn-eng-check" title="检查上游最新版">检查更新</button>
+            <button id="btn-eng-update" disabled title="下载 arm64 二进制 → SHA256 校验 → 替换并重启；校验失败自动放弃">下载并更新</button>
+          </div>
+          <div class="note" id="eng-out"></div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-h">
+            <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.4 3 6.2v7.6l7 3.8 7-3.8V6.2z"/><path d="M3 6.2 10 10l7-3.8M10 10v7.6"/></svg></span>
+            模块更新 <span class="tag" id="mod-cur">-</span>
+          </h2>
+          <div class="kv"><span>远端版本</span><b id="mod-latest">未检查</b></div>
+          <!-- 地址由 KU.PROJECT_URL 填入（地址字面量不许出现在 upstream.js 之外） -->
+          <div class="kv"><span>项目地址</span><b><a id="mod-project" target="_blank" rel="noopener noreferrer">-</a></b></div>
+          <div class="btnbar two">
+            <button class="primary" id="btn-mod-check" title="检查模块更新源">检查更新</button>
+            <button id="btn-mod-update" disabled title="下载 zip（校验 module.prop）→ 停进程 → 解压覆盖 → 重启">下载并安装</button>
+          </div>
+          <div class="note" id="mod-out"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
 </div>
 
-<!-- ═══════════════ DNS ═══════════════ -->
-<div class="page" id="p-dns">
-  <div class="card">
-    <h2>转发器开关</h2>
-    <div class="kv"><span>状态</span><b id="dnsw-state">-</b></div>
-    <div class="row" style="margin-top:8px">
-      <button class="primary" id="btn-dns-on">开启</button>
-      <button class="danger" id="btn-dns-off">关闭</button>
-    </div>
-    <div class="hint">关闭 = 本模块不占用 :53，引擎改用设备上已有的 DNS 方案。若开机时 :53 已被其他转发器占用，本模块会自动让路（状态显示"已让路"）。</div>
-  </div>
-
-  <div class="card">
-    <h2>当前生效的上游</h2>
-    <div id="cur-upstreams"><div class="hint">加载中…</div></div>
-  </div>
-
-  <div class="card">
-    <h2>上游配置 <span class="tag acc">自定义最优先</span></h2>
-    <textarea id="upstreams" spellcheck="false"></textarea>
-    <div class="row" style="margin-top:8px">
-      <input type="text" id="in-add" style="flex:1" placeholder="自定义 DNS：如 114.114.114.114 或 doh https://doh.pub/dns-query">
-      <button id="btn-add-upstream">添加</button>
-    </div>
-    <div id="cand-chips" style="margin-top:6px"></div>
-    <div class="hint">每行一条：nameserver IP / doh URL / dot host。严禁 127.0.0.1 / ::1。自定义项永远排在优选结果之前；保存后热重载。点候选池标签可一键加入。</div>
-    <div class="row" style="margin-top:10px">
-      <button class="primary" id="btn-save">保存并热重载</button>
-      <button id="btn-probe">逐个探测</button>
-      <button id="btn-restore-init">恢复初始默认</button>
-    </div>
-    <pre id="probe-out"></pre>
-  </div>
-
-  <div class="card">
-    <h2>优选 <span class="tag">测速后自动应用</span></h2>
-    <div class="row">
-      <button class="primary" id="btn-opt">候选池测速</button>
-      <button id="btn-rollback">回滚上一版</button>
-    </div>
-    <div id="opt-table"></div>
-    <div class="hint">候选池 = 内置可达清单（国内明文 + DoH/DoT，源自旧版实测）∪ 你的自定义项 ∪ 当前配置。评分 = 可用率×100 − RTT/50 − fake-ip罚100；测完自动写入「自定义项 + Top5」并热重载，上一版存 .prev 可回滚。</div>
-  </div>
-</div>
-
-<!-- ═══════════════ 一致性检查 ═══════════════ -->
-<div class="page" id="p-consistency">
-  <!-- 出厂 key 卡片已移除：全新安装由 service.sh 开机自动补入；备份导入后仪表盘
-       走会话鉴权（引擎 /api/models/test 不再依赖 apiKeys 表），用户全程无感。
-       出厂 key 被用户主动删除时不自动复活（安全特性），外部 CLI 需要时在
-       Dashboard 的 keys 页手动添加。 -->
-
-  <div class="card">
-    <h2>孤儿数据</h2>
-    <div class="row">
-      <button class="primary" id="btn-scan">检查孤儿数据</button>
-      <button class="danger" id="btn-clean-orphans" disabled style="display:none">确认清理孤儿</button>
-    </div>
-    <div id="orphan-list" style="margin-top:8px"></div>
-    <div class="hint">只清理「已删除节点的 openai-compatible-chat-&lt;uuid&gt; 残留」（客户端模型列表噪音的来源，引擎本就忽略它们）。内置供应商别名（oc/ds/qd…）永不清理；点一次全清。</div>
-  </div>
-
-  <div class="card">
-    <h2>无凭据的活跃连接</h2>
-    <div class="row"><button class="primary" id="btn-scan-conn">扫描</button></div>
-    <div id="cred-list" style="margin-top:8px"></div>
-    <div class="hint">仅警告不自动处理：OAuth 连接缺 token / apikey 连接缺 key 时无法出站，请在 Dashboard 对应供应商页重新登录或填 key。</div>
-  </div>
-</div>
-
-<!-- ═══════════════ 更新 ═══════════════ -->
-<div class="page" id="p-update">
-  <div class="card">
-    <h2>GitHub 加速</h2>
-    <div class="kv"><span>当前加速</span><b id="accel-cur">直连 GitHub</b></div>
-    <div class="row" style="margin-top:8px">
-      <button class="primary" id="btn-speed">本机测速</button>
-      <button id="btn-accel-add">添加自定义节点</button>
-      <button id="btn-accel-clear">清除选中</button>
-    </div>
-    <div id="accel-list"></div>
-    <div class="hint">对候选节点发真实文件请求计时（本机结果；每批 8 个并发，连接超时 3s）。测速后显示 Top5 并<b>自动选中最快</b>（可点别的节点或「清除选中」改），不可用的节点会带上原因。无需先选节点才能测。</div>
-  </div>
-
-  <div class="card">
-    <h2>引擎更新 <span class="tag" id="eng-cur">-</span></h2>
-    <div class="kv"><span>上游最新版</span><b id="eng-latest">未检查</b></div>
-    <div class="row" style="margin-top:8px">
-      <button class="primary" id="btn-eng-check">检查更新</button>
-      <button id="btn-eng-update" disabled>下载并更新引擎</button>
-    </div>
-    <pre id="eng-out"></pre>
-    <div class="hint">下载 arm64 二进制 + SHA256 校验 → 替换模块内引擎 → 自动重启。SHA 校验失败自动放弃。</div>
-  </div>
-
-  <div class="card">
-    <h2>模块更新 <span class="tag" id="mod-cur">-</span></h2>
-    <div class="kv"><span>远端版本</span><b id="mod-latest">未检查</b></div>
-    <div class="row" style="margin-top:8px">
-      <button class="primary" id="btn-mod-check">检查更新</button>
-      <button id="btn-mod-update" disabled>下载并覆盖安装</button>
-      <button id="btn-mod-seturl">修改更新源</button>
-    </div>
-    <pre id="mod-out"></pre>
-    <div class="hint">下载模块 zip（校验 module.prop）→ 停进程 → 解压覆盖 → 重启。更新前 zip 备份在 $DATA_DIR/last-module.zip。管理器在线更新（updateJson）与本按钮独立。</div>
-  </div>
-</div>
-
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 /* 运行时配置：__MOD_ID__ 由 build.sh 打包时按 module.prop 的 id 注入 */
@@ -241,5 +742,17 @@ window.CFG = {
 <script src="page-consistency.js"></script>
 <script src="page-update.js"></script>
 <script src="app-boot.js"></script>
+<script>
+/* 主题切换（内联，不进 <script src> 清单：清单只收本地文件，且门禁从它派生加载顺序）。
+   只切 .light 类，token 全在 CSS；读写失败不抛错，最差退化成"这次不生效"。 */
+(function () {
+  var btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+  btn.onclick = function () {
+    var light = document.documentElement.classList.toggle('light');
+    try { localStorage.setItem('9r-panel-theme', light ? 'light' : 'dark'); } catch (e) {}
+  };
+})();
+</script>
 </body>
 </html>

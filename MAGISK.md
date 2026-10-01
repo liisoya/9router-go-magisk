@@ -153,8 +153,9 @@ su -c '/data/adb/modules/ninerouter-go/lib/ops.sh status' # watchdog=up|down|sta
 | 更新 | GitHub 加速节点本机测速选优（初始清单来自 moretools.app 聚合，可自定义）、引擎 release 检查/更新（SHA256 校验）、模块 zip 覆盖更新 |
 
 - 加速节点选中值存 `$DATA_DIR/github-accel`，自定义清单 `$DATA_DIR/accel-list.conf`
-- 模块更新源存 `$DATA_DIR/module-update-url`（默认指向 fork 的 `update.json`，
-  发布 release 时在仓库根放 `{version, versionCode, zipUrl, changelog}`）
+- 模块更新源**固定**：WebUI 只展示、不提供输入（也不再读写任何数据文件），恒指向本模块
+  仓库的 `update.json`（发布 release 时在仓库根放 `{version, versionCode, zipUrl, changelog}`）。
+  它决定"从哪儿下载那份覆盖整个模块目录的 zip"，因此不接受自定义
 - module.prop 的 `updateJson` 字段供 KernelSU 管理器原生在线更新（与本 WebUI 通道独立）
 
 ## Dashboard 复制按钮补丁

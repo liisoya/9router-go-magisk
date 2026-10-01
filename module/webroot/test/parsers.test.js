@@ -227,12 +227,30 @@ test('stateLabel：已登记词给出文案与严重度（与改动前逐字一�
   assert.strictEqual(KP.stateLabel('engine', 'up', '1234').text, '运行中 (PID 1234)');
   assert.strictEqual(KP.stateLabel('engine', 'up', '1234').tone, 'ok');
   assert.strictEqual(KP.stateLabel('engine', 'stopped').text, '已停止（用户设置）');
-  assert.strictEqual(KP.stateLabel('engine', 'stopped').tone, 'warn');   // 用户意图，不是故障
   assert.strictEqual(KP.stateLabel('dns', 'disabled').text, '已关闭（用户设置）');
   assert.strictEqual(KP.stateLabel('dns', 'yielded').tone, 'warn');
   assert.strictEqual(KP.stateLabel('dns', 'down').text, '未运行');
   assert.strictEqual(KP.stateLabel('watchdog', 'stale').text, '未运行（已武装，下次重启生效）');
   assert.strictEqual(KP.stateLabel('watchdog', 'down').text, '未启用');
+});
+
+// 严重度四档（2026-09-30 用户反馈「显示运行的状态感觉很多、很乱」，改为**底色**表状态）：
+// 绿=正常在跑 / 灰=用户要它别跑（退出）/ 琥珀=要留意 / 红=真故障。
+// 这里锁的是"什么算故障"这一判断本身 —— 把用户主动关掉的画成红色，等于界面在报警。
+test('状态严重度：用户意图的「退出」是灰档，不是红档', () => {
+  assert.strictEqual(KP.stateLabel('engine', 'stopped').tone, 'off', '「已停止」是用户意图，不是故障');
+  assert.strictEqual(KP.stateLabel('dns', 'disabled').tone, 'off', '「已关闭」是用户意图，不是故障');
+  assert.strictEqual(KP.stateLabel('watchdog', 'down').tone, 'off', '守护未启用不等于故障');
+  // 真故障仍是红档
+  assert.strictEqual(KP.stateLabel('engine', 'down').tone, 'err');
+  assert.strictEqual(KP.stateLabel('dns', 'down').tone, 'err');
+  // 待留意档：已让路 / 已武装但没跑 —— 都不是故障，但也不该安静地当正常
+  assert.strictEqual(KP.stateLabel('dns', 'yielded').tone, 'warn');
+  assert.strictEqual(KP.stateLabel('watchdog', 'stale').tone, 'warn');
+  // 每一档都要有对应色值（off 漏配会让 style.color 落成 undefined，静默不生效）
+  for (const tone of ['ok', 'warn', 'err', 'off']) {
+    assert.ok(KP.TONE_COLORS[tone], `TONE_COLORS 缺 ${tone}`);
+  }
 });
 test('stateLabel：未登记的词不冒充正常（报未知 + 透出原词）', () => {
   const s = KP.stateLabel('engine', 'yawned', '9');
@@ -244,6 +262,43 @@ test('stateLabel：未知 kind 也不抛（表格被删/拼错时不炸界面）
   const s0 = KP.stateLabel('nope', 'up', '1');
   assert.strictEqual(s0.unknown, true);
   assert.strictEqual(typeof s0.text, 'string');
+});
+
+// ── 概览三块读数的短形态（2026-09-30：三块并排，底色表状态 + 只留 PID）──
+test('stateTile：在跑时只给 PID（完整句留给 DNS 页的 kv 行）', () => {
+  assert.deepStrictEqual(KP.stateTile('engine', 'up', '24817'), { tone: 'ok', text: 'PID 24817' });
+  assert.deepStrictEqual(KP.stateTile('dns', 'up', '101'), { tone: 'ok', text: 'PID 101' });
+  assert.deepStrictEqual(KP.stateTile('watchdog', 'up', '303'), { tone: 'ok', text: 'PID 303' });
+  // pid 拿不到时不许拼出 "PID undefined"
+  assert.deepStrictEqual(KP.stateTile('engine', 'up', ''), { tone: 'ok', text: '运行中' });
+});
+test('stateTile：没在跑时给短词，且短到能三块并排', () => {
+  const cases = [
+    ['dns', 'disabled', '已关闭'], ['dns', 'yielded', '已让路'], ['dns', 'down', '未运行'],
+    ['engine', 'stopped', '已停止'], ['engine', 'down', '未运行'],
+    ['watchdog', 'stale', '待重启'], ['watchdog', 'down', '未启用'],
+  ];
+  for (const [kind, value, want] of cases) {
+    const tile = KP.stateTile(kind, value, '');
+    assert.strictEqual(tile.text, want, `${kind}=${value}`);
+    // 同一份状态知识两种粒度：短形态必须真的更短，否则概览又会变乱
+    assert.ok(tile.text.length <= 4, `${kind}=${value} 的短词太长：${tile.text}`);
+    assert.ok(tile.text.length <= KP.stateLabel(kind, value, '').text.length,
+      `${kind}=${value} 的短形态没有比完整句短`);
+  }
+});
+test('stateTile：未登记的词不冒充正常（与 stateLabel 同一条纪律）', () => {
+  assert.deepStrictEqual(KP.stateTile('engine', 'yawned', '9'), { tone: 'err', text: '未知' });
+  assert.deepStrictEqual(KP.stateTile('nope', 'up', '1'), { tone: 'err', text: '未知' });
+});
+test('状态词表：每个登记词都要有可用 tone 与短词（漏配 = 底色/文字静默失效）', () => {
+  for (const [kind, table] of Object.entries(KP.LIFECYCLE_STATES)) {
+    for (const [word, entry] of Object.entries(table)) {
+      assert.ok(KP.TONE_COLORS[entry.tone], `${kind}=${word} 的 tone=${entry.tone} 在 TONE_COLORS 里没有色值`);
+      assert.strictEqual(typeof entry.short, 'string', `${kind}=${word} 缺 short 短词`);
+      assert.strictEqual(KP.stateTile(kind, word, '1').tone, entry.tone, `${kind}=${word} 底色档不一致`);
+    }
+  }
 });
 
 // ── 引擎版本"来源"自检文案（Phase 26：面板谎报旧版本时用户要能一眼看出）──
@@ -264,6 +319,63 @@ test('engineVersionSourceLabel：来源缺失/未知不冒充正常', () => {
 // 现在的分工：
 //   · **顺序**由流程用例守 —— gate-flows.test.js / orphan-scan.test.js 断言真实命令序列；
 //   · 这里只锁两件可机械判定的事：**计划结构**与**调用点与计划一致**（见下）。
+// ── 内存文案（2026-10-01 架构评审 #2：概览的引擎/DNS 牌与 DNS 页的状态牌都要显示内存，
+//    各写一份格式化就会漂，所以收成 KP.fmtMem）──
+test('fmtMem：kB → 面板文案；0 / 读不到一律 "-"（不冒充 0 kB）', () => {
+  assert.strictEqual(KP.fmtMem(0), '-');
+  assert.strictEqual(KP.fmtMem(''), '-');
+  assert.strictEqual(KP.fmtMem(undefined), '-');
+  assert.strictEqual(KP.fmtMem('nope'), '-');
+  assert.strictEqual(KP.fmtMem(512), '512 kB');
+  assert.strictEqual(KP.fmtMem(1024), '1.0 MB');
+  assert.strictEqual(KP.fmtMem(24316), '23.7 MB');
+  assert.strictEqual(KP.fmtMem('24316'), '23.7 MB', 'panel 输出是字符串，必须能直接吃');
+});
+
+// ── planGate 的 fail-closed（2026-10-01 架构评审 #6）──────────────────────────
+// 原实现：`if (!step || !step.gate) return { ok: true }` —— 把"阶段名不存在"和
+// "这一阶段不是门禁"混在一条 return 里。后果：**阶段名拼错 = 门禁静默失效**。
+// 一个永不拦人的门禁比没有门禁更坏，因为它会被当成"已经守住了"。
+test('planGate：未知阶段名必须拒绝，而不是静默放行', () => {
+  const plan = KP.ORPHAN_CLEAN_PLAN;
+  const realPhase = plan.find(s => s.gate).id;
+  assert.strictEqual(KP.planGate(plan, realPhase, { ok: true }).ok, true, '真实门禁阶段应放行');
+  const bogus = KP.planGate(plan, realPhase + '-typo', { ok: true });
+  assert.strictEqual(bogus.ok, false, '阶段名拼错必须红 —— fail-open 的门禁等于没有门禁');
+  assert.ok(bogus.reason.includes(realPhase + '-typo'), '理由里要带出拼错的阶段名，便于定位');
+  // 非门禁阶段（在计划里、但 step.gate 为假）仍然放行 —— 这条语义不能被上一条吃掉
+  const nonGate = plan.find(s => !s.gate);
+  if (nonGate) assert.strictEqual(KP.planGate(plan, nonGate.id, { ok: false }).ok, true, '非门禁阶段不拦');
+});
+// 源码级扫描：调用点手写的阶段名必须真的在对应计划里。
+// 为什么用扫描而不是用例：要触发这些调用点得先造出各阶段的前置 fact（成本高且脆），
+// 而"调用点的阶段名 ∈ 计划"是个可以机械判定的形状（同 .prev / escAttr 那两条）。
+test('计划门禁：每个 planGate 调用点的阶段名都必须真的在对应计划里', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const dir = path.join(__dirname, '..');
+  const PLANS = {
+    ORPHAN_CLEAN_PLAN: KP.ORPHAN_CLEAN_PLAN,
+    DNS_OPTIMIZE_PLAN: KP.DNS_OPTIMIZE_PLAN,
+    ENGINE_UPDATE_PLAN: KP.ENGINE_UPDATE_PLAN,
+    MODULE_UPDATE_PLAN: KP.MODULE_UPDATE_PLAN
+  };
+  const bad = [];
+  let sites = 0;
+  for (const f of fs.readdirSync(dir).filter(n => n.endsWith('.js'))) {
+    fs.readFileSync(path.join(dir, f), 'utf8').split('\n').forEach((line, i) => {
+      const m = line.match(/planGate\(\s*KP\.(\w+)\s*,\s*'([^']+)'/);
+      if (!m) return;
+      sites++;
+      const plan = PLANS[m[1]];
+      if (!plan) { bad.push(`${f}:${i + 1} 引用了不存在的计划 KP.${m[1]}`); return; }
+      if (!plan.some(s => s.id === m[2])) bad.push(`${f}:${i + 1} 阶段「${m[2]}」不在 ${m[1]} 里`);
+    });
+  }
+  assert.ok(sites >= 8, `只扫到 ${sites} 个 planGate 调用点，扫描规则该更新了`);
+  assert.deepStrictEqual(bad, [], `这些调用点的阶段名对不上计划：${bad.join('；')}`);
+});
+
 test('计划结构：ENGINE_UPDATE_PLAN 的 install 之前必须有两个门禁', () => {
   const idx = KP.ENGINE_UPDATE_PLAN.findIndex(s => s.id === 'install');
   assert.ok(idx > 0, 'ENGINE_UPDATE_PLAN 里没有 install 步骤');
@@ -328,7 +440,11 @@ test('planGate：本阶段 fact 未过 → 拒绝并透出 reason', () => {
 test('planGate：缺 fact / 错误阶段 / 非门禁阶段的行为', () => {
   assert.strictEqual(KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'rows-gate', null).ok, false, '缺 fact = 拒绝');
   assert.strictEqual(KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'probe', { ok: true }).ok, true, '非门禁阶段不拦');
-  assert.strictEqual(KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'nosuch', null).ok, true, '未知阶段不拦（不冒充门禁）');
+  // 未知阶段：**拒绝**（2026-10-01 架构评审 #6 改）。
+  // 旧断言是放行，理由是"不冒充门禁" —— 但后果是阶段名拼错时门禁静默消失，
+  // 而"永不拦人的门禁"比没有更坏：它会被当成"已经守住了"。
+  assert.strictEqual(KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'nosuch', null).ok, false,
+    '未知阶段必须拒绝（fail-closed）—— 见上面那条 fail-open 用例');
 });
 test('planGate：每道真实门禁都能用计划常量单独求值（阶段覆盖完整）', () => {
   for (const plan of [KP.ORPHAN_CLEAN_PLAN, KP.ENGINE_UPDATE_PLAN, KP.MODULE_UPDATE_PLAN, KP.DNS_OPTIMIZE_PLAN]) {
@@ -401,4 +517,50 @@ test('parseCurlTimings：失败原因必须带出来（只说"不可用"没法�
   assert.ok(rows[0].err.includes('Could not resolve host'), 'errormsg 要透出来（超时/解析/证书可区分）');
   assert.ok(Math.abs(rows[0].ms - 3000.825) < 1, '失败也要量化耗时（3s 是连接超时踩线）');
   assert.strictEqual(rows[1].err, '', '成功行没有原因');
+});
+
+// ── isAlreadyRunning：启动类动作的"本来就在跑"判定（2026-10-01 真机）──
+// 背景：点「启动服务」/「开启转发器」时目标可能**已经在跑**，此时 shell 走幂等分支，
+// 回的是 running / engine=running 而不是 started / engine=up。界面原先只认后者，于是
+// 把"本来就在跑"判成失败、弹「❌ 服务未启动」「❌ dnsfwd 开启失败」—— 用户读到"失败"
+// 会以为引擎/DNS 起不来（真相是它好端端跑着）。这条判定被两个页面共用，锁在这里。
+// ── ACTION_WORDS：动作回执词的唯一所有者（2026-10-01 架构走查候选 2）──────────
+// 原先 expect 在 7+ 个调用点手抄，shell 加幂等/失败词时门禁一条不会红（dnsOn 只认
+// started 的两起事故面）。词表 + actionOk 收成一处；shell 侧对齐由 contract-keys 门禁守。
+test('ACTION_WORDS：每个动词都有非空成功词集，动词集变化必须显式过门禁', () => {
+  const KNOWN = ['start-user', 'restart-engine', 'stop-user', 'enable-dns', 'stop-dns',
+                 'install-engine', 'install-module'];
+  assert.deepStrictEqual(Object.keys(KP.ACTION_WORDS).sort(), [...KNOWN].sort(),
+    '词表动词集变了：contract-keys 的 VERB_EMITTERS 需要同步');
+  for (const [verb, w] of Object.entries(KP.ACTION_WORDS)) {
+    assert.ok(Array.isArray(w.ok) && w.ok.length > 0, `${verb} 的 ok 词集为空`);
+  }
+});
+test('actionOk：命中成功词才算成功；未知 subcmd / 空输出缺省拒绝（与 planGate 同一纪律）', () => {
+  assert.strictEqual(KP.actionOk('start-user', 'engine=running'), true);
+  assert.strictEqual(KP.actionOk('restart-engine', 'engine=up'), true);
+  assert.strictEqual(KP.actionOk('restart-engine', 'dns-pending'), false, '半启动不许算成功');
+  assert.strictEqual(KP.actionOk('enable-dns', 'running'), true, '幂等分支不许判失败');
+  assert.strictEqual(KP.actionOk('stop-user', 'stopped'), true);
+  assert.strictEqual(KP.actionOk('install-module', 'engine=up'), true);
+  assert.strictEqual(KP.actionOk('no-such-verb', 'anything'), false, '未知动词必须拒绝');
+  assert.strictEqual(KP.actionOk('stop-user', ''), false, '空输出（shell 没吐词）不许算成功');
+});
+
+test('isAlreadyRunning：两种幂等回执都判为"已在跑"（不许再说启动失败）', () => {
+  assert.strictEqual(KP.isAlreadyRunning('running'), true, 'enable-dns 的幂等分支');
+  assert.strictEqual(KP.isAlreadyRunning('engine=running'), true, 'start-user 的幂等分支');
+});
+test('isAlreadyRunning：真正启动成功的词不是"已在跑"（否则永远显示已在运行）', () => {
+  assert.strictEqual(KP.isAlreadyRunning('started'), false);
+  assert.strictEqual(KP.isAlreadyRunning('engine=up'), false);
+});
+test('isAlreadyRunning：失败态与其它意图态一律不冒充"已在跑"', () => {
+  for (const w of ['engine=down', 'stopped', 'yielded', 'disabled', 'off-by-user', '', undefined, null]) {
+    assert.strictEqual(KP.isAlreadyRunning(w), false, `[${w}] 不该被当成已在跑`);
+  }
+});
+test('isAlreadyRunning：容忍 CRLF 与首尾空白（ksu.exec 的输出形态）', () => {
+  assert.strictEqual(KP.isAlreadyRunning('engine=running\r\n'), true);
+  assert.strictEqual(KP.isAlreadyRunning('  running \r'), true);
 });

@@ -8,7 +8,9 @@
 
 const ACCEL_SEL = CFG.DATA_DIR + '/github-accel';
 const ACCEL_LIST = CFG.DATA_DIR + '/accel-list.conf';
-const MOD_UPDATE_URL_FILE = CFG.DATA_DIR + '/module-update-url';
+// 这里**没有**"可写的更新源文件"了（2026-10-01）：更新源固定为 KU.MOD_UPDATE_URL，
+// 面板不给输入、也不落盘 —— 可写的更新源 = 可指向任意 zip。旧的那个数据文件名刻意
+// 连注释里都不再出现：留着它，就是把"还能这样改"这条知识又传下去。
 // 两条更新通道的地址（清单 URL / release 资产 URL / 加速前缀拼接）一律经 KUpstream。
 // 这里曾手写 release URL 且直接用 version.json 的裸版本号当 tag → 每次「下载并更新引擎」
 // 都 404（2026-09-27 用户实测）。地址契约不再由装配层持有。
@@ -57,7 +59,7 @@ async function speedTest() {
     const BATCH = 8;
     for (let start = 0; start < all.length; start += BATCH) {
       const chunk = all.slice(start, start + BATCH);
-      box.innerHTML = `<div class="hint">测速中… 已完成 ${start}/${all.length}（每批 ${BATCH} 个并发，已用 ${elapsed()}s）</div>`;
+      box.innerHTML = `<div class="hint">测速中… ${start}/${all.length}（已用 ${elapsed()}s）</div>`;
       const r = await KB.curlTimingBatch(chunk.map(n => n + target), 'b' + start);
       for (const row of KP.parseCurlTimings(r.out)) {
         const node = chunk[row.i];
@@ -78,10 +80,12 @@ async function speedTest() {
       if (!applied) toast('❌ 选中写入失败，仍用原选中项', 3000);
     }
     box.innerHTML = (top.length ? top.map((x, i) =>
-      `<div class="list-item"><span class="tag">${i + 1}</span><span style="flex:1">${esc(x.node)}</span><span class="tag">${x.ms.toFixed(0)} ms</span><button data-u="${escAttr(x.node)}" class="pick2">选</button></div>`).join('')
+      `<div class="list-item"><span class="tag">${i + 1}</span><span class="grow">${esc(x.node)}</span><span class="tag">${x.ms.toFixed(0)} ms</span><button data-u="${escAttr(x.node)}" class="pick2">选</button></div>`).join('')
       : '<div class="hint">所有节点都不可达，可直连或添加自定义节点</div>')
-      + (failures.length ? `<div class="hint">不可用 ${failures.length} 个：${failures.map(f => esc(f.node) + '（' + esc(f.why) + '）').join('；')}</div>` : '')
-      + `<div class="hint">用时 ${elapsed()}s${applied ? `，已自动选中最快：${esc(applied)}` : ''}${cur && applied && applied !== cur ? `（原选中 ${esc(cur)}）` : ''}</div>`;
+      // 失败明细收进 title：把十个节点连同原因铺成一行是"很长很冗余"的典型
+      // （2026-09-30 用户反馈）；计数留在台面，细节悬停可查。
+      + (failures.length ? `<div class="hint" title="${escAttr(failures.map(f => f.node + '（' + f.why + '）').join('；'))}">不可用 ${failures.length} 个</div>` : '')
+      + `<div class="hint">用时 ${elapsed()}s${applied ? ` · 已自动选中最快：${esc(applied)}` : ''}</div>`;
     box.querySelectorAll('.pick2').forEach(b => {
       b.onclick = async () => {
         if (!await KB.writeFile(ACCEL_SEL, b.dataset.u + '\n')) { toast('❌ 写入失败'); return; }
@@ -91,17 +95,23 @@ async function speedTest() {
     if (applied) renderAccelCur(applied);
   });
 }
+// 2026-10-01：原先用原生 prompt()。诊断时发现它在无头浏览器里会把页面挂死；
+// 更实际的风险是**某些 WebView 会禁用 JS 对话框** —— 那样按钮点了完全没反应、也不报错。
+// 改成与「修改端口 / 直接编辑配置文件」同一套模式：读数在前、编辑折起来 + 内联输入框。
 async function addAccel() {
-  const u = prompt('自定义加速节点前缀（以 / 结尾，GitHub URL 会拼在后面）：');
-  if (!u) return;
+  const inp = $id('in-accel');
+  const u = (inp.value || '').trim();
+  if (!u) { toast('请输入节点前缀（以 / 结尾）'); inp.focus(); return; }
   if (!await KB.appendLine(ACCEL_LIST, u)) { toast('❌ 添加失败'); return; } // 完整保留 URL（曾 strip 单引号破坏含引号 URL）
+  inp.value = '';
   // 不重渲染「当前加速」：往候选**列表**里加一项，当前**选中**并没有变；
   // 而无参 renderAccelCur() 会去读文件，选中文件不存在（= 直连 GitHub 的正常态）时
   // 会被显示成「未知（读取失败）」（2026-09-29 诊断，与 toast 互相打脸）。
   toast('已添加');
 }
 async function clearAccel() {
-  await KB.remove(ACCEL_SEL);
+  // remove 已自报成败（rm-ok）：失败要如实报，不能假装清掉了
+  if (!await KB.remove(ACCEL_SEL)) { toast('❌ 清除失败，选中保持不变', 3600); return; }
   // 已知结果就直说：清掉选中后就是"直连 GitHub"。不要再走"读文件"那条路去猜 ——
   // 文件不存在是这里的**正常结果**，读不到与读失败在 readFile 里是同一个 ok:false。
   toast('已清除选中，直连 GitHub');
@@ -122,7 +132,7 @@ async function engCheck() {
     if (!latest) { out.textContent = '❌ 无法获取上游版本（可先测速选择加速节点）'; return; }
     document.getElementById('eng-latest').textContent = latest;
     // 引擎当前版本用真实来源（panel 的 engine_version），绝不拿模块版本冒充
-    const cur = state.engineVersion;
+    const cur = snapshot.engineVersion;
     if (!cur) { out.textContent = `上游 ${latest}\n⚠️ 本地引擎版本未知（旧版模块安装，重装/更新模块后可显示）——是否更新请自行判断`; return; }
     out.textContent = `当前 ${cur} / 上游 ${latest}\n` + (KP.cmpVer(cur, latest) > 0 ? '有更新可用' : '已是最新');
     document.getElementById('btn-eng-update').disabled = KP.cmpVer(cur, latest) <= 0;
@@ -167,7 +177,8 @@ async function engUpdate() {
   out.textContent += ' ✅\n替换二进制并重启…';
   // 安装唯一入口：门禁 → 回滚点 → 替换 → 权限 → 起来后才写版本，全在 ops.sh seam 内
   const r = await KB.ops(`install-engine /data/local/tmp/9r-eng.new ${ver}`);
-  if (r.out.trim() !== 'engine=up') { out.textContent += `\n❌ 安装/重启失败：${r.out.trim()}`; return; }
+  // 成功词集走 KP.ACTION_WORDS（与 runOpsAction 同一判定，不许再有第二个家）
+  if (!KP.actionOk('install-engine', r.out)) { out.textContent += `\n❌ 安装/重启失败：${r.out.trim()}`; return; }
   await refresh();
   toast('✅ 引擎更新完成', 3200); out.textContent += '\n✅ 完成';
 }
@@ -175,7 +186,9 @@ async function modCheck() {
   return withBusy($id('btn-mod-check'), '检查中…', async () => {
     const out = $id('mod-out');
     out.style.display = 'block'; out.textContent = '检查中…';
-    const url = state.modUrl || KU.DEFAULT_MOD_UPDATE_URL;
+    // 更新源是**固定**的（唯一所有者 KUpstream）：不读快照、不读用户文件 ——
+    // 老设备上残留的自定义值正是要防的东西（理由见 KU.MOD_UPDATE_URL 的注释）。
+    const url = KU.MOD_UPDATE_URL;
     const p = (await readAccelSel()).sel;   // 只用于给 GitHub 地址拼加速前缀（读失败=按直连处理，与旧行为一致）
     const target = KU.withAccelIfGithub(url, p);
     const r = await KB.fetch(target, 20);
@@ -206,18 +219,36 @@ async function modUpdate() {
   out.textContent += '\n停进程 → 解压覆盖 → 重启…';
   // 安装唯一入口：备份 → 解压 → chmod 兜底（含 lib/）→ 清理 → 重启，全在 ops.sh seam 内
   const r = await KB.ops('install-module /data/local/tmp/mod-update.zip');
-  if (r.out.trim() !== 'engine=up') { out.textContent += `\n❌ 安装/重启失败：${r.out.trim()}`; return; }
+  if (!KP.actionOk('install-module', r.out)) { out.textContent += `\n❌ 安装/重启失败：${r.out.trim()}`; return; }
   await refresh();
   toast('✅ 模块更新完成', 3200); out.textContent += '\n✅ 完成';
-}
-async function setModUrl() {
-  const u = prompt('模块更新源 URL（指向 update.json）：', state.modUrl || KU.DEFAULT_MOD_UPDATE_URL);
-  if (!u) return;
-  if (!await KB.writeFile(MOD_UPDATE_URL_FILE, u + '\n')) { toast('❌ 保存失败'); return; }
-  state.modUrl = u; toast('已保存');
 }
 $id('btn-eng-check').onclick = engCheck;
 $id('btn-eng-update').onclick = engUpdate;
 $id('btn-mod-check').onclick = modCheck;
 $id('btn-mod-update').onclick = modUpdate;
-$id('btn-mod-seturl').onclick = setModUrl;
+
+/** 更新页的快照应用器（自注册，refresh 广播时调用） */
+function applyUpdate() {
+  // 项目地址：href / 文案 / title 全从 KU 现取 —— HTML 里只留一个空链接占位，
+  // 地址字面量出现在 upstream.js 之外会被回潮扫描判红（地址契约只有一个所有者）。
+  // 文案用短形式（仓库名），完整地址放 title：一行里塞完整 URL 在手机上必换行。
+  // cast 到 HTMLAnchorElement：$id 返回的是 HTMLElement（没有 href），链接是锚点。
+  const a = /** @type {HTMLAnchorElement} */ ($id('mod-project'));
+  if (a) {
+    a.href = KU.PROJECT_URL;
+    a.textContent = KU.MODULE_REPO;
+    a.title = KU.PROJECT_URL;
+    // 点击走 root shell 的 am start 唤起系统浏览器：WebView 宿主不一定处理
+    // target="_blank"（真机实测点项目地址没反应），shell 这条路不赌宿主实现。
+    // href 与默认跳转保留：桌面浏览器里照常跳，长按复制也仍可用。
+    a.onclick = async (e) => {
+      if (e && e.preventDefault) e.preventDefault();
+      const r = await KB.openUrl(KU.PROJECT_URL);
+      if (r && /Starting:/.test(r.out)) toast('✅ 已在浏览器打开项目主页');
+      else toast('⚠️ 无法自动打开，请在浏览器访问 ' + KU.PROJECT_URL, 4200);
+    };
+  }
+}
+onPanelSnapshot(applyUpdate);
+applyUpdate();   // 首屏就填上（不等第一份快照到达；幂等）

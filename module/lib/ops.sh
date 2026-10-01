@@ -116,7 +116,7 @@ cmd_status() {
 
 cmd_panel() {
   # 概览页单命令数据源（WebUI 一次 ksu.exec 拿全，替代原先 9 次串行 shell）：
-  # status 全量 + meminfo + 引擎/dnsfwd RSS + upstreams(base64 单行) + mod_url + accel_sel。
+  # status 全量 + meminfo + 引擎/dnsfwd RSS + upstreams(base64 单行) + accel_sel。
   # base64 保证多行 upstreams 不含空白，promise 降级形态（只剩末行）下也完整。
   _s="$(cmd_status)"
   _mem="$(awk '/^MemTotal:/{mt=$2}/^MemAvailable:/{ma=$2}END{print mt+0, ma+0}' /proc/meminfo 2>/dev/null)"
@@ -125,19 +125,27 @@ cmd_panel() {
   # 不校验身份就会把**别人进程的内存**当成引擎/转发器的内存报给面板（2026-09-30 真机：
   # 面板显示"引擎内存 571.7MB"，实际是另一个 App 的）。不是我们的 → 0（面板渲染成 "-"，
   # 如实表示"没有可报告的内存"）。
+  # 读 RSS 一律走 life_rss_kb（lifecycle.sh 是它的唯一所有者）。
+  # 原先这里各写一遍 `awk '/^VmRSS:/{print $2+0; exit}'` —— 同一读数两处实现，
+  # 且失败语义不同（内联版 `+0` 把"读不到"变成 0，owner 版显式失败且不输出）。
+  # 面板侧两者都渲染成 "-"，所以没有可见差异 —— 但那是**知识写了两遍**，
+  # 正是本仓"静默漂移"事故的同族形态（2026-10-01 架构评审 #8）。
+  # 这里的策略不变：不是我们的进程 / 读不到 → 0（面板渲染成 "-"，如实表示没有可报告的内存）。
   _er=0; _dr=0; _ep=""; _dp=""
   if life_engine_healthy; then
     _ep="$(life_engine_pid)"
-    _er="$(awk '/^VmRSS:/{print $2+0; exit}' "/proc/$_ep/status" 2>/dev/null)"; _er="${_er:-0}"
+    _er="$(life_rss_kb "$_ep" || echo 0)"
   fi
   if life_dns_running; then
     _dp="$(life_dns_pid)"
-    _dr="$(awk '/^VmRSS:/{print $2+0; exit}' "/proc/$_dp/status" 2>/dev/null)"; _dr="${_dr:-0}"
+    _dr="$(life_rss_kb "$_dp" || echo 0)"
   fi
   _ub="$(base64 "$DATA_DIR/dns-upstreams.conf" 2>/dev/null | tr -d '\n')"
-  _mu="$(cat "$DATA_DIR/module-update-url" 2>/dev/null)"
+  # mod_url 已移出 status（2026-10-01）：更新源固定为模块内置仓库，不再回读
+  # $DATA_DIR/module-update-url —— 继续回显一个"不被采纳的值"只会让人以为它仍生效
+  # （老设备上可能残留旧值，那正是这次要防的东西）。
   _as="$(cat "$DATA_DIR/github-accel" 2>/dev/null)"
-  echo "$_s mem_total=${_mem%% *} mem_avail=${_mem##* } engine_rss=$_er dns_rss=$_dr upstreams_b64=$_ub mod_url=$_mu accel_sel=$_as"
+  echo "$_s mem_total=${_mem%% *} mem_avail=${_mem##* } engine_rss=$_er dns_rss=$_dr upstreams_b64=$_ub accel_sel=$_as"
 }
 cmd_get() {
   # ops.sh get <key> [key...] —— 键访问器：**「status/panel 是一行空格分隔的 k=v」这个事实的
@@ -283,8 +291,8 @@ cmd_install_module() {
     if ! mv -f "$_f" "$MODDIR/" 2>/dev/null; then
       rm -rf "$_stage"
       life_wd_hold_release
-      life_ensure_engine >/dev/null 2>&1
-      life_ensure_dns >/dev/null 2>&1
+      # 「停了就要拉回」走唯一清单 life_ensure_stack（与 life_restart_all 同一份；A3 的教训）
+      life_ensure_stack install-engine
       echo "install-failed"
       return 0
     fi

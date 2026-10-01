@@ -333,6 +333,118 @@ printf 'pgscan 1\n' > "$_evf"
 if life_oom_kill_count "$_evf" >/dev/null 2>&1; then no "L14 缺 oom_kill 行却报成功（冒充 0）"; else ok "L14 无 oom_kill 行 → 如实失败"; fi
 if life_oom_kill_count "$_TMPD/不存在" >/dev/null 2>&1; then no "L14 文件缺失却报成功"; else ok "L14 文件缺失 → 如实失败"; fi
 
+echo "== L15 life_start_user：输出必须只有**一行**（UI 按全等匹配状态词）=="
+# 真机 2026-10-01：life_ensure_engine 吐的 started/running 泄漏进 stdout，界面拿到的是
+# "started\nengine=up"，而 runOpsAction 用 got === 'engine=up' 全等匹配 → 恒判失败，
+# 用户看到「❌ 服务未启动（shell 回：running\nengine=up）」——点启动永远是红的。
+# 锁这条 = 锁住"ops.sh 每个子命令只吐一个状态词"这条契约在启动路径上也成立。
+life_wd_ensure_started() { echo "not-armed"; }
+life_wd_alive() { return 1; }
+life_ensure_engine() { echo "started"; }   # 刻意保留"会吐一行"的真实形状
+life_ensure_dns() { echo "started"; }
+life_engine_healthy() { return 0; }
+life_dns_healthy() { return 0; }   # 已在终态：start-user 会等 DNS 到终态，不桩这条会空等 30s
+_out="$(life_start_user)"
+_lines="$(printf '%s\n' "$_out" | wc -l | tr -d ' ')"
+[ "$_lines" = "1" ] && ok "L15 start-user 只输出一行（[$_out]）" || no "L15 输出了 $_lines 行：[$_out]"
+case "$_out" in
+  engine=up|engine=down|engine=running) ok "L15b 状态词合法（$_out）" ;;
+  *) no "L15b 状态词非法：[$_out]" ;;
+esac
+
+echo "== L18 life_wd_stop：pidfile 与 armed 必须一起清（否则面板 watchdog=stale）=="
+# life_state 的口径：`alive → up`，否则 `armed → stale`。只 kill 不清这两个文件，
+# 面板会显示"已武装但不在跑"，用户读成故障 —— 而"停止"要的是干干净净的 down。
+# **必须排在 L16/L17 之前**：那两组用例会拿桩盖掉 life_wd_stop / life_pid_of，
+# 而 `unset -f` 是"删除"不是"还原"（同名真身一起没了），调序比还原可靠。
+LIFE_ST_WD_PID="$_TMPD/wd18.pid"; LIFE_ST_WD_ARMED="$_TMPD/wd18.armed"
+LIFE_ST_WD_OFF="$_TMPD/wd18.off";  LIFE_ST_WD_HOLD="$_TMPD/wd18.hold"
+LIFE_ST_WD_REQ="$_TMPD/wd18.req"
+printf '999999\n' > "$LIFE_ST_WD_PID"   # 不存在的 pid：真杀进程那一段自然跳过
+: > "$LIFE_ST_WD_ARMED"
+life_wd_stop >/dev/null 2>&1
+[ -f "$LIFE_ST_WD_PID" ] && no "L18 pidfile 没清" || ok "L18 pidfile 已清"
+[ -f "$LIFE_ST_WD_ARMED" ] && no "L18b armed 没清（面板会显示 watchdog=stale）" || ok "L18b armed 已清"
+[ -f "$LIFE_ST_WD_OFF" ] && ok "L18c 关闭意图已落盘（守护若被别处叫醒也会自尽）" \
+                         || no "L18c 没写 watchdog-off"
+
+echo "== L16 life_stop_user：停止 = **全停**（引擎 / DNS / 守护）=="
+# 真机 2026-10-01：stop-user 只停进程，守护照跑 —— `ops.sh status` 仍回 watchdog=up
+# （pid 7296 还活着）。用户点「停止」的语义是"这台机器上属于它的都停"，而界面上
+# watchdog=up 与这个语义直接打架。
+rm -f "$_TMPD/all.stopped" "$_TMPD/wd.stopped"
+life_stop_all() { echo stopped >> "$_TMPD/all.stopped"; echo stopped; }
+life_wd_stop() { echo stopped >> "$_TMPD/wd.stopped"; echo stopped; }
+life_stop_user >/dev/null 2>&1
+[ -f "$_TMPD/all.stopped" ] && ok "L16 停了引擎与 DNS" || no "L16 进程没停"
+[ -f "$_TMPD/wd.stopped" ] && ok "L16b 守护也停了" \
+                           || no "L16b **守护没被停**（面板 watchdog 仍是 up）"
+
+echo "== L17 life_restart_engine：不得拿"还没死的旧引擎"冒充重启成功 =="
+# 真机取证：委托守护重启是**异步**的，守护收到 USR1 才去停旧引擎；而本地立刻
+# `wait_for healthy` —— 那一刻旧引擎还在，第一次检查就通过 → 0 秒回 engine=up。
+# 界面下一刷新正好落在"旧已停、新未起"的空窗 → 重启被显示成红色，且不刷新就永不恢复。
+_ORD17="$_TMPD/restart-order.txt"; : > "$_ORD17"
+_old_pid=4242
+life_wd_ensure_started() { echo running; }
+life_wd_alive() { return 0; }
+life_pid_of() { echo "$_old_pid"; }
+life_wd_request() { printf 'req ' >> "$_ORD17"; }
+wait_gone() { printf 'gone:%s ' "${3:-}" >> "$_ORD17"; return 0; }
+life_engine_healthy() { return 0; }
+life_dns_healthy() { return 0; }   # 同上：restart 也会等 DNS 到终态
+life_restart_engine >/dev/null 2>&1
+if grep -q "gone:$_old_pid" "$_ORD17" 2>/dev/null; then
+  ok "L17 先等旧引擎真的退出，再判新引擎（不再 0 秒谎报 engine=up）"
+else
+  no "L17 没等旧引擎退出就判成功（真机表现：耗时 0s 的 engine=up 之后界面转红）"
+fi
+
+echo "== L19 life_restart_engine：DNS 必须与引擎**同级别等到终态**（2026-10-01）=="
+# 真机：restart 返回那一刻（13s）engine=up 而 dns=down，再过 8s dns 才 up（≈21s）。
+# 界面在返回瞬间刷新 → 引擎绿、DNS 红并排，用户以为 DNS 挂了（其实它还在起）。
+# 修复：引擎起来后继续等 life_dns_healthy，两项都到终态才返回给界面。
+_DNS19="$_TMPD/dns19.calls"; : > "$_DNS19"
+life_wd_ensure_started() { echo running; }
+life_wd_alive() { return 0; }
+life_pid_of() { echo 4242; }
+life_wd_request() { :; }
+wait_gone() { return 0; }
+life_engine_healthy() { return 0; }
+life_dns_healthy() {   # 前两次假、第三次真 = 守护还没把 dnsfwd 拉起来的形状
+  echo x >> "$_DNS19"
+  [ "$(wc -l < "$_DNS19" | tr -d ' ')" -ge 3 ]
+}
+_out19="$(life_restart_engine)"
+[ "$_out19" = "engine=up" ] && ok "L19 两项都到位 → engine=up" \
+                            || no "L19 期望 engine=up，实际 [$_out19]"
+_c19="$(wc -l < "$_DNS19" | tr -d ' ')"
+[ "$_c19" -ge 3 ] && ok "L19b 真的等了 DNS（问了 $_c19 次）" \
+                  || no "L19b 一次都没问 DNS（$_c19 次）＝ 返回即刷新会撞上「还在起」的空窗"
+
+echo "== L20 DNS 迟迟不到位：如实回 dns-pending，不许谎报 engine=up =="
+# 与 A5/A5b 同一条教训：把"只起来一半"报成成功，用户会照着错的结论去排查。
+LIFE_DNS_SETTLE_LIMIT=2          # 下调上限使超时分支可离线重放（生产默认 30s）
+life_dns_healthy() { return 1; }
+_out20="$(life_restart_engine)"
+[ "$_out20" = "dns-pending" ] && ok "L20 DNS 未到终态 → dns-pending（引擎起来了但没谎报全好）" \
+                              || no "L20 期望 dns-pending，实际 [$_out20]"
+LIFE_DNS_SETTLE_LIMIT=30
+
+echo "== L21 settle 编排只许有一个家（2026-10-01 架构走查候选 1）=="
+# 20 行同构原在 start-user / restart-engine 各抄一份（L17/L19 两起事故的温床）。
+# 断言形状：等引擎健康的编排只许出现在 life_settle_report（=1），动词只许调用它。
+_dup="$(grep '2 life_engine_healthy' module/lib/lifecycle.sh | grep -cv '^[[:space:]]*#')"
+[ "$_dup" = "1" ] && ok "L21a 等引擎健康的原语与时限只剩一处（life_wait_engine_ready）" \
+                  || no "L21a 又有人手抄等待编排了（$_dup 处，只许 1）"
+_call="$(grep -c 'life_settle_report ' module/lib/lifecycle.sh)"
+[ "$_call" -ge 2 ] && ok "L21b 两个动词都在调 life_settle_report（$_call 处调用）" \
+                   || no "L21b settle 调用点不足（$_call 处，需 ≥2）"
+_ens="$(grep -c 'life_ensure_stack' module/lib/lifecycle.sh; grep -c 'life_ensure_stack' module/lib/ops.sh)"
+[ "$(echo "$_ens" | awk '{s+=$1} END{print s}')" -ge 3 ] \
+  && ok "L21c 拉回清单收进 life_ensure_stack（lifecycle + ops 共用）" \
+  || no "L21c life_ensure_stack 收口不完整（lifecycle/ops 各自的计数：$_ens）"
+
 echo "== 结果：通过 $PASS / 失败 $FAIL / 跳过 $SKIP =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

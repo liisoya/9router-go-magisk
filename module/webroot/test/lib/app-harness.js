@@ -68,7 +68,13 @@ function createHarness({ execHandler }) {
     return {
       id, textContent: '', innerHTML: '', value: '', disabled: false, className: '',
       style: {}, dataset: {}, onclick: null,
-      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      // classList 记录调用：既有用例当 no-op 用不受影响；观察模式用例要断言 on 的加/摘
+      classList: {
+        _calls: [],
+        add(c) { this._calls.push(['add', c]); },
+        remove(c) { this._calls.push(['remove', c]); },
+        toggle() {}, contains: () => false
+      },
       querySelectorAll: () => [], appendChild() {}, remove() {}, select() {}, focus() {}, addEventListener() {}
     };
   }

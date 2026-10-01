@@ -33,7 +33,14 @@
 
   // 版本清单（两条更新通道各自的"检查"数据源）
   const ENGINE_VERSION_URL = `https://raw.githubusercontent.com/${ENGINE_REPO}/main/version.json`;
-  const DEFAULT_MOD_UPDATE_URL = `https://raw.githubusercontent.com/${MODULE_REPO}/main/update.json`;
+  // 模块更新源：**唯一且固定** —— 只指向本模块仓库的 update.json，不接受用户自定义。
+  // 为什么收死（2026-10-01）：这个地址决定"从哪儿下载那份会覆盖整个模块目录的 zip"。
+  // 填错、或被改成第三方地址，轻则是"模块更新异常"这种无从归因的症状，重则装上来历
+  // 不明的代码。名字里也不该再有 DEFAULT —— 它不是默认值，没有第二个值可选。
+  const MOD_UPDATE_URL = `https://raw.githubusercontent.com/${MODULE_REPO}/main/update.json`;
+  // 面板上那个「项目地址」链接（更新页）。由仓库名派生，不另存一份字面量 ——
+  // 存两份一定会漂：改了仓库名而只改一处，链接就把人送去了旧地方。
+  const PROJECT_URL = `https://github.com/${MODULE_REPO}`;
   // 加速节点测速的打靶目标：引擎仓库 main 上的 VERSION（真实存在的小文件，代价/收益比最高）
   const ENGINE_VERSION_FILE_URL = `https://raw.githubusercontent.com/${ENGINE_REPO}/main/VERSION`;
 
@@ -91,7 +98,7 @@
 
   return {
     ENGINE_REPO, MODULE_REPO, ENGINE_ASSET, SUMS_ASSET,
-    ENGINE_VERSION_URL, DEFAULT_MOD_UPDATE_URL, ENGINE_VERSION_FILE_URL,
+    ENGINE_VERSION_URL, MOD_UPDATE_URL, PROJECT_URL, ENGINE_VERSION_FILE_URL,
     releaseTag, releaseAssetUrl, engineAssetUrl, engineSumsUrl,
     isGithubUrl, withAccel, withAccelIfGithub, parseSumFor
   };
