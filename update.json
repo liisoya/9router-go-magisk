@@ -1,6 +1,6 @@
 {
-  "version": "v1.9.6-r1",
-  "versionCode": 109060,
-  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.6-r1/9router-go-1.9.6-r1-magisk.zip",
-  "changelog": "①引擎基线同步上游 v1.9.6：后台守护模式（9router-go start/status/stop/restart/logs）、Combos 页对齐上游 v0.5.91、64 字符以上工具名确定性适配（MCP 命名空间工具此前被上游 400 拒绝）、200 无答案改为故障转移、PGO 与连接池调优（p99 -51%）；预发布审查又拦下 6 个过闸缺陷（compose 部署 status/stop 盲区、Claude 通道泄漏适配名、Responses 通道自相矛盾请求、Codex 重置积分幂等、Windows 优雅停止、usagetracker 发送已关闭通道竞态）。②守护自愈根治：修复 $( ) 子shell把引擎孤儿化导致 CHLD 永不可达、自愈退化 60s、死因恒假 127 的问题——kill 后同秒确认、自愈 ~1s、死因取证真实退出码。③两条更新通道不打架：模块整包更新不再把面板更新的引擎降级（ops.sh 与管理器 customize.sh 双路径 + 版本记账 --keep），真机门禁新增 T10c 防回潮。④面板备份升级为 zip 归档（上游 1.9.6 形状），导入兼容 .zip/.json。"
+  "version": "v1.9.7-r1",
+  "versionCode": 109070,
+  "zipUrl": "https://github.com/liisoya/9router-go-magisk/releases/download/v1.9.7-r1/9router-go-1.9.7-r1-magisk.zip",
+  "changelog": "模块整包更新：引擎基线同步上游 v1.9.7，详细变更见 Release 页。"
 }
