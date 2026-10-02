@@ -51,6 +51,24 @@ if grep -q 'var CurrentVersion = "' internal/updater/updater.go; then
   echo "  → internal/updater/updater.go"
 fi
 
+# 3.5 module.prop（模块层版本 vX.Y.Z-rN，ADR-0008）
+# 跨上游基线：归 -r1 并重算 versionCode；同基线：保持不动（-rN 修订仍手动递增）
+MOD_PROP="module/module.prop"
+if [ -f "$MOD_PROP" ]; then
+  CUR_REL="$(grep '^version=' "$MOD_PROP" | cut -d= -f2 | sed 's/^v//')" # 如 1.9.6-r1
+  CUR_BASE="${CUR_REL%%-r*}"
+  if [ "$CUR_BASE" != "$NEW_VER" ]; then
+    BASE="${NEW_VER%%-*}"
+    NEW_CODE="$(printf '%s' "$BASE" | awk -F. '{print $1*100000 + $2*1000 + $3*10}')"
+    NEW_REL="v${NEW_VER}-r1"
+    sed -i.bak "s/^version=.*/version=${NEW_REL}/; s/^versionCode=.*/versionCode=${NEW_CODE}/" "$MOD_PROP"
+    rm -f "$MOD_PROP.bak"
+    echo "  → $MOD_PROP ($NEW_REL, versionCode=$NEW_CODE)"
+  else
+    echo "  → $MOD_PROP（同基线，保持 v$CUR_REL）"
+  fi
+fi
+
 # 4. Dockerfile fallback (optional, now reads VERSION, but keep comment in sync)
 if grep -q 'ARG VERSION' Dockerfile; then
   echo "  → Dockerfile (reads VERSION at build, no hardcoded fallback needed)"

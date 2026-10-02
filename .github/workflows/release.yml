@@ -79,6 +79,9 @@ jobs:
 
   docker:
     name: Build and push Docker image
+    # ADR-0008：Docker 与模块发布无关；fork 无 DOCKERHUB_* secret 与 prod environment，
+    # 每次打 tag 必挂一个红叉——仅在上游仓库运行，fork 上禁用。
+    if: github.repository == 'luqman-v1/9router-go'
     runs-on: ubuntu-latest
     environment: prod
     steps:
@@ -116,3 +119,71 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ADR-0008：模块整包发布——由 sync-upstream 流水线打的 vX.Y.Z-rN tag 触发（或手动 dispatch）。
+  # needs binaries 保证 Release 已创建，避免两个 job 并发建 release 竞态。
+  magisk:
+    name: Build and publish Magisk module zip
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # build.sh 七步含全部门禁（web 构建、离线回归、schema 断言、arm64 交叉编译、zip 校验），
+      # 任一步失败即熔断；node/python3 由 runner 预装
+      - name: Build module zip
+        run: ./build.sh
+
+      - name: Upload module zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # update.json 是设备端在线更新的清单，必须在发布后同步指向新 zip
+      - name: Update update.json
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          CODE="$(grep '^versionCode=' module/module.prop | cut -d= -f2)"
+          python3 - "$TAG" "$VER" "$CODE" "$REPO" <<'EOF'
+          import json, pathlib, sys
+          tag, ver, code, repo = sys.argv[1:5]
+          p = pathlib.Path("update.json")
+          d = json.loads(p.read_text())
+          d["version"] = tag
+          d["versionCode"] = int(code)
+          d["zipUrl"] = f"https://github.com/{repo}/releases/download/{tag}/9router-go-{ver}-magisk.zip"
+          d["changelog"] = (
+              f"模块整包更新：引擎基线同步上游 v{ver.split('-')[0]}，"
+              "详细变更见 Release 页。"
+          )
+          p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
+          EOF
+          cat update.json
+
+      - name: Commit update.json to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          if git diff --cached --quiet; then
+            echo "update.json unchanged"
+          else
+            git commit -m "chore(release): update.json → ${GITHUB_REF_NAME}"
+            git push origin HEAD:main
+          fi

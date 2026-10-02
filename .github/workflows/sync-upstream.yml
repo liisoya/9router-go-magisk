@@ -1,0 +1,131 @@
+name: Sync upstream
+
+# ADR-0008：每日检测上游 Release，自动「合并基线 → bump → build.sh 全部门禁 → commit+tag」。
+# 发布本体由该 tag 触发的 release.yml（binaries + magisk）完成。
+# 冲突/失败即熔断：main 保持上一基线，开 sync-failed issue 转人工；
+# 不做机械补丁重放——"能打上但语义错"的包在无人复核模式下最危险。
+
+on:
+  schedule:
+    - cron: "0 22 * * *" # UTC 22:00 = 北京 06:00
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: luqman-v1/9router-go
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git (github-actions bot)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Detect upstream release
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+          LOCAL="v$(cat VERSION)"
+          echo "upstream=${TAG} local=${LOCAL}"
+          if [ "${TAG}" = "${LOCAL}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Bun
+        if: steps.detect.outputs.changed == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Set up Go
+        if: steps.detect.outputs.changed == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # 24h 内上游发多个版本时，latest release 永远是最新——中间版本天然跳过
+      - name: Merge upstream baseline
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream --tags
+          TAG="${{ steps.detect.outputs.tag }}"
+          if ! git merge --no-ff "${TAG}" -m "chore(sync): 引擎基线 $(cat VERSION) → ${TAG#v}"; then
+            git merge --abort || true
+            echo "::error::merge conflict — 熔断转人工（ADR-0008）"
+            exit 1
+          fi
+
+      - name: Bump release version
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          TAG="${{ steps.detect.outputs.tag }}"
+          ./scripts/bump-version.sh "${TAG#v}"
+
+      - name: Build module zip (all gates)
+        if: steps.detect.outputs.changed == 'true'
+        run: ./build.sh
+
+      - name: Commit and tag release
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          TAG="${{ steps.detect.outputs.tag }}"
+          REL="v${TAG#v}-r1"
+          if git rev-parse -q --verify "refs/tags/${REL}" >/dev/null; then
+            echo "::error::tag ${REL} 已存在 — 同基线重建请手动递增 -rN"
+            exit 1
+          fi
+          git add -A
+          git diff --cached --quiet || git commit -m "chore(release): ${REL}"
+          git push origin HEAD:main
+          git tag "${REL}"
+          git push origin "${REL}"
+
+      - name: Close resolved sync-failed issues
+        if: steps.detect.outputs.changed == 'true' && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list --label sync-failed --state open --json number --jq '.[].number' |
+            while read -r n; do
+              gh issue close "$n" -c "同步已成功（${{ steps.detect.outputs.tag }}），自动关闭。"
+            done
+
+      # 熔断出口：任何一步失败 → 开 issue（已有未关闭的则不重复开）
+      - name: Open sync-failed issue (fuse)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TAG: ${{ steps.detect.outputs.tag }}
+        run: |
+          OPEN="$(gh issue list --label sync-failed --state open --json number --jq length)"
+          if [ "${OPEN}" != "0" ]; then
+            echo "已有未关闭的 sync-failed issue，不重复开"
+            exit 0
+          fi
+          gh issue create --label sync-failed \
+            --title "上游同步失败：${TAG:-检测阶段}" \
+            --body "自动同步流水线熔断（ADR-0008）。
+          - 运行日志：${RUN_URL}
+          - 上游 tag：${TAG:-未知}
+          请按 AGENT-CONVENTIONS.md §10.2 台账人工同步；解决后本 issue 由下次成功同步自动关闭。"
