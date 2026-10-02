@@ -4,7 +4,7 @@ This document describes the current Go implementation. Source code is authoritat
 
 ## Version and compatibility status
 
-- Current Go release: **v1.9.6**, declared consistently by `VERSION`, `version.json`, and `internal/updater.CurrentVersion`.
+- Current Go release: **v1.9.7**, declared consistently by `VERSION`, `version.json`, and `internal/updater.CurrentVersion`.
 - Declared upstream baseline: [`decolua/9router` v0.5.85](https://github.com/decolua/9router). The local checked-out upstream has `package.json` version `0.5.85` and a v0.5.85 changelog; published upstream npm/Docker `latest` is v0.5.86.
 - Go v1.9.0 records selected upstream v0.5.86 parity work and explicitly deferred items in `CHANGELOG.md`. Those entries do not change the v0.5.85 manifest baseline or imply complete v0.5.86 parity.
 - Upstream remains the compatibility reference. Its Next.js app and shared SSE core are historical sources for API, database, auth, and routing behavior. They are **not** the current Go runtime or dashboard.

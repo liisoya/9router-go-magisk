@@ -72,7 +72,26 @@ func isProxyFailure(err error, resp *http.Response) bool {
 
 // DoRequest sends an HTTP POST to url with body and auth, returns the raw response.
 // Caller must close resp.Body.
+//
+// A temporarily-unavailable upstream is re-sent per transientRetryPolicy before
+// the failure is reported (upstream open-sse/executors/base.js retried the same
+// statuses in its shared execute path). Statuses outside that policy — and every
+// transport failure — are returned on the first answer, leaving account
+// fallback and failover decisions to the caller.
 func DoRequest(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
+	return retryTransientUpstream(ctx, func() (*http.Response, error) {
+		return doRequestOnce(ctx, client, method, url, headers, body)
+	})
+}
+
+// doRequestOnce performs a single attempt.
+//
+// A proxy that refuses the tunnel is re-died directly only when the proxy was
+// ambient — HTTP_PROXY or a local sandbox the operator never assigned. When the
+// client routes through a pool the operator chose, the request must fail: the
+// direct re-dial would answer it from the host's own IP while the dashboard
+// still shows the connection as proxied.
+func doRequestOnce(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -86,6 +105,12 @@ func DoRequest(ctx context.Context, client *http.Client, method, url string, hea
 	}
 	resp, err := client.Do(req)
 	if isProxyFailure(err, resp) {
+		if proxiesViaAssignment(client) {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			return nil, fmt.Errorf("assigned proxy failed, refusing to route direct: %w", err)
+		}
 		if resp != nil {
 			resp.Body.Close()
 		}

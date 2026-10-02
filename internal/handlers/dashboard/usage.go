@@ -8,6 +8,7 @@ import (
 
 	"9router/proxy/internal/fetchgate"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/log"
 )
 
 // quotaFetchGate paces every live quota read this handler makes (issue #30).
@@ -40,6 +41,14 @@ func acquireQuotaSlot(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // HandleGetConnectionUsage handles GET /api/usage/{connectionId}
+//
+// Upstream parity (src/app/api/usage/[connectionId]/route.js): an OAuth
+// connection inside its expiry window is refreshed before the read, and a
+// provider that reports an auth failure as a message rather than a status is
+// force-refreshed and read once more. Both halves are what keep a stale token
+// from surfacing as "quota API rejected the current token. Chat may still
+// work." while chat traffic — refreshing on its own path — keeps working
+// (#78 item 4).
 func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *http.Request) {
 	connID := getURLParam(r, "connectionId")
 	if connID == "" {
@@ -71,7 +80,37 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if res, ok := fetchProviderUsage(r.Context(), conn.Provider, data); ok {
+	creds := usageCredentials{raw: data, provider: conn.Provider}
+	// A pre-read refresh only makes sense when the token is inside its expiry
+	// window. When it is not, the single retry below is the one attempt: a
+	// second call would repeat a request whose outcome is already known.
+	preRead := usageRefreshOutcome{}
+	if creds.needsRefresh() {
+		preRead = h.runUsageRefresh(r.Context(), conn, creds)
+		if preRead.err != nil {
+			log.Warn("usage", "credential refresh failed", "provider", conn.Provider, "conn", connID, "error", preRead.err)
+		}
+	}
+
+	res, ok := fetchProviderUsage(r.Context(), conn.Provider, data)
+	// Upstream force-refreshes and retries exactly once here
+	// (src/app/api/usage/[connectionId]/route.js): a stored access token can age
+	// out while the refresh token is still good. That retry is only worth a call
+	// when this request has not already had one and it failed — repeating a
+	// rejected exchange just spent the call twice and logged the same failure
+	// twice, which is what the double warning per account came from.
+	if ok && !preRead.attempted && isAuthExpiredUsageMessage(res) {
+		retry := h.runUsageRefresh(r.Context(), conn, creds)
+		if retry.err != nil {
+			log.Warn("usage", "forced credential refresh failed", "provider", conn.Provider, "conn", connID, "error", retry.err)
+		} else if retry.refreshed {
+			if retried, retryOK := fetchProviderUsage(r.Context(), conn.Provider, data); retryOK {
+				handlerutil.WriteJSON(w, http.StatusOK, retried.toResponse())
+				return
+			}
+		}
+	}
+	if ok {
 		handlerutil.WriteJSON(w, http.StatusOK, res.toResponse())
 		return
 	}
@@ -82,9 +121,9 @@ func (h *DashboardHandler) HandleGetConnectionUsage(w http.ResponseWriter, r *ht
 		accessToken, _ := data["accessToken"].(string)
 		projectID, _ := data["projectId"].(string)
 		if accessToken != "" {
-			if !acquireQuotaSlot(w, r) {
-				return
-			}
+			// The slot above is already held; taking a second one made every
+			// Antigravity account queue for two consecutive 250ms gaps even
+			// though it issues one burst of upstream reads.
 
 			// The gate is paced on the request context, not this deadline, so a
 			// long queue cannot expire a fetch that has not started yet; the

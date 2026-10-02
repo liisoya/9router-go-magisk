@@ -147,7 +147,7 @@
           9router-go
         </h1>
         <span class="text-xs text-text-muted leading-tight">
-          {version ? `v${version}` : 'v1.9.6'}
+          {version ? `v${version}` : 'v1.9.7'}
         </span>
       </div>
     </a>
