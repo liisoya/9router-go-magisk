@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api } from '../api/client'
-  import { browserStores, markAuthed } from '../lib/session'
 
   let {
     onSuccess,
@@ -123,12 +122,15 @@
     errorMessage = ''
 
     try {
-      await api.patchSettings({ currentPassword: password, newPassword })
-      markAuthed(browserStores())
-      if (onSuccess) {
-        onSuccess()
+      const res = await api.login(password, newPassword)
+      if (res.success) {
+        if (onSuccess) {
+          onSuccess()
+        } else {
+          window.location.assign('/dashboard')
+        }
       } else {
-        window.location.assign('/dashboard')
+        errorMessage = res.error || 'Failed to set password'
       }
     } catch (err: unknown) {
       errorMessage = err instanceof Error ? err.message : 'Failed to set password'

@@ -19,28 +19,35 @@ import { formatApiError } from '../api/client'
 export const DB_BACKUP_URL = '/api/settings/database'
 export const DB_BACKUP_PASSWORD_HEADER = 'x-9r-password'
 
-// 上游文件名：9router-backup-<ISO 时间，冒号/点替换为连字符>.json（profile/page.js:686-687）
+// 上游 1.9.6 起备份改为 zip 归档（服务端 export 带 ?format=zip，import 按 PK 头识别），
+// 文件名随之 .json → .zip（settings.go:154 的 Content-Disposition 同名）。
 export function backupFileName(date: Date = new Date()): string {
-  return `9router-backup-${date.toISOString().replace(/[.:]/g, '-')}.json`
+  return `9router-backup-${date.toISOString().replace(/[.:]/g, '-')}.zip`
 }
 
 export function buildExportRequest(password: string): { url: string; init: RequestInit } {
   return {
-    url: DB_BACKUP_URL,
+    url: `${DB_BACKUP_URL}?format=zip`,
     init: { headers: { [DB_BACKUP_PASSWORD_HEADER]: password } }
   }
 }
 
-export function buildImportRequest(
-  payload: unknown,
+// 文件体导入（上游 1.9.6 形状）：zip 与 json 原样上传，Content-Type 按扩展名/MIME 判，
+// 密码走 x-9r-password 头（服务端：JSON body 或该头二选一 —— settings.go:169-174）。
+export function buildImportFileRequest(
+  file: File,
   password: string
 ): { url: string; init: RequestInit } {
+  const isZip = file.name.endsWith('.zip') || file.type === 'application/zip'
   return {
     url: DB_BACKUP_URL,
     init: {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...(payload as Record<string, unknown>), password })
+      headers: {
+        [DB_BACKUP_PASSWORD_HEADER]: password,
+        'Content-Type': isZip ? 'application/zip' : 'application/json'
+      },
+      body: file
     }
   }
 }
@@ -69,8 +76,7 @@ export async function responseErrorMessage(res: Response, fallback: string): Pro
 }
 
 // 浏览器侧下载（DOM 相关，故不在单元测试里覆盖；测试只覆盖纯函数）
-export function downloadJSON(payload: unknown, filename: string): void {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url

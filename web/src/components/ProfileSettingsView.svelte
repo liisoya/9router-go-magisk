@@ -28,8 +28,8 @@
   import {
     backupFileName,
     buildExportRequest,
-    buildImportRequest,
-    downloadJSON,
+    buildImportFileRequest,
+    downloadBlob,
     responseErrorMessage
   } from '../lib/db-backup'
 
@@ -240,7 +240,7 @@
       const { url, init } = buildExportRequest(password)
       const res = await fetch(url, init)
       if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to export database'))
-      downloadJSON(await res.json(), backupFileName())
+      downloadBlob(await res.blob(), backupFileName())
     } catch (err) {
       alert(`Failed to export database: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
@@ -253,8 +253,8 @@
     if (!file) return
     isImportingBackup = true
     try {
-      const payload = JSON.parse(await file.text())
-      const { url, init } = buildImportRequest(payload, password)
+      // 上游 1.9.6：zip（内含 .json）与裸 json 都原样上传，密码走 x-9r-password 头
+      const { url, init } = buildImportFileRequest(file, password)
       const res = await fetch(url, init)
       if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to import database'))
       alert('Database backup imported successfully! Reloading page...')
@@ -358,7 +358,7 @@
 
           <input
             type="file"
-            accept=".json"
+            accept=".zip,.json,application/zip,application/json"
             bind:this={fileInput}
             onchange={handleFileSelected}
             class="hidden"

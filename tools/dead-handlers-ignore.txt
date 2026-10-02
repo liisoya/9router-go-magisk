@@ -12,3 +12,4 @@
 # 但"两张表各写一遍"存在漂移风险（往 routes.go 加一条生产没有的路径，测试会在假路线上变绿）。
 # 该摩擦已作为架构候选登记（见 architecture review），在收敛之前有意保留本函数。
 RegisterRoutes  # dashboard 测试 seam（12 文件 33 处调用）；与生产路由表的漂移风险见架构候选
+RegisterPID  # 不是 HTTP handler：守护模式（9router-go start）的 pidfile 登记/注销，生产调用点 cmd/9router-go/main.go:198（上游 1.9.6 新增 CLI 守护）；扫描器只认 handlers 路由挂载（2026-10-02 同步 v1.9.6）

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   backupFileName,
   buildExportRequest,
-  buildImportRequest,
+  buildImportFileRequest,
   DB_BACKUP_PASSWORD_HEADER,
   DB_BACKUP_URL,
   responseErrorMessage
@@ -10,27 +10,31 @@ import {
 
 // 回归用例：Settings → Download Backup 曾报 401 Invalid password（用户实测），
 // 根因是导出的请求不带 x-9r-password 头（上游 spec 要求）。该断言在修复前必红。
-describe('db-backup 请求形状（上游 parity）', () => {
-  it('导出必须带 x-9r-password 头（缺了就是 401 Invalid password）', () => {
+describe('db-backup 请求形状（上游 1.9.6 parity：zip 归档）', () => {
+  it('导出必须带 x-9r-password 头 + ?format=zip（缺头就是 401；缺参数拿不到 zip）', () => {
     const { url, init } = buildExportRequest('s3cret-pw')
-    expect(url).toBe(DB_BACKUP_URL)
+    expect(url).toBe(`${DB_BACKUP_URL}?format=zip`)
     const headers = init.headers as Record<string, string>
     expect(headers[DB_BACKUP_PASSWORD_HEADER]).toBe('s3cret-pw')
   })
 
-  it('导入是 JSON + password（上游形状），不是 multipart', () => {
-    const { url, init } = buildImportRequest({ settings: { a: 1 } }, 'pw')
-    expect(url).toBe(DB_BACKUP_URL)
-    expect(init.method).toBe('POST')
-    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
-    const body = JSON.parse(String(init.body))
-    expect(body.password).toBe('pw')
-    expect(body.settings).toEqual({ a: 1 })
+  it('文件体导入：zip/json 原样上传，Content-Type 按扩展名判，密码走头', () => {
+    const zip = new File(['PK\x03\x04'], 'backup.zip', { type: 'application/zip' })
+    const z = buildImportFileRequest(zip, 'pw')
+    expect(z.url).toBe(DB_BACKUP_URL)
+    expect(z.init.method).toBe('POST')
+    const zh = z.init.headers as Record<string, string>
+    expect(zh[DB_BACKUP_PASSWORD_HEADER]).toBe('pw')
+    expect(zh['Content-Type']).toBe('application/zip')
+    expect(z.init.body).toBe(zip)
+    const json = new File(['{}'], 'backup.json', { type: 'application/json' })
+    const j = buildImportFileRequest(json, 'pw')
+    expect((j.init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
   })
 
-  it('备份文件名是 .json（内容是 JSON；旧实现叫 .sqlite 会误导用户）', () => {
+  it('备份文件名是 .zip（上游 1.9.6 起 export 是 zip 归档，服务端同名落盘）', () => {
     const fixed = new Date('2026-09-26T07:39:49.123Z')
-    expect(backupFileName(fixed)).toBe('9router-backup-2026-09-26T07-39-49-123Z.json')
+    expect(backupFileName(fixed)).toBe('9router-backup-2026-09-26T07-39-49-123Z.zip')
   })
 
   it('服务端 { error } 文案要透出给用户（Invalid password 不能被吞成通用提示）', async () => {
