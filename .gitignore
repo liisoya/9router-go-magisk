@@ -5,6 +5,10 @@
 *.exe
 *.exe~
 web/dist/
+# 引擎二进制与版本落盘是 build.sh 每次重新生成的产物（build.sh 步骤 5），
+# 入库只会让每次发布推送携带 15MB blob（镜像代理 413 拒收）——ADR-0008
+module/bin/9router-go
+module/etc/engine-version
 
 # Test binaries
 *.test
