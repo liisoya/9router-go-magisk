@@ -139,6 +139,49 @@ grep -q '^version=v9.9.9-test$' "$MOD/module.prop" && ok "module.prop 已换成�
   && ok "包内引擎版本已落盘（engine_version_sync --from-package）" || no "包内引擎版本未落盘"
 [ -s "$DATA/last-module.zip" ] && ok "留档 last-module.zip" || no "未留档"
 
+echo "== S6 引擎保留：包内基线旧于在跑引擎 → 整包更新不降级（2026-10-02 用户决策）=="
+# 场景：模块稳定、引擎高频更新——用户经 install-engine 更新过引擎（在跑 9.9.9），
+# 再刷引擎基线 7.7.7 的模块包，bin/ 不得被悄悄降级，记账必须跟保留值走
+#（不写 --keep 的话，读路径自愈看到记录与 versionCode 不符，会把保留值"自愈"回包内值）。
+# mk_engine 的标记取 basename（同内容假绿陷阱，Phase 37 踩过）→ 追加唯一后缀区分字节。
+STAGE2="$TMP/pkg2"
+mkdir -p "$STAGE2/lib" "$STAGE2/bin" "$STAGE2/etc"
+printf 'id=ninerouter-go\nname=x\nversion=v9.9.9-test\nversionCode=999990\n' > "$STAGE2/module.prop"
+printf '# lib\n' > "$STAGE2/lib/ops.sh"
+mk_engine "$STAGE2/bin/9router-go"; printf 'keep-case' >> "$STAGE2/bin/9router-go"
+printf '%s\n' "7.7.7" > "$STAGE2/etc/engine-version"
+(cd "$STAGE2" && zip -q -r "$TMP/pkg2.zip" module.prop lib bin etc) || no "造 pkg2 zip 失败"
+# 造"在跑的引擎比包内新"：在跑 9.9.9（唯一字节），记录与当前 versionCode 对齐
+mk_engine "$MOD/bin/9router-go"; printf 'running-9.9.9' >> "$MOD/bin/9router-go"
+printf '%s\n' "9.9.9" > "$DATA/engine-version"
+printf '%s\n' "999999" > "$DATA/engine-version-code"
+KEEP_SUM="$(sum_of "$MOD/bin/9router-go")"
+OUT="$(cmd_install_module "$TMP/pkg2.zip")"
+[ "$OUT" = "engine=up" ] && ok "S6a 输出 engine=up" || no "S6a 输出应为 engine=up，实际「$OUT」"
+[ "$(sum_of "$MOD/bin/9router-go")" = "$KEEP_SUM" ] \
+  && ok "S6b 在跑的引擎（9.9.9）被保留，未被包内 7.7.7 降级" \
+  || no "S6b 引擎被降级（字节不等于保留前那份）"
+[ "$(cat "$DATA/engine-version" 2>/dev/null)" = "9.9.9" ] \
+  && ok "S6c 运行期版本仍为保留值 9.9.9" || no "S6c 版本记账被写成包内值（面板会谎报降级）"
+[ "$(cat "$DATA/engine-version-code" 2>/dev/null)" = "999990" ] \
+  && ok "S6d 记录挂到新包 versionCode（否则读路径自愈会反悔）" \
+  || no "S6d engine-version-code 未挂新包（实际 $(cat "$DATA/engine-version-code" 2>/dev/null)）"
+# 反向：在跑的引擎**旧于**包内 → 包内为准（整包更新的本职不受影响）
+STAGE3="$TMP/pkg3"
+mkdir -p "$STAGE3/lib" "$STAGE3/bin" "$STAGE3/etc"
+printf 'id=ninerouter-go\nname=x\nversion=v9.9.9-test\nversionCode=999991\n' > "$STAGE3/module.prop"
+printf '# lib\n' > "$STAGE3/lib/ops.sh"
+mk_engine "$STAGE3/bin/9router-go"; printf 'pkg-wins-case' >> "$STAGE3/bin/9router-go"
+printf '%s\n' "8.8.8" > "$STAGE3/etc/engine-version"
+(cd "$STAGE3" && zip -q -r "$TMP/pkg3.zip" module.prop lib bin etc) || no "造 pkg3 zip 失败"
+printf '%s\n' "1.0.1" > "$DATA/engine-version"     # 在跑的比包内旧
+printf '%s\n' "999991" > "$DATA/engine-version-code"  # 记录与新包对齐：让版本比较成为唯一判据
+OUT="$(cmd_install_module "$TMP/pkg3.zip")"
+[ "$OUT" = "engine=up" ] && ok "S6e 反向输出 engine=up" || no "S6e 输出应为 engine=up，实际「$OUT」"
+[ "$(cat "$DATA/engine-version" 2>/dev/null)" = "8.8.8" ] \
+  && ok "S6f 在跑的更旧 → 包内 8.8.8 为准（升级路径不受保留逻辑影响）" \
+  || no "S6f 应以包内 8.8.8 为准，实际 $(cat "$DATA/engine-version" 2>/dev/null)"
+
 echo "== 结果：通过 $PASS / 失败 $FAIL =="
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

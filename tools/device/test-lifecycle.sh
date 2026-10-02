@@ -384,6 +384,13 @@ fi
 # 侥幸通过、复跑必红 —— 破坏性断言放在末尾，其余断言才在同一个代码状态下运行。
 ZIP="$DATA_DIR/last-module.zip"
 if [ -f "$ZIP" ]; then
+  # 引擎快照（2026-10-02）：last-module.zip 的引擎基线可能旧于在跑引擎（用户经面板更新过），
+  # 整包覆盖不得把面板更新的成果滚回去。装前快照版本 + 字节，T10 结束后校验/恢复（T10c）。
+  # 版本以引擎**自报**为准 —— T12 刚把运行期文件玩过一遍，此刻它不是可信来源。
+  selfver() { curl -s -m 5 "http://127.0.0.1:$(port)/version" | sed -n 's/.*"currentVersion":"\([^"]*\)".*/\1/p'; }
+  verkey() { printf '%s' "${1:-}" | awk -F. '{printf "%03d%03d%03d",$1+0,$2+0,$3+0}'; }
+  ENG_PRE="$(selfver)"
+  cp "$MODDIR/bin/9router-go" /data/local/tmp/9r-eng-keep.bin 2>/dev/null
   cp "$ZIP" /data/local/tmp/9r-gate.zip
   OUT10="$("$OPS" install-module /data/local/tmp/9r-gate.zip 2>&1 | tr -d '\r')"
   case "$OUT10" in
@@ -392,7 +399,32 @@ if [ -f "$ZIP" ]; then
     *) ok "T10a install-module 跑完无解析错误（$(echo "$OUT10" | tail -n 1)）" ;;
   esac
   [ "$("$OPS" panel | tr ' ' '\n' | grep '^engine=')" = "engine=up" ] && ok "T10b 安装后引擎 up" || no "T10b 安装后引擎不在跑"
-  rm -f /data/local/tmp/9r-gate.zip
+  # T10c 引擎不被整包更新降级：自报版本若被滚回（< 快照），用快照走 install-engine 官方 seam
+  # 恢复；恢复后断言「自报 == 快照」。安装路径自身已带保留逻辑（ops.sh install-module /
+  # customize.sh），这里兜的是"执行安装的那份旧代码没有保留逻辑"的形状。
+  ENG_POST="$(selfver)"
+  PKG_ENG="$(cat "$MODDIR/etc/engine-version" 2>/dev/null | tr -d ' \r')"
+  if [ -n "$ENG_PRE" ] && [ -n "$ENG_POST" ] && [ -s /data/local/tmp/9r-eng-keep.bin ] \
+     && [ "$(verkey "$ENG_PRE")" -gt "$(verkey "$ENG_POST")" ] 2>/dev/null; then
+    info "T10c 引擎被整包更新从 $ENG_PRE 滚回 $ENG_POST（包内基线 $PKG_ENG），走 install-engine 恢复"
+    "$OPS" install-engine /data/local/tmp/9r-eng-keep.bin "$ENG_PRE" >/dev/null 2>&1
+  fi
+  ENG_FINAL=""
+  if [ -n "$ENG_PRE" ]; then
+    # install-engine 等健康才返回，但 /version 可能在 bind 后一瞬才就绪：轮询几次，不赌单次
+    _i10=0
+    while [ "$_i10" -lt 5 ]; do
+      ENG_FINAL="$(selfver)"
+      [ "$ENG_FINAL" = "$ENG_PRE" ] && break
+      sleep 1; _i10=$((_i10 + 1))
+    done
+    [ "$ENG_FINAL" = "$ENG_PRE" ] \
+      && ok "T10c 引擎版本未被整包更新降级（$ENG_PRE）" \
+      || no "T10c 引擎版本被整包更新降级（快照 $ENG_PRE / 现在 ${ENG_FINAL:-无自报}）"
+  else
+    info "T10c 跳过：装前引擎无自报版本（无法判定降级）"
+  fi
+  rm -f /data/local/tmp/9r-eng-keep.bin /data/local/tmp/9r-gate.zip
   # **必须说清副作用**：本步把设备 lib/ 换成了包内（发布版）那份 —— 开发直推
   # （tools/deploy-device.sh）带来的新代码从此失效，下次开机跑的就是包内那份。
   # 不说清的话，下一轮 T14 会在**旧代码**上跑，把"新代码的问题"和"代码已被换回"混成一团。

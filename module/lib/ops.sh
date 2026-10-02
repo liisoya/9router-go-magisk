@@ -61,11 +61,30 @@ engine_version_sync() {
   # --from-package（install-module 专用）：包**刚被整体换过**，运行期文件无条件以包内为准
   #（跳过全部判据）；包里没有 etc/engine-version 时删除运行期文件——宁可显示"未知"，
   # 也不留旧版本的谎报。此前这段逻辑内联在 cmd_install_module 里（第二写者，判据漂移）。
+  #
+  # --keep <ver>（install-module 保留分支专用，2026-10-02）：包内基线旧于在跑引擎、且在跑的
+  # 那份被保留时，运行期版本以**保留值为准**、记录挂到当前 versionCode —— 记账形状与
+  # --from-package 完全同构（值来源不同而已）。不写这个的话，读路径自愈看到记录与
+  # versionCode 不符，会把刚保留的版本又"自愈"回包内旧值 → 面板谎报降级。
   ENGINE_VER_HEALED=0
   ENGINE_VER_SRC=runtime
-  _force=0; [ "${1:-}" = "--from-package" ] && _force=1
+  _mode=read; _keep_ver=""
+  case "${1:-}" in
+    --from-package) _mode=pkg ;;
+    --keep) _mode=keep; _keep_ver="${2:-}" ;;
+  esac
+  if [ "$_mode" = "keep" ]; then
+    case "$_keep_ver" in
+      '') return 0 ;;   # 空值是调用方编程错误：宁可显示旧值，也绝不写空版本进去
+      *)
+        printf '%s\n' "$_keep_ver" > "$DATA_DIR/engine-version" 2>/dev/null
+        printf '%s\n' "$(module_versioncode)" > "$DATA_DIR/engine-version-code" 2>/dev/null
+        return 0
+        ;;
+    esac
+  fi
   if [ ! -s "$MODDIR/etc/engine-version" ]; then
-    if [ "$_force" = 1 ]; then
+    if [ "$_mode" = "pkg" ]; then
       rm -f "$DATA_DIR/engine-version" "$DATA_DIR/engine-version-code" 2>/dev/null
       ENGINE_VER_SRC=none
       ENGINE_VER_HEALED=1
@@ -76,7 +95,7 @@ engine_version_sync() {
   fi
   _code="$(module_versioncode)"
   _seen="$(cat "$DATA_DIR/engine-version-code" 2>/dev/null)"
-  if [ "$_force" = 1 ] \
+  if [ "$_mode" = "pkg" ] \
      || [ ! -s "$DATA_DIR/engine-version" ] \
      || [ "$_seen" != "$_code" ] \
      || [ "$MODDIR/module.prop" -nt "$DATA_DIR/engine-version" ]; then
@@ -272,6 +291,18 @@ cmd_install_module() {
   if [ -f "$MODDIR/bin/9router-go.bak" ] && [ -d "$_stage/bin" ]; then
     cp "$MODDIR/bin/9router-go.bak" "$_stage/bin/9router-go.bak" 2>/dev/null
   fi
+  # 引擎保留（2026-10-02 用户决策：**模块与引擎两条更新通道不打架**）：模块稳定、引擎高频
+  # 更新是常态——用户经 install-engine 更新过引擎后，包内基线旧于在跑引擎会是普遍形状，
+  # 整包覆盖不得悄悄降级。把在跑的那份搬进暂存（与 .bak 搬运同一惯例），装完记账走
+  # engine_version_sync --keep。降级只发生在"包内基线更新或相同"时（那正是整包更新的本职）。
+  _eng_keep=""
+  _run_ver="$(cat "$DATA_DIR/engine-version" 2>/dev/null)"
+  _pkg_ver="$(cat "$_stage/etc/engine-version" 2>/dev/null)"
+  if [ -n "$_run_ver" ] && [ -n "$_pkg_ver" ] && [ -f "$MODDIR/bin/9router-go" ] && [ -d "$_stage/bin" ] \
+     && [ "$(printf '%s' "$_run_ver" | awk -F. '{printf "%03d%03d%03d",$1+0,$2+0,$3+0}')" \
+        -gt "$(printf '%s' "$_pkg_ver" | awk -F. '{printf "%03d%03d%03d",$1+0,$2+0,$3+0}')" ] 2>/dev/null; then
+    cp "$MODDIR/bin/9router-go" "$_stage/bin/9router-go" 2>/dev/null && _eng_keep="$_run_ver"
+  fi
   # 目录整体换 inode：先把新目录搬成 .new，再把旧目录挪开，最后就位
   # （直接 `mv 新目录 $MODDIR/` 且旧目录同名时，会把新目录塞进旧目录里 —— 必须绕开）
   for _d in lib bin webroot etc; do
@@ -299,9 +330,13 @@ cmd_install_module() {
   done
   rm -rf "$_stage"
   chmod 0755 "$MODDIR"/*.sh "$MODDIR"/lib/*.sh "$MODDIR"/bin/* 2>/dev/null
-  # 整包更新同样换了 bin/9router-go：运行期版本文件无条件以包内为准。
-  # 写入逻辑单一所有者 = engine_version_sync（此前内联第二实现，判据已与自愈版漂移）。
-  engine_version_sync --from-package
+  # 整包更新换了 bin/9router-go：运行期版本记账分两路（单一写者仍是 engine_version_sync）——
+  #   保留了在跑的引擎 → 以保留值为准（--keep）；否则以包内为准（--from-package）。
+  if [ -n "$_eng_keep" ]; then
+    engine_version_sync --keep "$_eng_keep"
+  else
+    engine_version_sync --from-package
+  fi
   rm -f "$1"
   # 与 install-engine 同一语义：只有新引擎**真的起来**才把恢复点刷成这一份（已验证可用）
   if [ "$(life_restart_engine)" = "engine=up" ]; then
