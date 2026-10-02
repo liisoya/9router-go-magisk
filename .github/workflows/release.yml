@@ -138,8 +138,9 @@ jobs:
           d["version"] = tag
           d["versionCode"] = int(code)
           d["zipUrl"] = f"https://github.com/{repo}/releases/download/{tag}/9router-go-{ver}-magisk.zip"
-          # 管理器会把 changelog 当 URL 下载（不能放纯文本），latest/download 永远指向最新
-          d["changelog"] = f"https://github.com/{repo}/releases/latest/download/changelog.md"
+          # 管理器会把 changelog 当 URL 下载（不能放纯文本）；用 tag 直链——与 zipUrl
+          # 同域同可达性，且避开 latest/download 的重定向（部分网络栈/代理 502）
+          d["changelog"] = f"https://github.com/{repo}/releases/download/{tag}/changelog.md"
           p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
           EOF
           cat update.json
