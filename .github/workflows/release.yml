@@ -102,11 +102,21 @@ jobs:
             echo "$LOG" > /tmp/changelog.md
           fi
           cat /tmp/changelog.md
+          # KSU 系管理器把 update.json 的 changelog 字段当 URL 下载（SukiSU Module.kt
+          # onModuleUpdate 无条件 Request.Builder().url(changelog)），所以必须是文件不是文本；
+          # 用 releases/latest/download 固定链接，永远指向最新 release 的这份日志
+          {
+            echo "# ${TAG} 更新日志"
+            echo
+            cat /tmp/changelog.md
+          } > changelog.md
 
       - name: Upload module zip to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            changelog.md
           body_path: /tmp/changelog.md
           generate_release_notes: false
         env:
@@ -128,10 +138,8 @@ jobs:
           d["version"] = tag
           d["versionCode"] = int(code)
           d["zipUrl"] = f"https://github.com/{repo}/releases/download/{tag}/9router-go-{ver}-magisk.zip"
-          d["changelog"] = (
-              f"模块整包更新：引擎基线同步上游 v{ver.split('-')[0]}，"
-              "详细变更见 Release 页。"
-          )
+          # 管理器会把 changelog 当 URL 下载（不能放纯文本），latest/download 永远指向最新
+          d["changelog"] = f"https://github.com/{repo}/releases/latest/download/changelog.md"
           p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
           EOF
           cat update.json
