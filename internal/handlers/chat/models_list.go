@@ -302,15 +302,33 @@ func (h *ChatHandler) buildModelsListResult(ctx context.Context, mode ModelsList
 		seenProviders[canon] = true
 		activeCount++
 	}
+	activeConns := activeConnections(allConns)
 	usable := h.connectedProviderIDs(allConns)
 
-	data := h.buildModelsListForMode(ctx, mode, allConns, usable)
+	data := h.buildModelsListForMode(ctx, mode, allConns, activeConns, usable)
 	return ModelsListResult{Models: data, Mode: modelsListModeString(mode), Connections: activeCount}
+}
+
+// activeConnections filters the connection rows down to the ones the operator
+// left enabled. It exists so the catalog gate in buildModelsListForMode and the
+// reported Connections count agree on what "configured" means: a row the
+// dashboard disabled is still a row, and counting it made disabling every
+// connection answer /v1/models with an empty list (#46).
+func activeConnections(conns []*models.ProviderConnection) []*models.ProviderConnection {
+	active := make([]*models.ProviderConnection, 0, len(conns))
+	for _, conn := range conns {
+		if conn == nil || conn.Provider == "" || conn.IsActive == 0 {
+			continue
+		}
+		active = append(active, conn)
+	}
+	return active
 }
 
 // buildModelsList is the upstream-faithful entry point used by model lookup.
 func (h *ChatHandler) buildModelsList(ctx context.Context) []ModelInfoObject {
-	return h.buildModelsListForMode(ctx, modeListAll, h.allConnections(), nil)
+	conns := h.allConnections()
+	return h.buildModelsListForMode(ctx, modeListAll, conns, activeConnections(conns), nil)
 }
 
 // allConnections returns every provider connection row, or nil without a Repo.
@@ -328,6 +346,7 @@ func (h *ChatHandler) buildModelsListForMode(
 	ctx context.Context,
 	mode ModelsListMode,
 	allConns []*models.ProviderConnection,
+	activeConns []*models.ProviderConnection,
 	usable map[string]bool,
 ) []ModelInfoObject {
 	var data []ModelInfoObject
@@ -354,11 +373,25 @@ func (h *ChatHandler) buildModelsListForMode(
 	// 1. Combos first (upstream pushes them before provider models).
 	data = h.appendCombos(data, seen)
 
-	// 2. No connection rows at all: static catalog dump + custom models, so a
-	// fresh install still has a usable picker (upstream connections.length === 0).
+	// 2. Nothing to scope to: static catalog dump + custom models, so a fresh
+	// install still has a usable picker (upstream connections.length === 0).
 	// In connected mode the dump is narrowed to providers that are actually
 	// usable, so the endpoint stops advertising the whole catalog.
-	if len(allConns) == 0 || mode == modeListCatalog {
+	//
+	// Rows exist but none of them is active — every connection disabled in the
+	// dashboard — is the same situation, and gating on row count answered it
+	// with an empty list (#46). It is treated as "no usable credentialed
+	// provider": the answer narrows to the noAuth subset rather than the whole
+	// catalog, because unlike a genuinely fresh install there IS a configured
+	// install here and dumping 1300+ models would re-advertise providers the
+	// operator explicitly switched off. A provider whose rows are ALL inactive
+	// still publishes nothing, since filterConnected keeps it out of the dump.
+	catalogWhenEmpty := len(activeConns) == 0
+	if catalogWhenEmpty && len(allConns) > 0 && !filterConnected && mode != modeListCatalog {
+		filterConnected = true
+	}
+
+	if catalogWhenEmpty || mode == modeListCatalog {
 		for alias, models := range providers.ProviderModels {
 			if canon := providers.ResolveAlias(alias); canon != alias && providers.GetProviderAlias(canon) != alias {
 				continue

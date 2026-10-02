@@ -139,3 +139,12 @@ func TestHandleGetModelCaps_BadRequest(t *testing.T) {
 		}
 	})
 }
+
+func TestHandleGetModelCaps_CompatibleNode(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/models/caps?provider=openai-compatible-chat-2eb28394-dbf3-4c93-8477-2690aeea7041", nil)
+	rec := httptest.NewRecorder()
+	setupTestRouter(setupTestRepoForCaps(t)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

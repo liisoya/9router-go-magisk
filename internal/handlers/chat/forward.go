@@ -72,7 +72,7 @@ func (h *ChatHandler) forwardRequest(
 		if err != nil {
 			return fmt.Errorf("read upstream error body: %w", err)
 		}
-		return &upstreamError{StatusCode: resp.StatusCode, Body: respBody}
+		return &upstreamError{StatusCode: resp.StatusCode, Body: respBody, Header: resp.Header}
 	}
 
 	start := time.Now()
@@ -180,12 +180,6 @@ func (h *ChatHandler) handleStreamResponse(ctx context.Context, w http.ResponseW
 		translator.SetUsage(ctx, usage)
 	}
 	return err
-}
-
-// isSSEBody reports whether body looks like SSE (forced-stream provider returned event stream for non-stream client).
-func isSSEBody(body []byte) bool {
-	trimmed := bytes.TrimSpace(body)
-	return bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) || bytes.Contains(trimmed, []byte("\ndata:"))
 }
 
 // sseToClaudeJSON aggregates OpenAI SSE chunks into a single chat.completion JSON for forced-SSE handling.
@@ -350,6 +344,27 @@ func (h *ChatHandler) handleJSONResponse(ctx context.Context, w http.ResponseWri
 
 	body = translator.UnwrapClineEnvelope(body)
 
+	// An SSE-only upstream ignores `stream:false` and answers with an event
+	// stream anyway. Fold it into one chat.completion before validating, so
+	// a stream that never carried a completion is a failure the fallback
+	// layer can act on rather than a 200 the client reads as an empty
+	// answer (port of executor codebuddy.go sseToOpenAIJSON, #3683).
+	if internalproxy.LooksLikeSSE(body) {
+		folded, ok := sseToClaudeJSON(body)
+		if !ok {
+			return internalproxy.UpstreamFailure(http.StatusBadGateway, internalproxy.NoCompletionInStream)
+		}
+		body = folded
+	}
+
+	// A 200 that carries no completion (blank body, HTML error page, a
+	// `{"error": ...}` envelope, a choice with empty content) reads to every
+	// layer above as a served turn, which both ends combo fallback and
+	// clears the account cooldown. Report it as the 502 it is.
+	if err := internalproxy.EmptyUpstreamError(body); err != nil {
+		return err
+	}
+
 	if metrics != nil {
 		metrics.ResponseBuf.Write(body)
 	}
@@ -371,25 +386,6 @@ func (h *ChatHandler) handleJSONResponse(ctx context.Context, w http.ResponseWri
 		w.WriteHeader(http.StatusOK)
 		w.Write(body)
 		return nil
-	}
-
-	// Forced-SSE handling for Claude clients (PR #3683): upstream forced to stream (e.g. Responses-API)
-	// but client did stream:false retry. Body is SSE, not JSON. Aggregate SSE chunks into
-	// a single OpenAI JSON then translate to Anthropic Message, so Claude Code can parse it.
-	if isSSEBody(body) {
-		if aggregated, ok := sseToClaudeJSON(body); ok {
-			translated, usage, err := translator.TranslateOpenAIToClaude(aggregated)
-			if err == nil && usage != nil {
-				translator.SetUsage(ctx, usage)
-			}
-			if err == nil && translated != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				w.Write(translated)
-				return nil
-			}
-			// Fall through to normal handling if aggregation/translation fails
-		}
 	}
 
 	translated, usage, err := translator.TranslateOpenAIToClaude(body)
@@ -420,7 +416,7 @@ func (h *ChatHandler) respondAsResponses(ctx context.Context, w http.ResponseWri
 	// A Responses client that asked for a single JSON can still be handed an
 	// SSE stream when the provider forces one (Codex does). Aggregate it
 	// first rather than answering a client that expects JSON with a stream.
-	if isSSEBody(body) {
+	if internalproxy.LooksLikeSSE(body) {
 		if aggregated, ok := sseToClaudeJSON(body); ok {
 			body = aggregated
 		}

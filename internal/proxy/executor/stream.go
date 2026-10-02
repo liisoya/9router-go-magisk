@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -635,8 +636,11 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 		if len(state.UpstreamErr) > 0 {
 			return codexUpstreamError(state.UpstreamErr)
 		}
-		// Fallback empty response
-		converted = []byte(fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`, responseID, created))
+		// Upstream answered 200 with an event stream that never carried a
+		// completion. Fabricating `content: ""` here read to the client as a
+		// served empty turn and ended combo fallback on this model, so report
+		// the 502 and let the router move on.
+		return proxy.UpstreamFailure(http.StatusBadGateway, proxy.NoCompletionInStream)
 	}
 	return jsonResponse(req.Ctx, w, bytes.NewReader(converted), req.TranslateResp, req.ResponseBuf)
 }
@@ -937,6 +941,38 @@ func handleKiroStream(w http.ResponseWriter, req *Request, upstream io.Reader) e
 	})
 
 	return readErr
+}
+
+// sseCollectWriter is an http.ResponseWriter that keeps only the body. It lets
+// a handler that must emit SSE internally be reused for a non-streaming
+// request, whose frames are folded afterwards. The header and status are
+// discarded: the non-streaming path owns the real response headers.
+type sseCollectWriter struct {
+	buf bytes.Buffer
+}
+
+func (w *sseCollectWriter) Header() http.Header         { return http.Header{} }
+func (w *sseCollectWriter) WriteHeader(int)             {}
+func (w *sseCollectWriter) Write(b []byte) (int, error) { return w.buf.Write(b) }
+
+// handleKiroNonStream answers a `stream:false` request. Kiro's gateway speaks
+// only EventStream, so the frames are produced exactly as they are for a
+// streaming client and then folded into one chat.completion. Without this the
+// client received `Content-Type: text/event-stream` and a body its
+// JSON.parse could not read (issue #41).
+func handleKiroNonStream(w http.ResponseWriter, req *Request, upstream io.Reader) error {
+	collect := &sseCollectWriter{}
+	// A clean end of stream surfaces as io.EOF once the last frame is
+	// consumed, which is the normal case here and not a failure; anything
+	// else is a real read error and must not be answered as a completion.
+	if err := handleKiroStream(collect, req, upstream); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	folded, ok := sseToOpenAIJSON(collect.buf.Bytes())
+	if !ok {
+		return proxy.UpstreamFailure(http.StatusBadGateway, proxy.NoCompletionInStream)
+	}
+	return jsonResponse(req.Ctx, w, bytes.NewReader(folded), req.TranslateResp, req.ResponseBuf)
 }
 
 // ---- CommandCode NDJSON → OpenAI SSE ----

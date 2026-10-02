@@ -14,6 +14,7 @@ import (
 	json "encoding/json/v2"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -261,5 +262,70 @@ func ForwardQoder(w http.ResponseWriter, req *Request) error {
 	if req.IsStream {
 		return execSSEStream(w, resp.Body, req)
 	}
-	return jsonResponse(req.Ctx, w, resp.Body, req.TranslateResp, req.ResponseBuf)
+	return qoderNonStream(w, req, resp.Body)
+}
+
+// maxQoderSSEBytes caps the buffered read. Qoder answers from an SSE endpoint
+// whatever `stream` says, so a non-streaming request still has to hold the
+// stream in memory; the cap keeps a slow or endless upstream from growing the
+// heap without bound, matching the codex non-streaming path.
+const maxQoderSSEBytes = 10 << 20
+
+// qoderNonStream answers a `stream:false` request. jsonResponse already folds
+// an event stream into one chat.completion; the step before it exists because
+// Qoder reports failures *inside* that stream, and folding alone would turn a
+// real upstream error into a successful empty completion (issue #41).
+func qoderNonStream(w http.ResponseWriter, req *Request, upstream io.Reader) error {
+	body, err := io.ReadAll(io.LimitReader(upstream, maxQoderSSEBytes))
+	if err != nil {
+		return fmt.Errorf("ForwardQoder read response: %w", err)
+	}
+	if err := qoderSSEUpstreamError(body); err != nil {
+		return err
+	}
+	return jsonResponse(req.Ctx, w, bytes.NewReader(body), req.TranslateResp, req.ResponseBuf)
+}
+
+// qoderSSEUpstreamError surfaces the failure Qoder hides inside its
+// always-SSE response. A `data:` frame carries an envelope shaped
+// {"statusCodeValue":400,"statusCode":"BAD_REQUEST","body":"{...}"} that used
+// to be written verbatim under an `application/json` header: the client got
+// HTTP 200, JSON.parse failed on the SSE text, and the real upstream error was
+// never readable. Only a non-streaming request is affected — a streaming one
+// passes the frames through and the client sees them.
+func qoderSSEUpstreamError(body []byte) error {
+	for _, frame := range sseDataFrames(body) {
+		var envelope struct {
+			StatusCodeValue int    `json:"statusCodeValue"`
+			Body            string `json:"body"`
+		}
+		if err := json.Unmarshal(frame, &envelope); err != nil {
+			continue
+		}
+		if envelope.StatusCodeValue < 400 {
+			continue
+		}
+		message := strings.TrimSpace(envelope.Body)
+		if message == "" {
+			message = "qoder upstream error"
+		}
+		return &proxy.UpstreamError{
+			StatusCode: envelope.StatusCodeValue,
+			Body:       qoderErrorBody(message, envelope.StatusCodeValue),
+		}
+	}
+	return nil
+}
+
+// qoderErrorBody wraps an upstream message in the OpenAI error envelope the
+// gateway already speaks, so the client reads it instead of SSE text.
+func qoderErrorBody(message string, status int) []byte {
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    "upstream_error",
+			"code":    status,
+		},
+	})
+	return body
 }

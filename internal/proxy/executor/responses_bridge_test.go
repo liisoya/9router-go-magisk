@@ -118,3 +118,52 @@ func TestHandleClaudeMessagesStream_ResponsesClient(t *testing.T) {
 		t.Errorf("two-hop stream never emitted response.completed:\n%s", out)
 	}
 }
+
+// A /v1/messages client on a Claude upstream still needs fitted tool names
+// restored. The TranslateResp branch is a passthrough — no OpenAI translation
+// happens — but the request was fitted before it left, so skipping the
+// decloaker there forwarded the 64-char name and left the client unable to
+// dispatch the call.
+func TestHandleClaudeMessages_TranslateRespRestoresToolNames(t *testing.T) {
+	const longName = "mcp__server_name__action_detail_something_very_long_indeed_action_12345"
+	const shortName = "mcp__server_name__action_detail_something_very_long_indeed_act_1"
+toolMap := map[string]string{shortName: longName}
+
+	t.Run("stream passthrough", func(t *testing.T) {
+		upstream := strings.Join([]string{
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"" + shortName + "\"}}\n\n",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		}, "")
+
+		rec := httptest.NewRecorder()
+		req := &Request{Ctx: context.Background(), IsStream: true, TranslateResp: true, ToolNameMap: toolMap}
+
+		if err := handleClaudeMessagesStream(rec, req, strings.NewReader(upstream)); err != nil {
+			t.Fatalf("handleClaudeMessagesStream: %v", err)
+		}
+		out := rec.Body.String()
+		if strings.Contains(out, shortName) {
+			t.Errorf("the fitted name reached the client undecloaked:\n%s", out)
+		}
+		if !strings.Contains(out, longName) {
+			t.Errorf("expected the caller's name %q restored:\n%s", longName, out)
+		}
+	})
+
+	t.Run("non-stream passthrough", func(t *testing.T) {
+		body := `{"content":[{"type":"tool_use","id":"toolu_1","name":"` + shortName + `","input":{}}]}`
+		rec := httptest.NewRecorder()
+		req := &Request{Ctx: context.Background(), TranslateResp: true, ToolNameMap: toolMap}
+
+		if err := handleClaudeMessagesNonStream(rec, req, strings.NewReader(body)); err != nil {
+			t.Fatalf("handleClaudeMessagesNonStream: %v", err)
+		}
+		out := rec.Body.String()
+		if strings.Contains(out, shortName) {
+			t.Errorf("the fitted name reached the client undecloaked:\n%s", out)
+		}
+		if !strings.Contains(out, longName) {
+			t.Errorf("expected the caller's name %q restored:\n%s", longName, out)
+		}
+	})
+}

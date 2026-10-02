@@ -2,9 +2,13 @@
 
 package updater
 
-// signalSelfShutdown is a no-op on Windows: there is no portable POSIX
-// SIGTERM-self, so RestartSelf falls back to os.Exit(0) after spawning the
-// new process.
+import "9router/proxy/internal/shutdown"
+
+// signalSelfShutdown asks this process to stop through shutdown.RequestStop.
+// Windows cannot raise SIGTERM on itself (os.Process.Signal returns "not
+// supported by windows"), so the request channel main selects on is the only
+// way to let the listener drain before the new process binds the same port.
 func signalSelfShutdown() bool {
-	return false
+	shutdown.RequestStop()
+	return true
 }

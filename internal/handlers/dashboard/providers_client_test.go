@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -163,5 +164,34 @@ func TestProvidersClientProviderSort(t *testing.T) {
 		if m["provider"] != id {
 			t.Errorf("position %d: got %v, want %s", i, m["provider"], id)
 		}
+	}
+}
+
+func TestSanitizeProviderConnection_LastErrorString(t *testing.T) {
+	repo, cleanup := setupTestDB(t)
+	defer cleanup()
+	h := NewDashboardHandler(repo)
+
+	connID := "c-err"
+	if err := repo.CreateProviderConnection(connID, "codex", "oauth", "Codex Err", "secret-codex"); err != nil {
+		t.Fatalf("create connection: %v", err)
+	}
+	if err := repo.LockConnectionRateLimit(connID, time.Now().Add(time.Minute), 1, 429, "Rate limit reached"); err != nil {
+		t.Fatalf("lock rate limit: %v", err)
+	}
+
+	r := setupProvidersClientRouter(h)
+	out := getProvidersClient(t, r, "?provider=codex")
+	conns, _ := out["connections"].([]any)
+	if len(conns) == 0 {
+		t.Fatalf("expected codex connection, got none")
+	}
+	first, _ := conns[0].(map[string]any)
+	lastErr, ok := first["lastError"].(string)
+	if !ok {
+		t.Fatalf("expected lastError to be string, got %T: %v", first["lastError"], first["lastError"])
+	}
+	if lastErr != "Rate limit reached" {
+		t.Errorf("lastError = %q, want %q", lastErr, "Rate limit reached")
 	}
 }

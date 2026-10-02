@@ -26,6 +26,13 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
+      # The web suite ran nowhere before this: CI only built the SPA, so a PR
+      # breaking client.ts or router.ts still went green. bun:test needs no
+      # extra dependency — the runner already has bun and the install above.
+      - name: Test web
+        working-directory: web
+        run: bun test
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -38,5 +45,110 @@ jobs:
       - name: Test
         run: go test ./... -v
 
+      # The binary is built with Go's default -pgo=auto, which silently stops
+      # applying cmd/9router-go/default.pgo the moment that file is renamed,
+      # gitignored, .dockerignore'd, or a -pgo=off flag creeps in. Nothing about
+      # the build would fail — it would just quietly get slower, so the flag is
+      # asserted here instead of trusted.
       - name: Build
         run: go build -ldflags="-s -w" -o /tmp/9router-go ./cmd/9router-go/
+
+      - name: Assert PGO is applied
+        run: |
+          go version -m /tmp/9router-go | grep -q -- '-pgo=' || {
+            echo "::error::PGO profile not applied to the release binary."
+            echo "Check that cmd/9router-go/default.pgo is committed and that"
+            echo "no build step passes -pgo=off."
+            exit 1
+          }
+          go version -m /tmp/9router-go | grep -- '-pgo='
+
+  # Unit tests exercise handlers with a hand-built router, so they cannot see a
+  # regression in the wiring that production actually mounts: a route
+  # registered in the wrong group, the /v1 prefix rewrite dropped, the account
+  # fallback no longer rotating, usage no longer logged. This job drives the
+  # real router end to end over HTTP against a temporary database and a fake
+  # LLM upstream, so those regressions fail on the PR that introduces them
+  # instead of on a user's next request. The feature suite is offline by
+  # construction — no provider credential, and AddConnection fails if a fake
+  # upstream URL did not persist — so the job needs no secrets. bootfx boots the
+  # real ServerModule, whose background loops it neutralises: the update
+  # manifest points at a local server, and the run finishes in seconds, well
+  # before the 30s model-catalog sync.
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The integration suite serves the dashboard SPA through
+      # web/embed.go, so web/dist must exist before the package compiles.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Build Web SPA
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # `go vet ./...` skips the suite: its files are behind the "integration"
+      # build tag. Vet them explicitly so a broken suite fails here rather than
+      # at the next test compile.
+      - name: Vet integration suite
+        run: go vet -tags=integration ./internal/integration/...
+
+      # -race catches the concurrency the proxy actually has (SSE pumps,
+      # in-memory usage tracker, per-handler sticky state). -count=1 defeats
+      # the test cache so a PR always re-runs the suite.
+      - name: Test integration
+        run: go test -tags=integration -race -count=1 -timeout 10m ./internal/integration/... -v
+
+  # The Dockerfile was only ever built by release.yml, on a tag. Every breakage
+  # it can suffer — a .dockerignore entry that swallows cmd/9router-go/, a
+  # go.mod bump that misses a stage, web/embed.go failing on a missing dist —
+  # stayed invisible until a release, where the only fix is re-tagging. This
+  # job builds the image on every PR and pushes nothing.
+  docker:
+    name: Build Docker image (verify only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: 9router-go:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image binary is -s -w stripped, but the buildinfo section survives
+      # stripping, so go version -m still reports the profile it was built with.
+      # This is the assertion that the PGO file actually survived COPY . . —
+      # the local go build above cannot see that, because it never touches the
+      # Docker build context.
+      - name: Assert PGO survived the Docker build context
+        run: |
+          cid=$(docker create 9router-go:ci)
+          docker cp "$cid":/usr/local/bin/9router-go /tmp/from-image
+          docker rm "$cid" >/dev/null
+          go version -m /tmp/from-image | grep -q -- '-pgo=' || {
+            echo "::error::PGO profile missing inside the Docker image."
+            echo "Check .dockerignore for an entry that would drop"
+            echo "cmd/9router-go/default.pgo from the build context."
+            exit 1
+          }
+          go version -m /tmp/from-image | grep -- '-pgo='

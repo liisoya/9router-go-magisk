@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"io"
 	"net/http"
-	"time"
+
+	"9router/proxy/internal/constants"
 )
 
 // FallbackTransport intercepts outbound HTTP requests and automatically retries
 // via a direct connection (Proxy: nil) if the environment proxy or local sandbox proxy
 // refuses the connection (CONNECT tunnel failed, 403 Forbidden, blocked-by-allowlist).
+var defaultDirectTransport = constants.DefaultHTTPTransportConfig.NewTransport()
+
 type FallbackTransport struct {
 	Base   http.RoundTripper
 	Direct http.RoundTripper
@@ -23,10 +26,7 @@ func (t *FallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	direct := t.Direct
 	if direct == nil {
-		direct = &http.Transport{
-			Proxy:                 nil, // direct connection to bypass proxy allowlist
-			ResponseHeaderTimeout: 2 * time.Minute,
-		}
+		direct = defaultDirectTransport
 	}
 
 	// Buffer body if present and not replayable
@@ -64,10 +64,7 @@ func NewFallbackTransport(base http.RoundTripper) http.RoundTripper {
 		base = http.DefaultTransport
 	}
 	return &FallbackTransport{
-		Base: base,
-		Direct: &http.Transport{
-			Proxy:                 nil,
-			ResponseHeaderTimeout: 2 * time.Minute,
-		},
+		Base:   base,
+		Direct: defaultDirectTransport,
 	}
 }

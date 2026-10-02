@@ -266,7 +266,25 @@ func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
 		"freebuffModel", "assignedModel", "freebucks",
 	} {
 		if v, ok := data[f]; ok && v != nil {
-			safe[f] = v
+			if f == "lastError" {
+				if m, isMap := v.(map[string]any); isMap {
+					if msg, ok := m["message"].(string); ok && msg != "" {
+						safe[f] = msg
+					} else if errText, ok := m["error"].(string); ok && errText != "" {
+						safe[f] = errText
+					} else if b, err := json.Marshal(m); err == nil {
+						safe[f] = string(b)
+					} else {
+						safe[f] = fmt.Sprintf("%v", v)
+					}
+				} else if s, isStr := v.(string); isStr {
+					safe[f] = s
+				} else {
+					safe[f] = fmt.Sprintf("%v", v)
+				}
+			} else {
+				safe[f] = v
+			}
 		}
 	}
 	for k, v := range data {

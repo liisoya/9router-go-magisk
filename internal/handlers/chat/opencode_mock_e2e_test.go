@@ -268,17 +268,15 @@ func TestE2E_Opencode_MuseSpark_Mock_Vision(t *testing.T) {
 		if !strings.Contains(body, "image_url") {
 			t.Errorf("expected image_url preserved in Responses input, got %s", body)
 		}
-		resp := map[string]any{
-			"id":     "resp_vision",
-			"object": "response",
-			"output": []map[string]any{
-				{"type": "message", "content": []map[string]any{{"type": "text", "text": "Image is a cat"}}},
-			},
-			"usage": map[string]any{"input_tokens": 40, "output_tokens": 10},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		b, _ := json.Marshal(resp)
-		_, _ = w.Write(b)
+		// buildResponsesBody forces stream:true, so this upstream answers
+		// with Responses events. A single JSON document here used to be
+		// folded into a fabricated empty completion that the test then
+		// accepted as a 200.
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.output_text.delta\n" +
+			`data: {"type":"response.output_text.delta","delta":"Image is a cat"}` + "\n\n" +
+			"event: response.completed\n" +
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":40,"output_tokens":10}}}` + "\n\n"))
 	}))
 	defer upstream.Close()
 
@@ -323,6 +321,11 @@ func TestE2E_Opencode_MuseSpark_Mock_Vision(t *testing.T) {
 	choices, _ := resp["choices"].([]any)
 	if len(choices) == 0 {
 		t.Fatalf("expected choices, got %v", resp)
+	}
+	choice, _ := choices[0].(map[string]any)
+	msg, _ := choice["message"].(map[string]any)
+	if msg["content"] != "Image is a cat" {
+		t.Fatalf("expected the upstream answer to reach the client, got %v", msg)
 	}
 }
 

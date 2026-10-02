@@ -165,3 +165,26 @@ func codexNumber(t *testing.T, row map[string]any, key string) float64 {
 	}
 	return v
 }
+
+// An account can hold reset credits while its rate-limit windows come back
+// unparseable. The credit count rode in `extra`, and the no-windows branch
+// returned before setting it — so the dashboard showed 0 and the chooser
+// button stayed unusable for an account that had credits to spend.
+func TestFetchCodexUsage_KeepsResetCreditsWhenNoWindowsParse(t *testing.T) {
+	withCodexUsageServer(t, http.StatusOK, `{
+		"plan_type": "plus",
+		"rate_limit_reset_credits": {"available_count": 3}
+	}`)
+
+	res := fetchCodexUsage(t.Context(), "tok")
+	if len(res.quotas) != 0 {
+		t.Fatalf("expected no quota rows, got %v", res.quotas)
+	}
+	credits, ok := res.extra["resetCredits"].(map[string]any)
+	if !ok {
+		t.Fatalf("resetCredits missing from extra on the no-windows path: %v", res.extra)
+	}
+	if got, _ := credits["availableCount"].(int); got != 3 {
+		t.Errorf("availableCount = %v, want 3", credits["availableCount"])
+	}
+}

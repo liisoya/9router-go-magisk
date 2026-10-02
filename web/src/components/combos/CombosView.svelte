@@ -2,6 +2,7 @@
   import { Layers } from 'lucide-svelte'
   import { api, type Combo, type ProviderConnection, type ProviderNode } from '../../api/client'
   import {
+    COMBO_STRATEGIES,
     clearJudgeModel,
     getComboModels,
     parseCapacityAdapterSettings,
@@ -35,9 +36,10 @@
   }: Props = $props()
 
   // Upstream parity (combos page.js fetchData): webSearch/webFetch combos
-  // (notably search-combo) live under media-providers/web, not here.
+  // (notably search-combo) live under media-providers/web, not here. The
+  // auto-generated kinds are llm combos too and stay visible here.
   function isLlmCombo(c: Combo): boolean {
-    if (c.kind && c.kind !== 'llm') return false
+    if (c.kind && c.kind !== 'llm' && !c.kind.startsWith('auto-')) return false
     if (c.name === 'search-combo' || c.name.startsWith('search-combo-')) return false
     return true
   }
@@ -61,8 +63,34 @@
   let showModelPicker = $state(false)
   let modelPickerTarget = $state<'combo' | 'vision' | 'audio' | 'judge'>('combo')
 
-  // Confirm Delete Modal state (upstream confirmState parity)
-  let confirmState = $state<{ name: string; id: string } | null>(null)
+  // Confirm Delete Modal state (upstream confirmState parity). Carries the ids
+  // to remove.
+  let confirmState = $state<{ name: string; ids: string[] } | null>(null)
+
+  // Selection drives the bulk bar below the list, matching upstream: a checkbox
+  // per card plus a "Select all" that names the count, and bulk strategy /
+  // delete / clear actions that only exist while something is selected. The
+  // Set is re-created on every change so Svelte 5 sees it (mutating in place is
+  // not tracked).
+  let selectedIds = $state<Set<string>>(new Set())
+
+  function toggleSelect(combo: Combo) {
+    const next = new Set(selectedIds)
+    if (next.has(combo.id)) next.delete(combo.id)
+    else next.add(combo.id)
+    selectedIds = next
+  }
+
+  let selectedCombos = $derived(llmCombos.filter((c) => selectedIds.has(c.id)))
+  let allSelected = $derived(llmCombos.length > 0 && selectedCombos.length === llmCombos.length)
+
+  function toggleSelectAll() {
+    selectedIds = allSelected ? new Set() : new Set(llmCombos.map((c) => c.id))
+  }
+
+  function clearSelection() {
+    selectedIds = new Set()
+  }
 
   async function loadSettings() {
     try {
@@ -79,11 +107,21 @@
   }
 
   $effect(() => { loadSettings() })
+  // Reset the create form once per open. Unguarded, this looped forever: the
+  // effect bumps `modalNameResetKey`, which the `{#key}` block below reads, that
+  // block re-creates CreateComboModal, and that re-queues the effect. Svelte
+  // aborted the flush with effect_update_depth_exceeded after 1000 rounds, so
+  // "Add Model" never opened the picker at all.
+  let createSessionOpen = $state(false)
   $effect(() => {
-    if (isCreatingOpen && !editingCombo) {
-      modalModels = []
-      modalNameResetKey += 1
+    if (!isCreatingOpen) {
+      createSessionOpen = false
+      return
     }
+    if (editingCombo || createSessionOpen) return
+    createSessionOpen = true
+    modalModels = []
+    modalNameResetKey += 1
   })
 
   function copyName(name: string, id: string) {
@@ -223,15 +261,58 @@
       showModelPicker = false
     }
   }
-  async function handleDeleteCombo() {
+  async function handleDeleteCombos() {
     if (!confirmState) return
-    const id = confirmState.id
+    const ids = confirmState.ids
+    let deleted = 0
+    for (const id of ids) {
+      try {
+        await api.deleteCombo(id)
+        deleted++
+      } catch (e) {
+        console.error(`Failed to delete combo ${id}:`, e)
+      }
+    }
+    confirmState = null
+    clearSelection()
+    onRefresh()
+    if (deleted < ids.length) {
+      alert(`Deleted ${deleted} of ${ids.length} combo(s). The rest could not be removed.`)
+    }
+  }
+
+  function handleDeleteSelected() {
+    if (selectedCombos.length === 0) return
+    confirmState = {
+      name: selectedCombos.map((c) => c.name).join(', '),
+      ids: selectedCombos.map((c) => c.id),
+    }
+  }
+
+  let bulkStrategy = $state('')
+
+  // Upstream writes the strategy through the same settings patch a single card
+  // uses, then one updateCombo per row: comboStrategies is keyed by combo NAME,
+  // so it has to be rewritten as a whole or the last write wins.
+  async function handleApplyBulkStrategy() {
+    if (!bulkStrategy || selectedCombos.length === 0) return
+    const targets = selectedCombos
+    let next = comboStrategies
+    for (const combo of targets) {
+      next = updateComboStrategy(next, combo.name, bulkStrategy)
+    }
+    comboStrategies = next
     try {
-      await api.deleteCombo(id)
-      confirmState = null
+      await api.patchSettings({ comboStrategies: next })
+      for (const combo of targets) {
+        await api.updateCombo(combo.id, { strategy: bulkStrategy })
+      }
+      bulkStrategy = ''
       onRefresh()
     } catch (e) {
-      console.error('Failed to delete combo:', e)
+      alert(
+        'Failed to set strategy: ' + (e instanceof Error ? e.message : String(e))
+      )
     }
   }
 
@@ -239,6 +320,64 @@
 
 <div class="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
   <CombosHeader onCreateClick={openCreateModal} />
+
+  <!-- Upstream selection bar: the count is on the checkbox, and the bulk
+       actions only exist while something is selected, so the destructive
+       Delete is never sitting next to Create. -->
+  {#if llmCombos.length > 0}
+    <div
+      class="flex min-w-0 flex-col gap-2 rounded-lg border border-black/5 bg-black/[0.015] px-3 py-2 dark:border-white/5 dark:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between"
+    >
+      <label class="flex cursor-pointer items-center gap-2 text-xs text-text-muted hover:text-primary select-none">
+        <input
+          type="checkbox"
+          checked={allSelected}
+          onchange={toggleSelectAll}
+          class="h-3.5 w-3.5 rounded border-gray-300 text-primary focus:ring-primary"
+        />
+        <span>
+          {selectedCombos.length > 0 ? `${selectedCombos.length} selected` : `Select all (${llmCombos.length})`}
+        </span>
+      </label>
+
+      {#if selectedCombos.length > 0}
+        <div class="flex min-w-0 flex-wrap items-center gap-2">
+          <div class="w-full min-w-[160px] sm:w-[200px]">
+            <select
+              bind:value={bulkStrategy}
+              class="w-full bg-surface-2 border border-border rounded-lg px-2.5 py-1.5 text-xs text-text-main focus:outline-none focus:ring-brand-500 focus:border-brand-500 cursor-pointer"
+            >
+              <option value="" disabled>Set strategy…</option>
+              {#each COMBO_STRATEGIES as strategy (strategy.value)}
+                <option value={strategy.value}>{strategy.label}</option>
+              {/each}
+            </select>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onclick={handleApplyBulkStrategy}
+            disabled={!bulkStrategy}
+            class="whitespace-nowrap"
+          >
+            Apply Strategy
+          </Button>
+          <Button
+            icon="delete"
+            size="sm"
+            variant="danger"
+            onclick={handleDeleteSelected}
+            class="whitespace-nowrap"
+          >
+            Delete ({selectedCombos.length})
+          </Button>
+          <Button size="sm" variant="ghost" onclick={clearSelection} class="whitespace-nowrap">
+            Clear
+          </Button>
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   <!-- Combos List -->
   {#if llmCombos.length === 0}
@@ -266,7 +405,9 @@
           onClearJudge={clearJudge}
           onCopy={copyName}
           onEdit={openEditModal}
-          onDelete={(c) => (confirmState = { name: c.name, id: c.id })}
+          onDelete={(c) => (confirmState = { name: c.name, ids: [c.id] })}
+          isSelected={selectedIds.has(combo.id)}
+          onToggleSelect={toggleSelect}
         />
       {/each}
     </div>
@@ -313,7 +454,13 @@
 <ConfirmModal
   isOpen={!!confirmState}
   title="Delete Combo"
-  message={confirmState ? `Delete combo "${confirmState.name}"?` : 'Delete this combo?'}
+  message={
+    confirmState
+      ? confirmState.ids.length === 1
+        ? `Delete combo "${confirmState.name}"?`
+        : `Delete ${confirmState.ids.length} combo(s)? (${confirmState.name})`
+      : 'Delete this combo?'
+  }
   onClose={() => (confirmState = null)}
-  onConfirm={handleDeleteCombo}
+  onConfirm={handleDeleteCombos}
 />

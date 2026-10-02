@@ -2,15 +2,13 @@
 
 package updater
 
-import (
-	"os"
-	"syscall"
-)
+import "9router/proxy/internal/shutdown"
 
-// signalSelfShutdown sends SIGTERM to our own process so main's signal handler
-// can drain in-flight SSE streams and close the listener gracefully. Returns
-// true when the signal was delivered (caller then waits for shutdown), false
-// otherwise (caller falls back to os.Exit(0)).
+// signalSelfShutdown asks this process to stop through shutdown.RequestStop,
+// which main selects on next to SIGINT/SIGTERM. Going through the package
+// instead of raising SIGTERM on ourselves keeps one shutdown path: Windows has
+// no SIGTERM, so a signal-only route cannot drain the listener there.
 func signalSelfShutdown() bool {
-	return syscall.Kill(os.Getpid(), syscall.SIGTERM) == nil
+	shutdown.RequestStop()
+	return true
 }

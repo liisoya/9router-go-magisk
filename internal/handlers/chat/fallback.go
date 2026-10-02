@@ -135,10 +135,7 @@ func (h *ChatHandler) handleAccountFallback(
 			currentBackoffLevel := h.Repo.GetConnectionBackoffLevel(connObj.ID)
 			// Classify error to get dynamic cooldown
 			classification := providers.ClassifyError(ue.StatusCode, errorText, currentBackoffLevel)
-			cooldownSec := int((classification.CooldownMs + 999) / 1000) // ceil to seconds
-			if dur, ok := extractResetDuration(ue.Body); ok {
-				cooldownSec = int(dur.Seconds())
-			}
+			cooldownSec := retryableCooldownSec(ue.StatusCode, time.Duration(classification.CooldownMs)*time.Millisecond, ue)
 			errMsg := errorText
 			if errMsg == "" {
 				errMsg = fmt.Sprintf("%d upstream error", ue.StatusCode)
@@ -147,6 +144,13 @@ func (h *ChatHandler) handleAccountFallback(
 			h.Repo.LockConnectionModel(connObj.ID, lockKey, cooldownSec, classification.NewBackoffLevel)
 			if lockKey != model {
 				_ = h.Repo.LockConnectionModel(connObj.ID, model, cooldownSec, classification.NewBackoffLevel)
+			}
+			// Account-scoped cooldown alongside the per-model locks, so the
+			// selector can skip this account before spending a request
+			// (upstream applyErrorState).
+			until := time.Now().UTC().Add(time.Duration(cooldownSec) * time.Second)
+			if lockErr := h.Repo.LockConnectionRateLimit(connObj.ID, until, classification.NewBackoffLevel, ue.StatusCode, errorText); lockErr != nil {
+				log.Warn("fallback", "rate limit lock failed", "conn", connObj.ID, "error", lockErr)
 			}
 			log.Warn("fallback", "connection locked", append([]any{
 				"conn", connObj.ID, "provider", provider, "model", model,
@@ -354,6 +358,20 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	} else if err != nil {
 		log.Warn("fallback", "sanitize failed", "provider", provider, "model", model, "error", err)
 	}
+	// Fit tool names exceeding MaxToolNameLength (64 chars) to prevent upstream HTTP 400.
+	fittedBody, fittedToolMap := translator.FitToolNames(pipedBody)
+	if len(fittedToolMap) > 0 {
+		log.Debug("fallback", "fitted long tool names", "provider", provider, "model", model, "count", len(fittedToolMap))
+		pipedBody = fittedBody
+		w = executor.NewToolNameRestoringWriter(w, fittedToolMap)
+		ctx = translator.WithToolNameMap(ctx, fittedToolMap)
+		if claudeToolMap == nil {
+			claudeToolMap = make(map[string]string, len(fittedToolMap))
+		}
+		for k, v := range fittedToolMap {
+			claudeToolMap[k] = v
+		}
+	}
 	start := time.Now()
 	metrics := &streamMetrics{}
 	var fwdErr error
@@ -492,6 +510,12 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		}
 		if lockKey != model {
 			_ = h.Repo.UnlockConnectionModel(connectionID, model)
+		}
+		// A served request also clears the account-scoped cooldown, so an
+		// account that recovered is not kept out of rotation until the
+		// cooldown expires on its own.
+		if clearErr := h.Repo.ClearConnectionRateLimit(connectionID); clearErr != nil {
+			log.Warn("fallback", "rate limit clear failed", "conn", connectionID, "error", clearErr)
 		}
 		// A served request proves the account is usable again, so drop any
 		// cached quota block rather than leaving it to expire on its own.
@@ -760,11 +784,14 @@ func formatRetryAfter(isoTimestamp string) string {
 	if err != nil {
 		return ""
 	}
-	diffMs := time.Until(parsed)
-	if diffMs <= 0 {
+	// time.Until is a Duration in nanoseconds. Dividing by 1000 yielded
+	// milliseconds, so a 150s cooldown read as "reset after 41399h" and
+	// contradicted the Retry-After header sent alongside it.
+	remaining := time.Until(parsed)
+	if remaining <= 0 {
 		return "reset after 0s"
 	}
-	totalSec := int((diffMs + 999) / 1000) // ceil
+	totalSec := int((remaining + time.Second - 1) / time.Second) // ceil
 	h := totalSec / 3600
 	m := (totalSec % 3600) / 60
 	s := totalSec % 60

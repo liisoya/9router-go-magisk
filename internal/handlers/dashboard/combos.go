@@ -2,13 +2,18 @@ package dashboard
 
 import (
 	json "encoding/json/v2"
+	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/models"
+	"9router/proxy/internal/providers"
 )
 
 // HandleGetCombos handles GET /api/combos.
@@ -158,8 +163,128 @@ func (h *DashboardHandler) HandleUpdateCombo(w http.ResponseWriter, r *http.Requ
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
 }
 
+// autoFreeComboKind marks a combo that the dashboard auto-generates from the
+// registry's free-tier models. The kind is informational: it tags the combo as
+// machine-generated so the card can badge it, and it is what Auto Free Tier
+// rewrites on every rebuild. It grants no lock — a generated combo is an
+// ordinary row that can be renamed, edited and deleted like any other, and
+// rebuilding after a delete recreates it.
+const autoFreeComboKind = "auto-free"
+
+// AutoFreeComboID is the stable id of the auto-generated free-tier combo.
+const AutoFreeComboID = "auto-free-tier"
+
+// HandleAutoFreeCombo handles POST /api/combos/auto-free.
+// (Re)builds the free-tier combo from registry models of providers the user
+// actually has a connection for, so the combo never references unreachable
+// providers. The write is an upsert on AutoFreeComboID, so rebuilding an
+// edited combo replaces the edits — which is why the rebuild is an explicit
+// button rather than something that happens on connection changes.
+func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Request) {
+	models, err := h.freeTierComboModels(r.Context())
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(models) == 0 {
+		handlerutil.WriteJSONError(w, http.StatusConflict,
+			"no free-tier models found among providers with connections")
+		return
+	}
+
+	modelsJSON, err := json.Marshal(models)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to encode models")
+		return
+	}
+
+	name := "Auto Free Tier"
+	existing, err := h.Repo.GetComboById(AutoFreeComboID)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing == nil {
+		if err := h.Repo.CreateCombo(AutoFreeComboID, name, autoFreeComboKind, string(modelsJSON), "fallback"); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else if err := h.Repo.UpdateCombo(AutoFreeComboID, name, autoFreeComboKind, string(modelsJSON), "fallback"); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"id":     AutoFreeComboID,
+		"models": models,
+	})
+}
+
+// freeTierComboModels returns "alias/model" ids for every free-tier registry
+// model of providers with at least one connection, ordered by provider alias
+// then model id so regenerating yields a stable, diffable list.
+//
+// The free-tier marker is a naming convention, not a service kind: ":free" /
+// "/free" / "-free" also lands on embedding, image, tts and stt models
+// (openrouter's "nvidia/llama-nemotron-embed-vl-1b-v2:free" is one). The
+// registry carries the real kind, so a combo that cannot serve a chat turn
+// never enters the fallback chain — same gate usableModelFamilies applies to
+// the auto-family combos.
+func (h *DashboardHandler) freeTierComboModels(ctx context.Context) ([]string, error) {
+	active, err := h.Repo.GetConnectedProviders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("freeTierComboModels: list providers: %w", err)
+	}
+
+	var out []string
+	for providerID := range active {
+		for _, modelID := range providers.GetProviderModels(providerID) {
+			if !providers.IsFreeTierModel(modelID) {
+				continue
+			}
+			if kind := providers.GetProviderModelKind(providerID, modelID); kind != "" && kind != "llm" {
+				continue
+			}
+			out = append(out, providers.GetProviderAlias(providerID)+"/"+modelID)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+// comboModels extracts the model id array of a combo's stored models field,
+// accepting either the raw JSON string or an already-decoded array value.
+func comboModels(v any) ([]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	switch m := v.(type) {
+	case string:
+		if strings.TrimSpace(m) == "" {
+			return nil, nil
+		}
+		var arr []string
+		if err := json.Unmarshal([]byte(m), &arr); err != nil {
+			return nil, fmt.Errorf("combo models not a JSON array: %w", err)
+		}
+		return arr, nil
+	case []string:
+		return m, nil
+	default:
+		b, err := json.Marshal(m)
+		if err != nil {
+			return nil, fmt.Errorf("combo models invalid: %w", err)
+		}
+		var arr []string
+		if err := json.Unmarshal(b, &arr); err != nil {
+			return nil, fmt.Errorf("combo models not a JSON array: %w", err)
+		}
+		return arr, nil
+	}
+}
+
 // HandleDeleteCombo handles DELETE /api/combos/{id}.
-// Deletes combo.
 func (h *DashboardHandler) HandleDeleteCombo(w http.ResponseWriter, r *http.Request) {
 	id := getURLParam(r, "id")
 	if id == "" {

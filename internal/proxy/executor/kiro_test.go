@@ -1,7 +1,9 @@
 package executor
 
 import (
+	"encoding/binary"
 	json "encoding/json/v2"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -102,5 +104,113 @@ func TestKiroUpstreamBody_StripsProviderPrefixAndSuffixes(t *testing.T) {
 	}
 	if strings.Contains(sent, "kr/") {
 		t.Errorf("provider prefix leaked into body: %s", sent)
+	}
+}
+
+// kiroEventFrame builds one AWS EventStream frame. The reader in
+// internal/providers skips both CRCs, so only the prelude lengths and the
+// header encoding have to be right.
+func kiroEventFrame(eventType, payload string) []byte {
+	name := ":event-type"
+	headers := make([]byte, 0, 32)
+	headers = append(headers, byte(len(name)))
+	headers = append(headers, name...)
+	headers = append(headers, 7) // string value type
+	headers = append(headers, byte(len(eventType)>>8), byte(len(eventType)))
+	headers = append(headers, eventType...)
+
+	total := 12 + len(headers) + len(payload) + 4
+	frame := binary.BigEndian.AppendUint32(make([]byte, 0, total), uint32(total))
+	frame = binary.BigEndian.AppendUint32(frame, uint32(len(headers)))
+	frame = binary.BigEndian.AppendUint32(frame, 0) // prelude CRC, not validated
+	frame = append(frame, headers...)
+	frame = append(frame, payload...)
+	return binary.BigEndian.AppendUint32(frame, 0) // message CRC, not validated
+}
+
+// A `stream:false` request must be answered with JSON. Kiro is EventStream
+// only, so before the fix this replied `text/event-stream` with an SSE body
+// and the client's JSON.parse failed on `data: {...}` (issue #41).
+func TestForwardKiro_NonStreamReturnsJSONCompletion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		w.WriteHeader(http.StatusOK)
+		w.Write(kiroEventFrame("assistantResponseEvent", `{"content":"Hey"}`))
+		w.Write(kiroEventFrame("assistantResponseEvent", `{"content":" there"}`))
+	}))
+	defer srv.Close()
+
+	rec := httptest.NewRecorder()
+	err := ForwardKiro(rec, &Request{
+		Client:    srv.Client(),
+		Config:    &providers.ProviderConfig{BaseURL: srv.URL, AuthHeader: "Authorization", AuthScheme: "bearer"},
+		APIKey:    "bearer-token",
+		Body:      []byte(`{"model":"kr/claude-sonnet-4.5","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+		IsStream:  false,
+		ModelName: "claude-sonnet-4.5",
+	})
+	if err != nil {
+		t.Fatalf("ForwardKiro: %v", err)
+	}
+
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var out struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("body is not JSON, so a client JSON.parse fails: %v\nbody: %s", err, rec.Body.String())
+	}
+	if out.Object != "chat.completion" {
+		t.Errorf("object = %q, want chat.completion", out.Object)
+	}
+	if len(out.Choices) != 1 {
+		t.Fatalf("got %d choices, want 1", len(out.Choices))
+	}
+	if out.Choices[0].Message.Content != "Hey there" {
+		t.Errorf("content = %q, want %q", out.Choices[0].Message.Content, "Hey there")
+	}
+	if out.Choices[0].FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop", out.Choices[0].FinishReason)
+	}
+}
+
+// The fix must not disturb the streaming path: a `stream:true` request still
+// has to answer with an event stream.
+func TestForwardKiro_StreamStillEmitsSSE(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		w.WriteHeader(http.StatusOK)
+		w.Write(kiroEventFrame("assistantResponseEvent", `{"content":"Hey"}`))
+	}))
+	defer srv.Close()
+
+	rec := httptest.NewRecorder()
+	err := ForwardKiro(rec, &Request{
+		Client:    srv.Client(),
+		Config:    &providers.ProviderConfig{BaseURL: srv.URL, AuthHeader: "Authorization", AuthScheme: "bearer"},
+		APIKey:    "bearer-token",
+		Body:      []byte(`{"model":"kr/claude-sonnet-4.5","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+		IsStream:  true,
+		ModelName: "claude-sonnet-4.5",
+	})
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("ForwardKiro: %v", err)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+	if !strings.Contains(rec.Body.String(), `"content":"Hey"`) {
+		t.Errorf("stream body missing the assistant delta: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "data: [DONE]") {
+		t.Errorf("stream body missing the terminal frame: %s", rec.Body.String())
 	}
 }

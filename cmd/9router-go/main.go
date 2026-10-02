@@ -14,6 +14,8 @@ import (
 	"go.uber.org/fx"
 
 	"9router/proxy/internal/app"
+	"9router/proxy/internal/daemon"
+	"9router/proxy/internal/shutdown"
 	"9router/proxy/internal/updater"
 )
 
@@ -46,6 +48,11 @@ func main() {
 				Name:  "no-injection-guard",
 				Value: os.Getenv("INJECTION_GUARD_DISABLED") == "true",
 				Usage: "disable the prompt-injection detector (on by default; env: INJECTION_GUARD_DISABLED)",
+			},
+			&cli.BoolFlag{
+				Name:    daemon.BackgroundName,
+				Aliases: []string{"d"},
+				Usage:   "run as a background daemon: detaches from the terminal and returns (env: 9ROUTER_BACKGROUND)",
 			},
 		},
 		Commands: []*cli.Command{
@@ -110,13 +117,50 @@ func main() {
 					},
 				},
 			},
+			{
+				Name:   "start",
+				Usage:  "Start the gateway in the background and return (same as --background)",
+				Action: startDetached,
+			},
+			{
+				Name:   "stop",
+				Usage:  "Stop the background gateway",
+				Action: stopDetached,
+			},
+			{
+				Name:   "restart",
+				Usage:  "Restart the background gateway",
+				Action: restartDetached,
+			},
+			{
+				Name:   "status",
+				Usage:  "Show whether the background gateway is running",
+				Action: statusDetached,
+			},
+			{
+				Name:  "logs",
+				Usage: "Print the tail of the background run log",
+				Flags: []cli.Flag{
+					&cli.IntFlag{Name: "lines", Aliases: []string{"n"}, Value: 40, Usage: "number of log lines to print"},
+				},
+				Action: logsDetached,
+			},
 		},
-		Action: runServer,
+		Action: foregroundOrBackground,
 	}
-
 	if err := app.Run(os.Args); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// foregroundOrBackground is the flag-free entry point: with --background (or
+// -d, or the `start` sub-command) it detaches and returns, otherwise it runs
+// the server in this terminal exactly as before.
+func foregroundOrBackground(cCtx *cli.Context) error {
+	if cCtx.Bool(daemon.BackgroundName) {
+		return startDetached(cCtx)
+	}
+	return runServer(cCtx)
 }
 
 func runServer(cCtx *cli.Context) error {
@@ -146,8 +190,22 @@ func runServer(cCtx *cli.Context) error {
 
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
 
-	<-signals // first signal → begin graceful shutdown
+	// A daemon records its PID so `9router-go stop|status|restart` can find it
+	// after the launching terminal is long gone.
+	if daemon.IsBackgroundProcess() {
+		daemon.RegisterPID()
+		defer daemon.UnregisterPID()
+	}
+
+	select {
+	case <-signals: // ^C or a supervisor's SIGTERM
+	case <-shutdown.StopRequested():
+		// The dashboard shutdown button and the updater's restart hook both
+		// land here. Windows cannot raise SIGTERM on itself, so this request
+		// channel is the only portable way to stop this process.
+	}
 
 	// A second signal force-quits immediately (e.g. a stream stuck mid-drain).
 	go func() {
@@ -158,5 +216,9 @@ func runServer(cCtx *cli.Context) error {
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer stopCancel()
-	return fxApp.Stop(stopCtx)
+	stopErr := fxApp.Stop(stopCtx)
+
+	// The listener is closed now, so a restart hook can bind the same port.
+	shutdown.RunAfterStop()
+	return stopErr
 }

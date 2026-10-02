@@ -41,8 +41,18 @@ func fetchCodexUsage(ctx context.Context, accessToken string) usageResult {
 	addCodexWindow(quotas, "spark_session", usage.SparkSession)
 	addCodexWindow(quotas, "spark_weekly", usage.SparkWeekly)
 
+	// The credit count rides in extra and is read by the dashboard's
+	// getCodexResetCreditCount, so it has to survive the empty-window path too:
+	// an account can hold reset credits while its rate-limit windows come back
+	// unparseable, and dropping the count there left the chooser button showing
+	// 0 for an account that actually had credits to spend.
+	resetCreditsExtra := map[string]any{"resetCredits": map[string]any{"availableCount": usage.ResetCredits}}
 	if len(quotas) == 0 {
-		return usageResult{plan: usage.Plan, message: "Codex connected, but no rate-limit windows were returned."}
+		return usageResult{
+			plan:    usage.Plan,
+			message: "Codex connected, but no rate-limit windows were returned.",
+			extra:   resetCreditsExtra,
+		}
 	}
 
 	// resetCredits is read by the dashboard at QuotaTrackerView.svelte's
@@ -50,7 +60,7 @@ func fetchCodexUsage(ctx context.Context, accessToken string) usageResult {
 	return usageResult{
 		plan:   usage.Plan,
 		quotas: quotas,
-		extra:  map[string]any{"resetCredits": map[string]any{"availableCount": usage.ResetCredits}},
+		extra:  resetCreditsExtra,
 	}
 }
 

@@ -38,7 +38,8 @@ func (h *DashboardHandler) HandleAuthLogin(w http.ResponseWriter, r *http.Reques
 	defer r.Body.Close()
 
 	var payload struct {
-		Password string `json:"password"`
+		Password    string `json:"password"`
+		NewPassword string `json:"newPassword"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		writePlainError(w, http.StatusBadRequest, "invalid JSON")
@@ -58,7 +59,17 @@ func (h *DashboardHandler) HandleAuthLogin(w http.ResponseWriter, r *http.Reques
 
 	if h.verifyDashboardPassword(payload.Password) {
 		auth.RecordLoginSuccess(ip)
-		if mustChangeDefaultPassword(r, raw) {
+		if payload.NewPassword != "" {
+			if err := h.changeDashboardPassword(payload.Password, payload.NewPassword); err != nil {
+				noStore(w)
+				handlerutil.WriteJSON(w, http.StatusBadRequest, map[string]any{
+					"success": false,
+					"error":   err.Error(),
+				})
+				return
+			}
+			raw = settingsOrEmpty(h)
+		} else if mustChangeDefaultPassword(r, raw) {
 			noStore(w)
 			handlerutil.WriteJSON(w, http.StatusForbidden, map[string]any{
 				"success": false,

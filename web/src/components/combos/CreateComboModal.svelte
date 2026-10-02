@@ -45,7 +45,50 @@
   let modalNameError = $state('')
   let editingIdx = $state<number | null>(null)
   let editDraft = $state('')
+  let draggedIdx = $state<number | null>(null)
+  let dragOverIdx = $state<number | null>(null)
 
+  function handleDragStart(e: DragEvent, idx: number) {
+    draggedIdx = idx
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move'
+      e.dataTransfer.setData('text/plain', String(idx))
+    }
+  }
+
+  function handleDragOver(e: DragEvent, idx: number) {
+    e.preventDefault()
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'move'
+    }
+    dragOverIdx = idx
+  }
+
+  function handleDragLeave(idx: number) {
+    if (dragOverIdx === idx) {
+      dragOverIdx = null
+    }
+  }
+
+  function handleDrop(e: DragEvent, targetIdx: number) {
+    e.preventDefault()
+    if (draggedIdx === null || draggedIdx === targetIdx) {
+      draggedIdx = null
+      dragOverIdx = null
+      return
+    }
+    const arr = [...models]
+    const [moved] = arr.splice(draggedIdx, 1)
+    arr.splice(targetIdx, 0, moved)
+    onUpdateModels(arr)
+    draggedIdx = null
+    dragOverIdx = null
+  }
+
+  function handleDragEnd() {
+    draggedIdx = null
+    dragOverIdx = null
+  }
   const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/
 
   function validateModalName(name: string): boolean {
@@ -130,8 +173,16 @@
         <div class="flex flex-col gap-1 max-h-[55vh] overflow-y-auto sm:max-h-[350px]">
           {#each models as model, idx}
             {@const caps = getModelCaps(model)}
-            <div class="group flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 bg-black/[0.02] hover:bg-black/[0.04] dark:bg-white/[0.02] dark:hover:bg-white/[0.04] transition-colors">
-              <GripVertical class="w-3.5 h-3.5 text-text-muted cursor-grab shrink-0" />
+            <div
+              class="group flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 transition-colors {draggedIdx === idx ? 'opacity-40 bg-brand-500/10' : dragOverIdx === idx ? 'border-2 border-brand-500 bg-brand-500/5' : 'bg-black/[0.02] hover:bg-black/[0.04] dark:bg-white/[0.02] dark:hover:bg-white/[0.04]'}"
+              draggable="true"
+              ondragstart={(e) => handleDragStart(e, idx)}
+              ondragover={(e) => handleDragOver(e, idx)}
+              ondragleave={() => handleDragLeave(idx)}
+              ondrop={(e) => handleDrop(e, idx)}
+              ondragend={handleDragEnd}
+            >
+              <GripVertical class="w-3.5 h-3.5 text-text-muted cursor-grab active:cursor-grabbing shrink-0" />
               <span class="text-[10px] font-medium text-text-muted w-3 text-center shrink-0">{idx + 1}</span>
               {#if editingIdx === idx}
                 <input

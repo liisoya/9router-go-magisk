@@ -208,7 +208,7 @@ func TestHandleJSONResponse_NonTranslate(t *testing.T) {
 	h, cleanup := setupHandlerForForward(t)
 	defer cleanup()
 
-	upstream := strings.NewReader(`{"id":"x"}`)
+	upstream := strings.NewReader(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`)
 	rec := httptest.NewRecorder()
 	if err := h.handleJSONResponse(context.Background(), rec, upstream, false, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -216,7 +216,7 @@ func TestHandleJSONResponse_NonTranslate(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
-	if rec.Body.String() != `{"id":"x"}` {
+	if rec.Body.String() != `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}` {
 		t.Errorf("expected passthrough body, got %s", rec.Body.String())
 	}
 }

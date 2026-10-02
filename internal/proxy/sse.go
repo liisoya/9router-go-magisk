@@ -1,9 +1,7 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -24,96 +22,7 @@ func WriteSSEHeaders(w http.ResponseWriter) http.Flusher {
 	return f
 }
 
-// SSECopy reads from upstream in a raw loop and writes each chunk to the client.
-// A simplified passthrough that does NOT parse SSE framing — use when translation is not needed.
-// onChunk is called for each chunk before writing (for metrics/TTFT tracking).
-// Returns the first upstream or write error so a truncated stream is not
-// reported as a successful completion.
-func SSECopy(w http.ResponseWriter, upstream io.Reader, flusher http.Flusher, onChunk func([]byte)) error {
-	// Allocate a local buffer instead of using the shared pool. The buffer is
-	// alive for the entire read loop, so there is no safe point to return it
-	// to the pool, and the pool would add a race window between ReleaseByteSlice
-	// and the next iteration's write/flush completing.
-	buf := make([]byte, 4096)
-	var tail [64]byte
-	tailLen := 0
-	hasTerminal := false
-	hasDone := false
-	seenSSE := false
-
-	for {
-		n, err := upstream.Read(buf)
-		if n > 0 {
-			chunk := buf[:n]
-			if onChunk != nil {
-				onChunk(chunk)
-			}
-			if _, werr := w.Write(chunk); werr != nil {
-				return fmt.Errorf("write stream to client: %w", werr)
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-
-			var checkBuf []byte
-			if tailLen > 0 {
-				checkBuf = append(tail[:tailLen], chunk...)
-			} else {
-				checkBuf = chunk
-			}
-			if bytes.Contains(chunk, []byte("data:")) {
-				seenSSE = true
-			}
-			if bytes.Contains(checkBuf, []byte("[DONE]")) {
-				hasDone = true
-				return nil
-			}
-			if bytes.Contains(checkBuf, []byte(`"finish_reason":`)) && !bytes.Contains(checkBuf, []byte(`"finish_reason":null`)) {
-				hasTerminal = true
-			}
-			if bytes.Contains(checkBuf, []byte(`"stop_reason":`)) && !bytes.Contains(checkBuf, []byte(`"stop_reason":null`)) {
-				hasTerminal = true
-			}
-			if bytes.Contains(checkBuf, []byte(`"message_stop"`)) {
-				hasTerminal = true
-			}
-
-			if n >= 64 {
-				copy(tail[:], chunk[n-64:])
-				tailLen = 64
-			} else {
-				copy(tail[:], chunk)
-				tailLen = n
-			}
-		}
-		if err != nil {
-			if err == io.EOF {
-				if seenSSE && !hasDone {
-					// PR #4079: If stream tail was not terminated with double newline, emit one
-					// so [DONE] or the synthesized terminal does not merge with prior line.
-					if tailLen > 0 && !bytes.HasSuffix(tail[:tailLen], []byte("\n\n")) {
-						if bytes.HasSuffix(tail[:tailLen], []byte("\n")) {
-							_, _ = w.Write([]byte("\n"))
-						} else {
-							_, _ = w.Write([]byte("\n\n"))
-						}
-					}
-					// If upstream ended without finish_reason, synthesize network_error terminal
-					// so clients like Oh My Pi do not fail with "Stream ended without finish_reason"
-					if !hasTerminal {
-						_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"network_error\"}]}\n\n"))
-					}
-					_, _ = w.Write([]byte("data: [DONE]\n\n"))
-					if flusher != nil {
-						flusher.Flush()
-					}
-				}
-				return nil
-			}
-			return fmt.Errorf("read upstream stream: %w", err)
-		}
-	}
-}
+// SSECopy lives in sse_copy.go.
 
 // DefaultHeartbeatInterval is the default period for sending SSE keep-alive ping comments.
 // Set to 15 seconds so strict clients (Oh My Pi / Cline / Roo) with 30-60s idle timeouts

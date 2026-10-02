@@ -1,12 +1,7 @@
 package chat
 
 import (
-	json "encoding/json/v2"
-	"fmt"
-	"net/http"
-	"strings"
-	"time"
-
+	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/log"
@@ -14,6 +9,10 @@ import (
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/proxy/oauth"
+	json "encoding/json/v2"
+	"fmt"
+	"net/http"
+	"strings"
 )
 
 // NewChatHandler creates a ChatHandler with the given repository and a streaming-capable HTTP client.
@@ -32,7 +31,7 @@ func NewChatHandler(repo *db.Repo, ts ...*shared.TokenSaverConfig) *ChatHandler 
 	var transport http.RoundTripper
 	if origTransport, ok := http.DefaultTransport.(*http.Transport); ok {
 		t := origTransport.Clone()
-		t.ResponseHeaderTimeout = 2 * time.Minute
+		constants.DefaultHTTPTransportConfig.Configure(t)
 		transport = proxy.NewFallbackTransport(t)
 	} else if fb, ok := http.DefaultTransport.(*proxy.FallbackTransport); ok {
 		transport = fb

@@ -251,6 +251,34 @@ export interface ConnectionUsageResponse {
   error?: string
 }
 
+// Codex reset credits. `selectionToken` is the field the dashboard selects
+// with; `code` carries the typed refusal the server raised (e.g. no_credit vs
+// nothing_to_reset) so the modal can say which happened.
+export interface CodexResetCredit {
+  selectionToken: string
+  resetType?: string
+  status?: string
+  grantedAt?: string
+  expiresAt?: string
+  title?: string
+  description?: string
+}
+
+export interface CodexResetCreditListResponse {
+  credits: CodexResetCredit[]
+  availableCount: number
+  error?: string
+  code?: string
+}
+
+export interface CodexResetCreditConsumeResponse {
+  outcome: 'reset' | 'alreadyRedeemed' | 'error'
+  selectionToken?: string
+  idempotencyKey?: string
+  error?: string
+  code?: string
+}
+
 export interface FreebuffSessionSwitchResponse {
   status: 'active'
   currentModel: string
@@ -453,32 +481,64 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json()
 }
 
+export function normalizeLastError(err: unknown): string | null {
+  if (err == null) return null
+  if (typeof err === 'string') return err
+  if (typeof err === 'object') {
+    const obj = err as Record<string, unknown>
+    if (typeof obj.message === 'string' && obj.message) return obj.message
+    if (typeof obj.error === 'string' && obj.error) return obj.error
+    if (typeof obj.msg === 'string' && obj.msg) return obj.msg
+    if (typeof obj.details === 'string' && obj.details) return obj.details
+    try {
+      return JSON.stringify(err)
+    } catch {
+      return String(err)
+    }
+  }
+  return String(err)
+}
+
+function numberField(source: Record<string, unknown>, key: string): number | null {
+  const value = source[key]
+  return typeof value === 'number' ? value : null
+}
+
+function stringField(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key]
+  return typeof value === 'string' ? value : null
+}
+
+export function normalizeConnection(c: ProviderConnection): ProviderConnection {
+  let parsed: Record<string, unknown> = {}
+  if (typeof c.data === 'string' && c.data) {
+    try {
+      parsed = JSON.parse(c.data)
+    } catch {}
+  }
+  const wire = c as unknown as Record<string, unknown>
+  const specific =
+    parsed.providerSpecificData && typeof parsed.providerSpecificData === 'object'
+      ? (parsed.providerSpecificData as Record<string, unknown>)
+      : parsed
+  return {
+    ...parsed,
+    ...c,
+    providerSpecificData: specific,
+    lastError: normalizeLastError(c.lastError) || normalizeLastError(parsed.lastError) || null,
+    errorCode: numberField(parsed, 'errorCode') ?? numberField(wire, 'errorCode'),
+    rateLimitedUntil: stringField(parsed, 'rateLimitedUntil') ?? stringField(wire, 'rateLimitedUntil'),
+    testStatus: stringField(wire, 'testStatus') || stringField(parsed, 'testStatus'),
+    expiresAt: stringField(parsed, 'expiresAt'),
+  } as ProviderConnection
+}
+
 // Connections API
 export const api = {
   // Connections
   getConnections: async () => {
     const conns = await request<ProviderConnection[]>('/api/connections')
-    return conns.map((c) => {
-      let parsed: Record<string, unknown> = {}
-      if (typeof c.data === 'string' && c.data) {
-        try {
-          parsed = JSON.parse(c.data)
-        } catch {}
-      }
-      const specific = (parsed.providerSpecificData && typeof parsed.providerSpecificData === 'object')
-        ? (parsed.providerSpecificData as Record<string, unknown>)
-        : parsed
-      return {
-        ...parsed,
-        ...c,
-        providerSpecificData: specific,
-        lastError: c.lastError || (typeof parsed.lastError === 'string' ? parsed.lastError : null),
-        errorCode: (typeof parsed.errorCode === 'number' ? parsed.errorCode : null),
-        rateLimitedUntil: (typeof parsed.rateLimitedUntil === 'string' ? parsed.rateLimitedUntil : null),
-        testStatus: c.testStatus || (typeof parsed.testStatus === 'string' ? parsed.testStatus : null),
-        expiresAt: (typeof parsed.expiresAt === 'string' ? parsed.expiresAt : null),
-      } as ProviderConnection
-    })
+    return conns.map(normalizeConnection)
   },
   createConnection: (payload: CreateConnectionPayload) =>
     request<{ success: boolean; id: string }>('/api/connections', {
@@ -881,7 +941,9 @@ export const api = {
   getProvidersClient: async (): Promise<{ connections: ProviderConnection[] }> => {
     try {
       const res = await request<{ connections: ProviderConnection[] }>('/api/providers/client')
-      if (res && res.connections) return res
+      if (res && res.connections) {
+        return { ...res, connections: res.connections.map(normalizeConnection) }
+      }
     } catch {}
     const conns = await api.getConnections().catch(() => [])
     return { connections: conns }
@@ -903,7 +965,9 @@ export const api = {
         pagination?: { page: number; pageSize: number; total: number; totalPages: number }
         totals?: { eligibleConnections: number; providerFilteredConnections: number }
       }>(`/api/providers/client${query ? `?${query}` : ''}`)
-      if (res && res.connections) return res
+      if (res && res.connections) {
+        return { ...res, connections: res.connections.map(normalizeConnection) }
+      }
     } catch {}
     const fallback = await api.getProvidersClient()
     return { connections: fallback.connections }
@@ -911,6 +975,21 @@ export const api = {
   getConnectionUsage: async (connectionId: string, force = false): Promise<ConnectionUsageResponse> => {
     return request<ConnectionUsageResponse>(`/api/usage/${encodeURIComponent(connectionId)}${force ? '?force=1' : ''}`)
   },
+  // Codex reset credits. The list is fetched when the user opens the chooser
+  // rather than with the quota poll, so the button stays cheap until it is used.
+  listCodexResetCredits: (connectionId: string) =>
+    request<CodexResetCreditListResponse>(
+      `/api/usage/${encodeURIComponent(connectionId)}/reset-credits`
+    ),
+  consumeCodexResetCredit: (connectionId: string, selectionToken: string, idempotencyKey?: string) =>
+    request<CodexResetCreditConsumeResponse>(
+      `/api/usage/${encodeURIComponent(connectionId)}/reset-credits/consume`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectionToken, idempotencyKey }),
+      }
+    ),
   // Tunnel & Tailscale
   getTunnelStatus: () =>
     request<TunnelStatusResponse>('/api/tunnel/status').catch(() => ({
@@ -1040,11 +1119,11 @@ export const api = {
     } catch {}
     return { requireLogin: false }
   },
-  login: async (password: string): Promise<LoginResponse> => {
+  login: async (password: string, newPassword?: string): Promise<LoginResponse> => {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ password, ...(newPassword ? { newPassword } : {}) }),
     })
     if (res.ok) {
       const data = await res.json()

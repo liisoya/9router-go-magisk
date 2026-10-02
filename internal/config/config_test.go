@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -264,5 +265,59 @@ func TestLoadConfig_HostAndBindAddr(t *testing.T) {
 	cfg2 := LoadConfig()
 	if cfg2.Host != "0.0.0.0" {
 		t.Errorf("expected host 0.0.0.0 from BIND_ADDR, got %s", cfg2.Host)
+	}
+}
+
+// The daemon CLI (status/stop/logs) runs in its own short-lived process and
+// resolves the data dir through this function, while the server resolves it
+// through viper — which reads .env. When the two disagreed, a deployment
+// configured only through .env reported "not running" against a live listener
+// and refused to stop it. DATA_DIR from the OS environment must still win.
+func TestResolveDataDir_PrefersOSEnvOverDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	writeDotEnv(t, dir, "DATA_DIR="+filepath.Join(dir, "from-file")+"\n")
+	t.Chdir(dir)
+	t.Setenv("DATA_DIR", filepath.Join(dir, "from-env"))
+
+	if got := ResolveDataDir(); got != filepath.Join(dir, "from-env") {
+		t.Fatalf("DATA_DIR from the environment must win, got %q", got)
+	}
+}
+
+// The regression itself: no DATA_DIR in the environment at all, which is the
+// shape of every compose deployment that configures the gateway through .env.
+func TestResolveDataDir_FallsBackToDotEnv(t *testing.T) {
+	dir := t.TempDir()
+fromFile := filepath.Join(dir, "from-file")
+	writeDotEnv(t, dir, "DATA_DIR="+fromFile+"\n")
+	t.Chdir(dir)
+	t.Setenv("DATA_DIR", "")
+
+	if got := ResolveDataDir(); got != fromFile {
+		t.Fatalf("ResolveDataDir() = %q, want the .env value %q", got, fromFile)
+	}
+}
+
+// A .env without DATA_DIR must not be answered with an empty string: the
+// platform default is still the correct answer.
+func TestResolveDataDir_DotEnvWithoutDataDirUsesDefault(t *testing.T) {
+	dir := t.TempDir()
+	writeDotEnv(t, dir, "PORT=20140\n")
+	t.Chdir(dir)
+	t.Setenv("DATA_DIR", "")
+
+	got := ResolveDataDir()
+	if got == "" {
+	t.Fatal("ResolveDataDir() returned empty; want the platform default")
+	}
+	if strings.Contains(got, ".env") {
+	t.Errorf("ResolveDataDir() = %q, want the platform default rather than a config path", got)
+	}
+}
+
+func writeDotEnv(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(content), 0600); err != nil {
+		t.Fatalf("write .env: %v", err)
 	}
 }

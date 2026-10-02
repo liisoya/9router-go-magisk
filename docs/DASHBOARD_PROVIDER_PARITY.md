@@ -455,7 +455,7 @@ pre-check proxy gagal, klasifikasi probe, window expiry) +
 punya `/api/auth/login` maupun `/api/auth/logout`; `GET /api/auth/status` dan
 `GET /api/settings/require-login` masih **stub hardcoded** `requireLogin:false` +
 `authenticated:true`. Akibatnya "login" lolos lewat fallback client-side di
-`client.ts` (password `Mantep210`/`123456` langsung di-set `9router_auth`), dan
+`client.ts` (password `123456`/`123456` langsung di-set `9router_auth`), dan
 dashboard tidak pernah benar-benar dijaga. Upstream (`:20128`) memakai cookie
 sesi JWT `auth_token` + `dashboardGuard`.
 
@@ -489,7 +489,7 @@ bukan `false`; bypass `x-9r-cli-token`).
   dan di-mount di grup `RequireDashboardAuth` (engine/LLM tetap di grup
   `RequireApiKey`). Route manajemen yang pindah tetap menerima API key, jadi CLI
   tidak berubah.
-- **Frontend**: `api.login` tidak lagi mem-fake sukses untuk `Mantep210`/`123456`
+- **Frontend**: `api.login` tidak lagi mem-fake sukses untuk `123456`/`123456`
   (fallback 404 dihapus) — kegagalan asli kini tampil sebagai error; `checkRequireLogin`
   mengembalikan `authenticated`; `App.svelte` mengutamakan `authenticated` dari
   server lalu flag `9router_auth`.

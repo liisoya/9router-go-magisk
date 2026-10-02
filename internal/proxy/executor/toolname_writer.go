@@ -29,10 +29,17 @@ func NewToolNameRestoringWriter(w http.ResponseWriter, toolNameMap map[string]st
 	if w == nil || len(toolNameMap) == 0 {
 		return w
 	}
-	if _, already := w.(*toolNameRestoringWriter); already {
+	if existing, already := w.(*toolNameRestoringWriter); already {
+		for k, v := range toolNameMap {
+			existing.toolNameMap[k] = v
+		}
 		return w
 	}
-	return &toolNameRestoringWriter{ResponseWriter: w, toolNameMap: toolNameMap}
+	m := make(map[string]string, len(toolNameMap))
+	for k, v := range toolNameMap {
+		m[k] = v
+	}
+	return &toolNameRestoringWriter{ResponseWriter: w, toolNameMap: m}
 }
 
 func (w *toolNameRestoringWriter) Write(p []byte) (int, error) {

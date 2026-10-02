@@ -251,6 +251,49 @@ func TestHandleAuthLogin_RemoteDefaultPasswordMustChange(t *testing.T) {
 	}
 }
 
+func TestHandleAuthLogin_RemoteDefaultPasswordRotation(t *testing.T) {
+	authTestEnv(t)
+	auth.ResetLoginLimiter()
+	repo, cleanup := setupTestDB(t)
+	defer cleanup()
+	h := NewDashboardHandler(repo)
+
+	// Remote request supplying newPassword alongside default password rotates and succeeds
+	body := `{"password":"123456","newPassword":"custom-new-password"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(body))
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Host = "203.0.113.10:20130"
+	rec := httptest.NewRecorder()
+	h.HandleAuthLogin(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for password rotation, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["success"] != true || out["mustChangePassword"] != false {
+		t.Errorf("expected success=true and mustChangePassword=false, got %v", out)
+	}
+	hasSessionCookie := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == auth.CookieName && c.Value != "" {
+			hasSessionCookie = true
+		}
+	}
+	if !hasSessionCookie {
+		t.Error("successful rotation must issue a session cookie")
+	}
+
+	// Verify that the new password is now stored and works
+	if !h.verifyDashboardPassword("custom-new-password") {
+		t.Error("new password must verify successfully")
+	}
+	if h.verifyDashboardPassword("123456") {
+		t.Error("old default password must no longer verify")
+	}
+}
+
 func TestHandleAuthLogin_TunnelAndSSOGates(t *testing.T) {
 	authTestEnv(t)
 	repo, cleanup := setupTestDB(t)

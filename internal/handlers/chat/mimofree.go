@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/constants"
+	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/translator"
 )
@@ -75,6 +76,11 @@ func (h *ChatHandler) MimoFreeChat(ctx context.Context, w http.ResponseWriter, b
 	}
 
 	upstreamBody := injectMimoMarker(body)
+	fittedBody, fittedToolMap := translator.FitToolNames(upstreamBody)
+	if len(fittedToolMap) > 0 {
+		upstreamBody = fittedBody
+		w = executor.NewToolNameRestoringWriter(w, fittedToolMap)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", mimoChatURL, bytes.NewReader(upstreamBody))
 	if err != nil {

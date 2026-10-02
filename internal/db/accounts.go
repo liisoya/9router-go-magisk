@@ -36,6 +36,86 @@ func (r *Repo) LockConnectionModel(connID, model string, durationSec int, backof
 	return nil
 }
 
+// ConnectionCooldownUntil reads the account-scoped quota cooldown a connection
+// carries in its data blob, mirroring upstream filterAvailableAccounts
+// (open-sse/services/accountFallback.js:180), which skips any account whose
+// rateLimitedUntil is still in the future.
+//
+// Unlike the model lock this cooldown is not keyed by model, which is what
+// catches a quota spent account-wide, and it is the only quota cooldown the
+// selector can consult when the request carries no model at all. An account
+// parked for a rejected OAuth grant carries its own timestamp instead; read
+// both through ConnectionBlockedUntil.
+//
+// A missing, empty or unparseable value reports "not in cooldown" so a
+// malformed field can never take routing down.
+func ConnectionCooldownUntil(rawData string) (time.Time, bool) {
+	raw, ok := parseConnData(rawData)
+	if !ok {
+		return time.Time{}, false
+	}
+	return readTimestampField(raw, "rateLimitedUntil")
+}
+
+// LockConnectionRateLimit stores the account-scoped cooldown and the error
+// that caused it, mirroring upstream applyErrorState
+// (open-sse/services/accountFallback.js:216). The dashboard already reads
+// rateLimitedUntil to render "reset at", but nothing in the Go port ever
+// wrote it, so that field was always empty and the selector had no
+// account-scoped signal to skip on.
+func (r *Repo) LockConnectionRateLimit(connID string, until time.Time, backoffLevel, status int, errText string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	lastError := map[string]any{
+		"status":    status,
+		"message":   errText,
+		"timestamp": now,
+	}
+	payload, err := json.Marshal(lastError)
+	if err != nil {
+		return fmt.Errorf("marshal last error for %s: %w", connID, err)
+	}
+	_, err = r.db.Exec(
+		`UPDATE providerConnections
+		 SET data = json_set(data,
+		   '$.rateLimitedUntil', ?,
+		   '$.backoffLevel', ?,
+		   '$.lastError', json(?),
+		   '$.status', 'error'),
+		     updatedAt = ?
+		 WHERE id = ?`,
+		until.UTC().Format(time.RFC3339), backoffLevel, string(payload), now, connID,
+	)
+	if err != nil {
+		return fmt.Errorf("lock connection rate limit %s: %w", connID, err)
+	}
+	return nil
+}
+
+// ClearConnectionRateLimit drops the account-scoped cooldown after a request
+// was served, mirroring upstream resetAccountState
+// (open-sse/services/accountFallback.js:198). Without it a recovered account
+// would stay skipped until the cooldown expired on its own. The per-model
+// locks are deliberately left alone: a success on one model must not unlock a
+// model that is still in cooldown.
+func (r *Repo) ClearConnectionRateLimit(connID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := r.db.Exec(
+		`UPDATE providerConnections
+		 SET data = json_set(data,
+		   '$.rateLimitedUntil', NULL,
+		   '$.lastError', NULL,
+		   '$.status', 'active',
+		   '$.backoffLevel', 0),
+		     updatedAt = ?
+		 WHERE id = ?`,
+		now, connID,
+	)
+	if err != nil {
+		return fmt.Errorf("clear connection rate limit %s: %w", connID, err)
+	}
+	return nil
+}
+
 // IsConnectionModelLocked checks whether the given connection has an active
 // modelLock_<model> field in its data JSON blob. Returns true when the
 // timestamp is in the future.
@@ -100,6 +180,8 @@ func (r *Repo) ResetConnectionHealthState(connID string) error {
 
 	dataMap["errorCode"] = nil
 	dataMap["rateLimitedUntil"] = nil
+	dataMap["oauthLockedUntil"] = nil
+	dataMap["oauthFailureCount"] = 0
 	dataMap["backoffLevel"] = 0
 
 	for k := range dataMap {

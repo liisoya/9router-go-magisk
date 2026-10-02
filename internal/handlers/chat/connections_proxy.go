@@ -1,12 +1,11 @@
 package chat
 
 import (
+	"9router/proxy/internal/constants"
+	"9router/proxy/internal/log"
 	"net/http"
 	"net/url"
 	"sync"
-	"time"
-
-	"9router/proxy/internal/log"
 )
 
 // maxProxyClients caps rotating-proxy growth: each entry pins a Transport
@@ -124,14 +123,9 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) *http.Cli
 		if origT, ok := http.DefaultTransport.(*http.Transport); ok {
 			baseTransport = origT.Clone()
 		} else {
-			baseTransport = &http.Transport{
-				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			}
+			baseTransport = constants.DefaultHTTPTransportConfig.NewTransport()
 		}
+		constants.DefaultHTTPTransportConfig.Configure(baseTransport)
 		baseTransport.Proxy = http.ProxyURL(parsedURL)
 		client = &http.Client{
 			Transport: baseTransport,

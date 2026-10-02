@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"sync"
 	"time"
 )
 
@@ -131,14 +134,35 @@ func TestStreamWriterErrors(t *testing.T) {
 	}
 }
 
+// mockResponseWriter is written from the heartbeat goroutine while the test
+// reads it, so every field is behind a mutex. The embedded buffer cannot be
+// locked on its own, so writes are serialized through w and String reads
+// through a snapshot.
 type mockResponseWriter struct {
-	bytes.Buffer
+	mu      sync.Mutex
+	buf     bytes.Buffer
 	header  http.Header
 	code    int
 	flushed bool
 }
 
+// String snapshots the buffer under the lock, so a test never reads a buffer
+// the heartbeat goroutine is appending to.
+func (m *mockResponseWriter) String() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.buf.String()
+}
+
+func (m *mockResponseWriter) Write(p []byte) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.buf.Write(p)
+}
+
 func (m *mockResponseWriter) Header() http.Header {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.header == nil {
 		m.header = make(http.Header)
 	}
@@ -146,12 +170,24 @@ func (m *mockResponseWriter) Header() http.Header {
 }
 
 func (m *mockResponseWriter) WriteHeader(code int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.code = code
 }
 
 func (m *mockResponseWriter) Flush() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.flushed = true
 }
+
+// wasFlushed reports whether Flush was called at least once.
+func (m *mockResponseWriter) wasFlushed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.flushed
+}
+
 
 func TestHeartbeatWriter_EmitsKeepAliveWhenIdle(t *testing.T) {
 	rec := &mockResponseWriter{}
@@ -165,7 +201,7 @@ func TestHeartbeatWriter_EmitsKeepAliveWhenIdle(t *testing.T) {
 	if !strings.Contains(out, ": keep-alive\n\n") {
 		t.Errorf("expected keep-alive in output, got %q", out)
 	}
-	if !rec.flushed {
+	if !rec.wasFlushed() {
 		t.Errorf("expected flusher to be called")
 	}
 }
@@ -279,4 +315,186 @@ func TestSSECopy_SynthesizesTerminalOnAbruptClose(t *testing.T) {
 			t.Errorf("expected data: [DONE], got %q", out)
 		}
 	})
+}
+
+// TestSSECopy_InjectsStopBeforeBareDone covers the Oh My Pi failure
+// "OpenAI completions stream closed before a finish_reason was received": a
+// non-compliant upstream streams content deltas and then emits [DONE] with no
+// terminal finish_reason chunk.
+func TestSSECopy_InjectsStopBeforeBareDone(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream string
+	}{
+		{
+			name:   "deltas then DONE without finish_reason",
+			stream: "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n",
+		},
+		{
+			name:   "null finish_reason chunks then DONE",
+			stream: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+		},
+		{
+			name:   "DONE without trailing newline at EOF",
+			stream: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &mockResponseWriter{}
+			if err := SSECopy(rec, strings.NewReader(tt.stream), rec, nil); err != nil {
+				t.Fatalf("SSECopy failed: %v", err)
+			}
+			out := rec.String()
+			if !strings.Contains(out, `"finish_reason":"stop"`) {
+				t.Fatalf("expected injected stop terminal, got %q", out)
+			}
+			if strings.Contains(out, "network_error") {
+				t.Errorf("deliberate DONE must complete with stop, not network_error, got %q", out)
+			}
+			stopIdx := strings.Index(out, `"finish_reason":"stop"`)
+			doneIdx := strings.Index(out, "data: [DONE]")
+			if doneIdx < 0 {
+				t.Fatalf("expected [DONE] sentinel, got %q", out)
+			}
+			if stopIdx > doneIdx {
+				t.Errorf("terminal must precede [DONE], got %q", out)
+			}
+			if strings.Count(out, "[DONE]") != 1 {
+				t.Errorf("expected exactly 1 [DONE], got %d in %q", strings.Count(out, "[DONE]"), out)
+			}
+		})
+	}
+
+	t.Run("sentinel split across reads still gains terminal", func(t *testing.T) {
+		rec := &mockResponseWriter{}
+		raw := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
+		if err := SSECopy(rec, iotest.OneByteReader(strings.NewReader(raw)), rec, nil); err != nil {
+			t.Fatalf("SSECopy failed: %v", err)
+		}
+		out := rec.String()
+		if !strings.Contains(out, `"finish_reason":"stop"`) {
+			t.Errorf("expected injected stop terminal on split reads, got %q", out)
+		}
+		if strings.Count(out, "[DONE]") != 1 {
+			t.Errorf("expected exactly 1 [DONE], got %d in %q", strings.Count(out, "[DONE]"), out)
+		}
+	})
+
+	t.Run("[DONE] mentioned inside content does not end the stream", func(t *testing.T) {
+		rec := &mockResponseWriter{}
+		raw := "data: {\"choices\":[{\"delta\":{\"content\":\"say [DONE] now\"}}]}\n\n"
+		if err := SSECopy(rec, strings.NewReader(raw), rec, nil); err != nil {
+			t.Fatalf("SSECopy failed: %v", err)
+		}
+		out := rec.String()
+		if !strings.Contains(out, "say [DONE] now") {
+			t.Errorf("content must pass through untouched, got %q", out)
+		}
+		// No real sentinel arrived, so EOF synthesis (network_error + DONE)
+		// must still close the stream.
+		if !strings.Contains(out, `"finish_reason":"network_error"`) {
+			t.Errorf("expected EOF network_error synthesis, got %q", out)
+		}
+		if !strings.HasSuffix(out, "data: [DONE]\n\n") {
+			t.Errorf("expected stream to end with [DONE], got %q", out)
+		}
+	})
+
+	t.Run("read error closes the stream with an in-band error frame, not a finish_reason", func(t *testing.T) {
+		rec := &mockResponseWriter{}
+		upstream := io.MultiReader(
+			strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"),
+			iotest.ErrReader(errors.New("connection reset by peer")),
+		)
+		if err := SSECopy(rec, upstream, rec, nil); err == nil {
+			t.Fatal("expected the upstream read error to be reported")
+		}
+		out := rec.String()
+		// A client must be able to tell a dropped stream from a finished
+		// answer. A finish_reason says "stop"/"network_error", which every
+		// OpenAI client reads as a normal completion.
+		if !strings.Contains(out, `{"error":{"message":"upstream connection lost"`) {
+			t.Errorf("expected an in-band error frame, got %q", out)
+		}
+		if strings.Contains(out, "finish_reason") {
+			t.Errorf("abort must not fabricate a finish_reason, got %q", out)
+		}
+		if !strings.HasSuffix(out, "data: [DONE]\n\n") {
+			t.Errorf("expected the stream to close with [DONE], got %q", out)
+		}
+	})
+}
+
+// TestSSECopy_KeepsSingleTerminalOnCompliantStream pins that a stream the
+// upstream already terminated correctly is relayed untouched. sseHasNonNullValue
+// searched for `"finish_reason":` — two quotes before the colon, which no JSON
+// contains — so hasTerminal was always false and every compliant stream was
+// given a second terminal before its [DONE].
+func TestSSECopy_KeepsSingleTerminalOnCompliantStream(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream string
+	}{
+		{
+			// Real OpenAI frames carry id/object/created, which is what tells
+			// the upstream's own terminal apart from an injected one.
+			name: "OpenAI stream already closed with stop",
+			stream: "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
+				"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n",
+		},
+		{
+			name: "OpenAI stream already closed with tool_calls",
+			stream: "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
+				"data: {\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n" +
+				"data: [DONE]\n\n",
+		},
+		{
+			name: "Claude stream already closed with end_turn",
+			stream: "event: message_start\ndata: {\"type\":\"message_start\"}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
+				"data: [DONE]\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &mockResponseWriter{}
+			if err := SSECopy(rec, strings.NewReader(tt.stream), rec, nil); err != nil {
+				t.Fatalf("SSECopy failed: %v", err)
+			}
+			out := rec.String()
+			if got := strings.Count(out, sseStopTerminal); got != 0 {
+				t.Errorf("expected no injected stop terminal on an already-closed stream, got %d in %q", got, out)
+			}
+			if got := strings.Count(out, sseTruncatedTerminal); got != 0 {
+				t.Errorf("a complete stream must not be reported as truncated, got %q", out)
+			}
+			if got := strings.Count(out, "data: [DONE]"); got != 1 {
+				t.Errorf("expected exactly 1 [DONE], got %d in %q", got, out)
+			}
+		})
+	}
+}
+
+// TestSSECopy_QuotedTerminalInsideContentIsNotATerminal pins the key-position
+// requirement: content that quotes the field back is escaped JSON text, and
+// reading it as a terminal would leave the real stream unterminated.
+func TestSSECopy_QuotedTerminalInsideContentIsNotATerminal(t *testing.T) {
+	rec := &mockResponseWriter{}
+	stream := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"field: \\\"finish_reason\\\": \\\"stop\\\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	if err := SSECopy(rec, strings.NewReader(stream), rec, nil); err != nil {
+		t.Fatalf("SSECopy failed: %v", err)
+	}
+	out := rec.String()
+	if !strings.Contains(out, "field:") {
+		t.Fatalf("content did not survive, got %q", out)
+	}
+	if got := strings.Count(out, sseStopTerminal); got != 1 {
+		t.Errorf("expected exactly 1 injected terminal, got %d in %q", got, out)
+	}
 }

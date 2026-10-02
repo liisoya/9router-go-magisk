@@ -130,6 +130,17 @@ func TestLoginClientIPIgnoresSpoofedHeaders(t *testing.T) {
 	}
 }
 
+func TestLoginClientIP_DirectRemoteAddr(t *testing.T) {
+	ResetLoginLimiter()
+	t.Setenv("TRUST_PROXY", "")
+	t.Setenv("TRUST_CLOUDFLARE", "")
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+	req.RemoteAddr = "172.17.0.1:45678"
+	if got := LoginClientIP(req); got != "172.17.0.1" {
+		t.Errorf("clean direct request must use remote address host, got %q, want 172.17.0.1", got)
+	}
+}
+
 func TestTunnelLoginBlocked(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
 	req.Host = "tunnel.example.com"

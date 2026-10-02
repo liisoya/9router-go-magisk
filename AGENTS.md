@@ -23,6 +23,21 @@ Whenever you implement features, fix bugs, add providers, update routing logic, 
 3. **Changelog Tracking**:
    - When porting features or fixes, reference the upstream commit/issue/PR in `CHANGELOG.md` (e.g. `upstream decolua/9router#4197 parity`).
 
+### Secondary Reference: OmniRoute (source of many feature requests)
+
+Some feature issues in this repo are not parity requests against `decolua/9router` — they are **port requests sourced from OmniRoute**, cited by a file path inside that repo (e.g. issue #38 cites `src/lib/usage/codexResetCredits.ts`).
+
+- **Reference Repository**: `https://github.com/diegosouzapw/OmniRoute` — TypeScript/Next.js, MIT, a *sibling* gateway project (not this repo's upstream). It vendors its own `open-sse/` tree under the `@omniroute/open-sse` package alias, so its provider/executor layout is recognizable but **not** the same as `decolua/9router`'s.
+- **When an issue cites OmniRoute**, treat the cited file as the *feature specification*. Do not guess its contents and do not port from memory.
+
+**OmniRoute Porting Protocol**
+1. **Fetch the cited file first**, from raw: `https://raw.githubusercontent.com/diegosouzapw/OmniRoute/main/<path>`. Fetch the related UI component too (dashboard modals live under its `src/app/` tree) — the port must match the dashboard *behavior*, not just the API shape.
+2. **Port the contract, not the code**: endpoints, request/response payloads, error status codes, and filter/sort rules. Never transliterate TypeScript into Go (see §4.A).
+3. **Map by responsibility** — OmniRoute `src/lib/usage/*.ts` → `internal/handlers/dashboard/` + `web/src/api/client.ts`; `open-sse/executors/` → `internal/proxy/executor/`; `src/app/` components → `web/src/`.
+4. **OmniRoute is secondary**. Where it conflicts with `decolua/9router`, the §1 parity rules win; record the deliberate divergence in `CHANGELOG.md`.
+5. **Provider IDs are not portable verbatim.** OmniRoute has its own catalog. Map to `9router-go` provider IDs and obey §3 (strict provider isolation — no cross-provider aliasing or model hijacking).
+6. **Preserve upstream error semantics.** OmniRoute surfaces typed error classes with explicit status codes (e.g. `409 no_credit`); port that distinction rather than collapsing every upstream failure into one generic error.
+
 ---
 
 ## 2. Architecture & Codebase Mapping
@@ -206,6 +221,18 @@ Use `net/http/httptest` (`httptest.NewRecorder()`, `httptest.NewRequest()`, and 
    - Tag live/upstream-dependent network tests clearly (e.g. `live_e2e_test.go` or guard with env checks) so that standard unit tests pass completely offline.
 4. **Deterministic & Isolated**:
    - Tests must clean up temporary database files or use in-memory SQLite (`:memory:`) where applicable.
+
+### D. Feature Integration Tests (`internal/integration`, `integration` build tag)
+
+Unit tests call handlers directly or mount a hand-built router, so they cannot see a regression in the wiring production actually uses. The suite in `internal/integration/` closes that gap: it boots `app.ProvideRouter` (the real middleware stack and route table) on a real HTTP listener against a temporary SQLite database, with every provider call intercepted by a fake `httptest` upstream seeded through `providerConnections.data.baseUrl`. `internal/integration/bootfx/` boots the full fx graph — `DatabaseModule` and `ServerModule` included — once, in its own test binary.
+
+1. **Run them with `make test-integration`** (or `go test -tags=integration ./internal/integration/...`). The tag keeps `go test ./...` fast; the CI `integration` job runs the suite on every PR, so a regression in routing, auth, account rotation, or usage accounting fails on the PR that introduces it instead of on a user's next request.
+2. **Use the harness helpers, never raw setup.** `newProviderEnv(t)` is the common fixture: an `Env` with one DeepSeek connection aimed at a fake upstream. `newEnv(t)` is the bare gateway. Both open the database, apply the real schema bootstrap, and seed a client API key; `newEnv` also pins the token savers off so upstream payloads stay comparable byte for byte. Add connections with `env.AddConnection(t, ...)` and combos with `env.AddCombo(t, ...)`.
+3. **Every helper takes the running test as its first argument.** `Env` holds no `*testing.T`: capturing the parent would make a failing `t.Run` call `FailNow` on the parent from the subtest's goroutine, which the `testing` package reports as "subtest may have called FailNow on a parent test" and attributes to the wrong line.
+4. **Never let a test reach the network.** A provider must be an `env.NewUpstream(t, ...)` fake, and the fake must assert what the gateway sent (`upstream.Last(t).Model(t)`, `.Header`). `AddConnection` reads the stored row back and fails when the fake URL did not persist, because an empty `data.baseUrl` falls through to the real provider URL from `providers.KnownProviders`. No real provider credential may be required for the suite to pass.
+5. **Do not boot `app.DatabaseModule` outside `bootfx/`, and boot it only once there.** `db.InitGlobalDatabase` is a process-wide `sync.Once` and `fxApp.Stop()` closes that handle for good, so a second boot in the same binary would reuse a closed database and an already-cancelled shutdown context.
+6. **Assert observable behaviour, not wiring.** A useful case pins a contract a client depends on (the status a client sees, the model the provider receives, the row written to `usageHistory`). Testing that a route exists, or that a handler forwards to itself, proves nothing. When a subtest looks for one row in a listed collection, select it by id and fail when it is absent — a loop that only errors on a match passes vacuously when the list comes back empty.
+
 ---
 
 ## 6. Frontend Engineering & Svelte 5 Standards (`web/`)
@@ -354,6 +381,10 @@ When tasked with syncing a feature, bugfix, or provider from upstream:
 # Run unit tests
 rtk go test ./...
 rtk go test ./internal/providers/... -v
+
+# Run the feature integration suite (real router, real DB, fake upstreams)
+make test-integration
+make vet-integration
 
 # Build frontend SPA (Svelte 5 / Vite 8 via Bun)
 make web-build

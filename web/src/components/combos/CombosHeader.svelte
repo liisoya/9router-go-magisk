@@ -8,9 +8,9 @@
   let { onCreateClick }: Props = $props()
 </script>
 
-<div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+<div class="flex flex-col gap-4">
   <div class="min-w-0">
-    <p class="text-sm text-text-muted mt-1">
+    <p class="text-sm text-text-muted">
       Group models under one name, then pick a strategy per combo:
     </p>
     <ul class="text-sm text-text-muted mt-2 flex flex-col gap-1">
@@ -27,8 +27,16 @@
       </li>
     </ul>
   </div>
-  <div class="flex w-full flex-col gap-2 sm:w-auto sm:items-stretch">
-    <Button icon="add" onclick={onCreateClick} class="w-full sm:w-auto whitespace-nowrap">
+
+  <!-- Upstream parity: the header carries one control. Bulk actions live in the
+       selection bar next to the combos, so a destructive button never sits
+       permanently beside Create. -->
+  <div
+    class="flex flex-wrap items-center gap-2 border-t border-border pt-4"
+    role="group"
+    aria-label="Combo actions"
+  >
+    <Button icon="add" size="sm" onclick={onCreateClick} class="whitespace-nowrap">
       Create Combo
     </Button>
   </div>

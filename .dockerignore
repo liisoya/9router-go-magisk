@@ -1,3 +1,15 @@
+# Patterns here are matched against the path relative to the build context
+# root, so an entry without a slash only matches at the root level.
+#
+# `9router-go` below therefore excludes the compiled binary at the repo root
+# and NOT cmd/9router-go/ — which is the package the Dockerfile builds. Widening
+# it to `**/9router-go` would empty cmd/9router-go/ out of the context and the
+# build would fail with no Go files. Same for `9router-go-*`.
+#
+# `*.pgo` must never be added: cmd/9router-go/default.pgo is what Go's default
+# -pgo=auto consumes, and dropping it from the context silently produces an
+# unoptimized binary that still builds fine. The `docker` job in ci.yml asserts
+# it is still in the image.
 .git
 .github
 node_modules

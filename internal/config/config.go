@@ -74,9 +74,22 @@ func ProvideConfig(v *viper.Viper) *Config {
 }
 
 // ResolveDataDir returns the base data directory: DATA_DIR env, else the
-// platform default (~/.9router, or %APPDATA%/9router on Windows).
+// value from .env, else the platform default (~/.9router, or
+// %APPDATA%/9router on Windows).
+//
+// The .env read is load-bearing, not a convenience. The server resolves its
+// data dir through viper (LoadConfigFromViper), which does read .env, while
+// `9router-go status|stop|logs` runs in a separate short-lived process that
+// never boots the server. Reading only os.Getenv here meant a deployment
+// configured purely through .env — every Docker/compose setup — had the CLI
+// look at a different directory than the running daemon: status reported "not
+// running" against a live listener, stop refused to kill it, and logs claimed
+// no log existed. Both sides now answer the same question the same way.
 func ResolveDataDir() string {
-	if dataDir := os.Getenv("DATA_DIR"); dataDir != "" {
+	if dataDir := strings.TrimSpace(os.Getenv("DATA_DIR")); dataDir != "" {
+		return dataDir
+	}
+	if dataDir := dataDirFromEnvFile(); dataDir != "" {
 		return dataDir
 	}
 	if homeDir, err := os.UserHomeDir(); err == nil {
@@ -90,6 +103,38 @@ func ResolveDataDir() string {
 		return filepath.Join(homeDir, ".9router")
 	}
 	return ".9router"
+}
+
+// dataDirFromEnvFile reads DATA_DIR out of the .env next to the binary or in
+// the working directory. Viper owns the file format, so this reuses it rather
+// than hand-parsing KEY=VALUE and drifting from what the server accepted.
+func dataDirFromEnvFile() string {
+	for _, path := range envFileCandidates() {
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		v := viper.New()
+		v.SetConfigFile(path)
+		v.SetConfigType("env")
+		if err := v.ReadInConfig(); err != nil {
+			continue
+		}
+		if dir := strings.TrimSpace(v.GetString("DATA_DIR")); dir != "" {
+			return dir
+		}
+	}
+	return ""
+}
+
+// envFileCandidates lists the .env locations the server itself reads: the one
+// in the working directory, then the one beside the executable so a daemon
+// started from another directory still finds the same config its CLI reports on.
+func envFileCandidates() []string {
+	candidates := []string{".env"}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), ".env"))
+	}
+	return candidates
 }
 
 // LoadConfig loads the configuration from environment variables, .env file, and platform defaults using Viper.

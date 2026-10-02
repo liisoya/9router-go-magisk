@@ -944,3 +944,28 @@ func TestToMessageArray_ValidArray(t *testing.T) {
 		t.Errorf("expected length 1, got %d", len(got))
 	}
 }
+
+// ============================================================
+// Benchmarks
+// ============================================================
+
+func BenchmarkCompressMessages(b *testing.B) {
+	diff := longGitDiff()
+	body := fmt.Sprintf(`{"messages":[{"role":"user","content":[{"type":"tool_result","content":%q}]}]}`, diff)
+	data := []byte(body)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = CompressMessages(data)
+	}
+}
+
+func BenchmarkInjectSystemPrompt(b *testing.B) {
+	data := []byte(`{"messages":[{"role":"user","content":"hello world"}],"model":"mock"}`)
+	prompt := "You are a concise, helpful assistant."
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = InjectSystemPrompt(data, prompt)
+	}
+}

@@ -316,6 +316,267 @@ func TestHandleExportImportDatabase_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestHandleExportImportDatabase_ZipFormat(t *testing.T) {
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	// Seed initial data
+	if _, err := repo.RawDB().Exec(
+		`INSERT INTO providerConnections (id, provider, authType, isActive, priority, data, createdAt, updatedAt)
+		 VALUES ('conn-zip', 'deepseek', 'apikey', 1, 1, '{"apiKey":"sk-zip","model":"deepseek-chat"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+
+	// Export with format=zip
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/database?format=zip", nil)
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export zip failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/zip" {
+		t.Errorf("expected Content-Type application/zip, got %q", ct)
+	}
+	zipBytes := rec.Body.Bytes()
+	if len(zipBytes) < 4 || zipBytes[0] != 'P' || zipBytes[1] != 'K' {
+		t.Fatalf("expected zip signature PK, got %v", zipBytes[:4])
+	}
+
+	// Wipe
+	if _, err := repo.RawDB().Exec(`DELETE FROM providerConnections`); err != nil {
+		t.Fatalf("wipe failed: %v", err)
+	}
+
+	// Import the zip archive
+	req = httptest.NewRequest(http.MethodPost, "/api/settings/database", bytes.NewReader(zipBytes))
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	req.Header.Set("Content-Type", "application/zip")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import zip failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify restored
+	var data string
+	if err := repo.RawDB().QueryRow(`SELECT data FROM providerConnections WHERE id='conn-zip'`).Scan(&data); err != nil {
+		t.Fatalf("query restored connection: %v", err)
+	}
+	if !strings.Contains(data, "sk-zip") {
+		t.Errorf("expected restored connection with sk-zip, got %s", data)
+	}
+}
+
+// The backup file lands in the user's Downloads folder and gets shared like
+// any other file, so credentials must not travel in it: the dashboard
+// password hash and the live OIDC client secret are stripped, while ordinary
+// settings still restore. See issue #35.
+func TestHandleExportDatabase_StripsSecrets(t *testing.T) {
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	const passwordHash = "$2a$10$BI.8Ja5GPfZ36AD1n.UFtuUuoh9CDUyIhpzyzpnIFYMesO.fbe.fe"
+	const oidcSecret = "super-secret-idp-client-value"
+	seeded := map[string]any{
+		"password":         passwordHash,
+		"oidcClientSecret": oidcSecret,
+		"oidcIssuerUrl":    "https://idp.example.com",
+		"requireLogin":     true,
+	}
+	if err := repo.UpdateSettingsRaw(seeded); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/database", nil)
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export failed: %d %s", rec.Code, rec.Body.String())
+	}
+	exported := rec.Body.Bytes()
+
+	var payload map[string]any
+	if err := json.Unmarshal(exported, &payload); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	settings, ok := payload["settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a settings object in the backup, got %#v", payload["settings"])
+	}
+
+	for _, key := range []string{"password", "oidcClientSecret"} {
+		if _, leaked := settings[key]; leaked {
+			t.Errorf("%s must not be written to the backup file", key)
+		}
+	}
+	// hasPassword is a response-only derived field. Restoring it into the
+	// settings row would persist a value that nothing reads back.
+	if _, injected := settings["hasPassword"]; injected {
+		t.Error("backup must not carry the derived hasPassword field")
+	}
+	// Stripping must be surgical — non-secret settings still restore.
+	if settings["oidcIssuerUrl"] != "https://idp.example.com" {
+		t.Errorf("non-secret settings must survive, got %#v", settings["oidcIssuerUrl"])
+	}
+	if requireLogin, ok := settings["requireLogin"].(bool); !ok || !requireLogin {
+		t.Errorf("requireLogin must survive, got %#v", settings["requireLogin"])
+	}
+
+	// Neither credential may appear anywhere in the serialized bytes.
+	if strings.Contains(string(exported), passwordHash) {
+		t.Error("password hash leaked into the backup bytes")
+	}
+	if strings.Contains(string(exported), oidcSecret) {
+		t.Error("oidc client secret leaked into the backup bytes")
+	}
+}
+
+// A sanitised backup must restore configuration without ever downgrading auth:
+// import wipes the settings row, so if the stripped keys were simply absent the
+// dashboard would fall back to the well-known default password and lose OIDC.
+// See issue #35.
+func TestHandleImportDatabase_PreservesLiveSecrets(t *testing.T) {
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	const oidcSecret = "super-secret-idp-client-value"
+	hash, err := bcrypt.GenerateFromPassword([]byte("live-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateSettingsRaw(map[string]any{
+		"password":         string(hash),
+		"oidcClientSecret": oidcSecret,
+		"oidcIssuerUrl":    "https://idp.example.com",
+	}); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	// A backup as this build writes it: no secret keys at all.
+	backup := map[string]any{
+		"settings":            map[string]any{"oidcIssuerUrl": "https://idp.example.com", "requireLogin": true},
+		"providerConnections": []any{},
+		"combos":              []any{},
+		"apiKeys":             []any{},
+	}
+	body, err := json.Marshal(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/database", bytes.NewReader(body))
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	restored, err := repo.GetSettingsRaw()
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if restored["password"] != string(hash) {
+		t.Errorf("import must keep the live password hash, got %#v", restored["password"])
+	}
+	if restored["oidcClientSecret"] != oidcSecret {
+		t.Errorf("import must keep the live oidc client secret, got %#v", restored["oidcClientSecret"])
+	}
+	// The payload still wins for everything it does carry.
+	if restored["oidcIssuerUrl"] != "https://idp.example.com" {
+		t.Errorf("payload settings must be restored, got %#v", restored["oidcIssuerUrl"])
+	}
+	if requireLogin, ok := restored["requireLogin"].(bool); !ok || !requireLogin {
+		t.Errorf("requireLogin must be restored, got %#v", restored["requireLogin"])
+	}
+
+	// An empty secret in the payload means "not present here", not "clear
+	// it" — it must not wipe the hash either.
+	body, err = json.Marshal(map[string]any{
+		"settings":            map[string]any{"password": "", "oidcClientSecret": ""},
+		"providerConnections": []any{},
+		"combos":              []any{},
+		"apiKeys":             []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/settings/database", bytes.NewReader(body))
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second import failed: %d %s", rec.Code, rec.Body.String())
+	}
+	emptied, err := repo.GetSettingsRaw()
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if emptied["password"] != string(hash) {
+		t.Errorf("an empty payload password must not clear the stored hash, got %#v", emptied["password"])
+	}
+	if emptied["oidcClientSecret"] != oidcSecret {
+		t.Errorf("an empty payload secret must not clear the stored value, got %#v", emptied["oidcClientSecret"])
+	}
+}
+
+// A legacy backup taken before the export sanitiser still carries its own
+// password hash, and that value must win over the live one — otherwise
+// restoring an old backup would silently keep the current password instead of
+// the one the user asked to go back to.
+func TestHandleImportDatabase_LegacyBackupPasswordWins(t *testing.T) {
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	live, err := bcrypt.GenerateFromPassword([]byte("live-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := bcrypt.GenerateFromPassword([]byte("legacy-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateSettingsRaw(map[string]any{"password": string(live)}); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"settings":            map[string]any{"password": string(legacy)},
+		"providerConnections": []any{},
+		"combos":              []any{},
+		"apiKeys":             []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/database", bytes.NewReader(body))
+	req.Header.Set(cliTokenHeader, auth.CLIToken())
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	restored, err := repo.GetSettingsRaw()
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if restored["password"] != string(legacy) {
+		t.Error("a backup carrying its own password hash must win over the live one")
+	}
+}
+
 // TestHandleImportDatabase_ClientContract pins the wire contract the Svelte
 // dashboard uses: a raw JSON body (never multipart/form-data) and the
 // x-9r-password header for re-auth, matching Next's settings/database route.

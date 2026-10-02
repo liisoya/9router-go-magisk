@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import {
     api,
+    normalizeLastError,
     type ConnectionUsageResponse,
     type CreateConnectionPayload,
     type FreebuffSessionStatusResponse,
@@ -11,7 +12,7 @@
     type ProxyPool,
     type Settings
   } from '../../api/client'
-  import { PROVIDER_CATALOG, type ProviderCatalogItem } from '../../lib/providers'
+  import { PROVIDER_CATALOG, PROVIDER_CATALOG_MAP, type ProviderCatalogItem } from '../../lib/providers'
   import {
     clearCallback,
     CODEX_REDIRECT_URI,
@@ -34,7 +35,7 @@
     getIconPath,
     isChatModel,
     type CustomModelData,
-    type ProviderModelItem,
+    type ModelItem,
     type SuggestedModel
   } from './types'
   import { proxyBadgeInfo } from './proxyBadge'
@@ -169,7 +170,7 @@
       (m) => (m.providerAlias === storageAlias || m.providerAlias === providerId) && isChatModel(m)
     )
   )
-  let allAvailableModels = $derived<ProviderModelItem[]>(
+  let allAvailableModels = $derived<ModelItem[]>(
     buildAvailableModels(builtInModels, providerCustomModels)
   )
   // Registry order, like upstream: `models` there is getModelsByProviderId()
@@ -283,6 +284,7 @@
 
   // Row UI state
   let activeProxyDropdownId = $state<string | null>(null)
+  let dropdownPos = $state<{ top: number; right: number }>({ top: 0, right: 0 })
   let updatingProxyConnId = $state<string | null>(null)
   let copiedModelId = $state<string | null>(null)
   let modelTestStatuses = $state<Record<string, 'ok' | 'error' | 'testing'>>({})
@@ -672,16 +674,16 @@
 
   // Load models, settings, proxy pools
   async function loadData() {
-    suggestedModels = []
     try {
       const [modelsData, settingsData, poolsData, aliasesData, capsData] = await Promise.all([
         fetchProviderModelsData(providerId, storageAlias),
         api.getSettings().catch(() => ({})),
         api.getProxyPools().catch(() => []),
         api.getModelAliases().catch(() => ({ aliases: {} })),
-        // Providers without a static catalog answer 404; the page then shows no
-        // capability icons and hides the thinking picker, same as upstream.
-        api.getModelCaps(providerId).catch(() => ({ caps: {} as Record<string, ModelCaps> })),
+        // Providers without a static catalog or compatible nodes do not have static caps.
+        !isCompatibleNode && (PROVIDER_CATALOG_MAP.has(providerId) || PROVIDER_CATALOG_MAP.has(storageAlias))
+          ? api.getModelCaps(providerId).catch(() => ({ caps: {} as Record<string, ModelCaps> }))
+          : Promise.resolve({ caps: {} as Record<string, ModelCaps> }),
       ])
       customModels = modelsData.customModels
       disabledModelIds = modelsData.disabledModelIds
@@ -709,7 +711,7 @@
       const thinking = (settingsData as any)?.providerThinking?.[providerId]
       thinkingLevel = thinking?.mode || 'auto'
       // Extract free provider proxy & rotation settings
-      if (strategy) {
+      if (strategy && !isSavingFreeProxy) {
         freeProxyPoolId = strategy.proxyPoolId || 'none'
         freeRotateStrategy = (strategy.rotateStrategy as 'none' | 'round-robin' | 'random') || 'none'
       }
@@ -845,7 +847,7 @@
     }
     // 4. Check errorCode 429 or lastError indicating rate limit / quota
     const errCode = (conn as unknown as { errorCode?: number }).errorCode
-    const lastErr = conn.lastError || ''
+    const lastErr = normalizeLastError(conn.lastError) || ''
     if (
       errCode === 429 ||
       lastErr.includes('429') ||
@@ -870,9 +872,17 @@
     return null
   }
 
+  let lastLoadedProviderId = ''
   $effect(() => {
-    if (providerId) {
-      loadData()
+    const pid = providerId
+    if (pid) {
+      untrack(() => {
+        if (lastLoadedProviderId !== pid) {
+          lastLoadedProviderId = pid
+          suggestedModels = []
+        }
+        loadData()
+      })
     }
   })
 
@@ -2080,12 +2090,16 @@
     setTimeout(() => (copiedModelId = null), 2000)
   }
 
-  async function testModel(modelId: string) {
+  async function testModel(modelId: string, silent = false) {
+    // Probes take seconds; if the panel switches provider mid-flight the
+    // verdict belongs to the old provider and must not be written here.
+    const pid = providerId
     modelTestStatuses[modelId] = 'testing'
     modelTestErrors[modelId] = null
-    activeModelTestError = null
+    if (!silent) activeModelTestError = null
     try {
       const res = await api.testModel(`${storageAlias}/${modelId}`)
+      if (pid !== providerId) return
       if (res.ok) {
         modelTestStatuses[modelId] = 'ok'
         modelTestErrors[modelId] = null
@@ -2093,13 +2107,14 @@
         modelTestStatuses[modelId] = 'error'
         const err = res.error || 'Model test failed'
         modelTestErrors[modelId] = err
-        activeModelTestError = `${modelId}: ${err}`
+        if (!silent) activeModelTestError = `${modelId}: ${err}`
       }
     } catch (err) {
+      if (pid !== providerId) return
       modelTestStatuses[modelId] = 'error'
       const msg = err instanceof Error ? err.message : 'Model test failed'
       modelTestErrors[modelId] = msg
-      activeModelTestError = `${modelId}: ${msg}`
+      if (!silent) activeModelTestError = `${modelId}: ${msg}`
     }
   }
 
@@ -2396,6 +2411,163 @@
     } finally {
       isImportingLiveCatalogModels = false
     }
+  }
+
+  // --- Feature: check latest models / accessibility / prune unusable ----------
+
+  let latestModels = $state<Array<{ id: string; name?: string }>>([])
+  let isCheckingLatest = $state(false)
+  let latestError = $state<string | null>(null)
+  let isCheckingAll = $state(false)
+  let checkAllProgress = $state({ done: 0, total: 0 })
+
+  // ConnectionsView renders this panel without a {#key providerId}, so the
+  // instance survives a provider switch. Everything computed for the old
+  // provider is dropped before the new provider's DOM commits — otherwise the
+  // stale "new models" list stays clickable and Add would save a model from
+  // provider A into provider B's store.
+  $effect.pre(() => {
+    if (!providerId) return
+    latestModels = []
+    latestError = null
+    isCheckingLatest = false
+    isCheckingAll = false
+    checkAllProgress = { done: 0, total: 0 }
+    modelTestStatuses = {}
+    modelTestErrors = {}
+    activeModelTestError = null
+  })
+
+  // Providers whose /models the backend can enumerate
+  // (internal/providers.modelsListURL + compatible nodes + live-catalog
+  // providers). Kept in sync so the button only renders where it can work.
+  const ModelsListURLs = new Set([
+    'tokenharbor',
+    'dahl',
+    'atria',
+    'agnes',
+    'bai',
+  ])
+
+  // canListLiveModels mirrors the backend's list of providers with a live
+  // catalogue (HandleGetConnectionModels): a button that cannot work should
+  // not render.
+  let canListLiveModels = $derived(
+    providerId.startsWith('openai-compatible-') ||
+      isCompatibleNode ||
+      ['antigravity', 'gemini-cli', 'cline', 'clinepass', 'qoder', 'qoder-cn'].includes(providerId) ||
+      ModelsListURLs.has(providerId)
+  )
+
+  async function handleCheckLatestModels() {
+    if (isCheckingLatest) return
+    // Captured up front: a provider switch mid-fetch invalidates the response.
+    const pid = providerId
+    const active = providerConnections.find((c) => c.isActive !== 0)
+    if (!active) {
+      alert('Add an active connection first to fetch models.')
+      return
+    }
+    isCheckingLatest = true
+    latestError = null
+    latestModels = []
+    try {
+      const res = await api.getConnectionModels(active.id)
+      if (pid !== providerId) return
+      const known = new Set<string>([
+        ...builtInModels.map((m) => m.id),
+        ...providerCustomModels.map((m) => m.id),
+      ])
+      for (const m of res.models || []) {
+        const item = typeof m === 'string'
+          ? { id: m }
+          : { id: (m.id || m.model || m.name || '') as string, name: (m.name || '') as string | undefined }
+        if (!item.id || known.has(item.id)) continue
+        latestModels.push(item)
+      }
+      latestModels.sort((a, b) => a.id.localeCompare(b.id))
+      if (latestModels.length === 0) {
+        latestError = 'Catalog is up to date — no new models found.'
+      }
+    } catch (err) {
+      if (pid !== providerId) return
+      latestError = err instanceof Error ? err.message : 'Failed to fetch models'
+    } finally {
+      if (pid === providerId) isCheckingLatest = false
+    }
+  }
+
+  async function handleAddLatestModel(id: string, name?: string) {
+    try {
+      await api.saveCustomModel(`${storageAlias}|${id}|llm`, {
+        id,
+        providerAlias: storageAlias,
+        type: 'llm',
+        ...(name ? { name } : {}),
+      })
+      latestModels = latestModels.filter((m) => m.id !== id)
+      const modelsData = await fetchProviderModelsData(providerId, storageAlias)
+      customModels = modelsData.customModels
+      notifyCustomModelsChanged()
+    } catch (err) {
+      alert(`Failed to add model: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  // Bounded concurrency pool: each probe is a real chat completion that can
+  // take seconds, so running all of them at once would hammer the provider and
+  // the browser (a ~30-model provider fires 30 simultaneous fetches).
+  const TEST_CONCURRENCY = 6
+
+  async function handleCheckAllModels() {
+    if (isCheckingAll) return
+    const pid = providerId
+    isCheckingAll = true
+    const ids = allAvailableModels.map((m) => m.id)
+    checkAllProgress = { done: 0, total: ids.length }
+    // Reset previous verdicts so the run is not confused with stale ones.
+    modelTestStatuses = {}
+    modelTestErrors = {}
+    try {
+      let cursor = 0
+      const workers = Array.from({ length: Math.min(TEST_CONCURRENCY, ids.length) }, async () => {
+        while (cursor < ids.length && pid === providerId) {
+          const i = cursor++
+          await testModel(ids[i], true)
+          if (pid !== providerId) return
+          checkAllProgress = { ...checkAllProgress, done: checkAllProgress.done + 1 }
+        }
+      })
+      await Promise.allSettled(workers)
+      if (pid !== providerId) return
+      const failed = Object.values(modelTestStatuses).filter((s) => s === 'error')
+      if (failed.length > 0) {
+        activeModelTestError = `${failed.length} of ${ids.length} model(s) failed — see per-row status. Delete unusable models individually.`
+      } else {
+        activeModelTestError = null
+      }
+    } finally {
+      if (pid === providerId) isCheckingAll = false
+    }
+  }
+
+  // Delete is only real for custom models; registry models are static, so an
+  // unusable built-in model is disabled instead (the existing disable path).
+  async function handleDeleteModel(modelId: string) {
+    const custom = providerCustomModels.find((m) => m.id === modelId)
+    if (custom) {
+      if (!confirm(`Delete custom model "${modelId}"?`)) return
+      try {
+        await api.deleteCustomModel(`${storageAlias}|${modelId}|llm`)
+        const modelsData = await fetchProviderModelsData(providerId, storageAlias)
+        customModels = modelsData.customModels
+        notifyCustomModelsChanged()
+      } catch (err) {
+        alert(`Failed to delete model: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      return
+    }
+    await handleDisableModel(modelId)
   }
 </script>
 
@@ -2805,7 +2977,7 @@
           {@const specificData = conn.providerSpecificData as Record<string, unknown> | undefined}
           {@const assignedPoolId = (typeof specificData?.proxyPoolId === 'string' ? specificData.proxyPoolId : null)}
           {@const proxyBadge = proxyBadgeFor(conn)}
-          {@const lastErr = conn.lastError || status?.error}
+          {@const lastErr = normalizeLastError(conn.lastError || status?.error) || ''}
           {@const priorityNum = conn.priority ?? idx + 1}
           {@const isConnActive = conn.isActive === 1}
           {@const cooldownInfo = getCooldownInfo(conn)}
@@ -2880,7 +3052,7 @@
                           <span class="material-symbols-outlined text-[10px] animate-spin">progress_activity</span>
                           testing
                         </span>
-                      {:else if (status?.state === 'failed' && status.error !== 'Provider test not supported') || ((conn.testStatus === 'failed' || conn.testStatus === 'error') && conn.lastError !== 'Provider test not supported')}
+                      {:else if (status?.state === 'failed' && status.error !== 'Provider test not supported') || ((conn.testStatus === 'failed' || conn.testStatus === 'error') && lastErr !== 'Provider test not supported')}
                         <span
                           class="inline-flex items-center gap-1.5 rounded-full font-semibold bg-red-500/10 text-red-600 dark:text-red-400 px-2 py-0.5 text-[10px]"
                           title={status?.state === 'failed' && status.error ? `failed: ${status.error}` : undefined}
@@ -3017,12 +3189,23 @@
                 <!-- Right actions -->
                 <div class="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-end">
                   <div class="grid flex-1 grid-cols-3 gap-1 sm:flex sm:flex-none">
-                    <!-- Proxy dropdown (upstream: hidden while no pools exist) -->
-                    {#if proxyPools.length > 0}
+                    <!-- Proxy dropdown -->
                     <div class="relative">
                       <button
                         type="button"
-                        onclick={() => (activeProxyDropdownId = activeProxyDropdownId === conn.id ? null : conn.id)}
+                        onclick={(e) => {
+                          e.stopPropagation()
+                          if (activeProxyDropdownId === conn.id) {
+                            activeProxyDropdownId = null
+                          } else {
+                            activeProxyDropdownId = conn.id
+                            const rect = e.currentTarget.getBoundingClientRect()
+                            dropdownPos = {
+                              top: rect.bottom + 4,
+                              right: Math.max(8, window.innerWidth - rect.right)
+                            }
+                          }
+                        }}
                         disabled={updatingProxyConnId === conn.id}
                         class="flex w-full flex-col items-center rounded px-2 py-1 transition-colors hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-60 {proxyBadge.hasAnyProxy ? 'text-primary' : 'text-text-muted hover:text-primary'} cursor-pointer"
                       >
@@ -3035,34 +3218,49 @@
                       {#if activeProxyDropdownId === conn.id}
                         <!-- Backdrop -->
                         <div
-                          class="fixed inset-0 z-40"
+                          class="fixed inset-0 z-[80]"
                           onclick={() => (activeProxyDropdownId = null)}
                           role="presentation"
                         ></div>
-                        <div class="absolute right-0 top-full z-50 mt-1 max-w-[78vw] min-w-[160px] rounded-lg border border-border bg-bg py-1 shadow-lg">
-                          <button
-                            type="button"
-                            onclick={() => assignProxyPool(conn, null)}
-                            class="flex w-full items-center px-3 py-1.5 text-xs hover:bg-surface-2 transition-colors cursor-pointer {!assignedPoolId ? 'text-primary font-medium' : 'text-text-main'}"
-                          >
-                            None
-                          </button>
-                          {#each proxyPools as pool}
+                        <div
+                          class="fixed z-[85] max-w-[78vw] min-w-[180px] rounded-lg border border-border bg-bg py-1 shadow-lg"
+                          style="top: {dropdownPos.top}px; right: {dropdownPos.right}px;"
+                        >
+                          {#if proxyPools.length === 0}
+                            <div class="px-3 py-2 text-xs text-text-muted">
+                              <p>No proxy pools available.</p>
+                              <a
+                                href="/dashboard/proxypools"
+                                class="mt-1.5 inline-flex items-center gap-1 font-medium text-primary hover:underline"
+                              >
+                                <span class="material-symbols-outlined text-sm">add</span>
+                                Create proxy pool
+                              </a>
+                            </div>
+                          {:else}
                             <button
                               type="button"
-                              onclick={() => assignProxyPool(conn, pool.id)}
-                              class="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-surface-2 transition-colors cursor-pointer {assignedPoolId === pool.id ? 'text-primary font-medium' : 'text-text-main'}"
+                              onclick={() => assignProxyPool(conn, null)}
+                              class="flex w-full items-center px-3 py-1.5 text-xs hover:bg-surface-2 transition-colors cursor-pointer {!assignedPoolId ? 'text-primary font-medium' : 'text-text-main'}"
                             >
-                              <span class="truncate">{pool.name}</span>
-                              {#if !pool.isActive}
-                                <span class="text-[10px] text-text-muted shrink-0">(inactive)</span>
-                              {/if}
+                              None
                             </button>
-                          {/each}
+                            {#each proxyPools as pool}
+                              <button
+                                type="button"
+                                onclick={() => assignProxyPool(conn, pool.id)}
+                                class="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-surface-2 transition-colors cursor-pointer {assignedPoolId === pool.id ? 'text-primary font-medium' : 'text-text-main'}"
+                              >
+                                <span class="truncate">{pool.name}</span>
+                                {#if !pool.isActive}
+                                  <span class="text-[10px] text-text-muted shrink-0">(inactive)</span>
+                                {/if}
+                              </button>
+                            {/each}
+                          {/if}
                         </div>
                       {/if}
                     </div>
-                    {/if}
                     <!-- Freebuff session manage button -->
                     {#if isFreebuff}
                     <button
@@ -3467,6 +3665,19 @@
             >
               <span class="material-symbols-outlined text-sm">close</span>
             </button>
+            {#if testStatus === 'error'}
+              <!-- Unusable model: delete it. Custom models are removed from the
+                   store; built-in registry models are static, so those are
+                   disabled instead (the closest equivalent). -->
+              <button
+                type="button"
+                onclick={() => handleDeleteModel(model.id)}
+                class="rounded p-0.5 text-red-500 opacity-100 transition-opacity hover:bg-red-500/10 hover:text-red-600 sm:opacity-0 sm:group-hover:opacity-100 cursor-pointer"
+                title={model.isCustom ? 'Delete unusable model' : 'Unusable — disable this registry model'}
+              >
+                <span class="material-symbols-outlined text-sm">delete</span>
+              </button>
+            {/if}
           </div>
         </div>
       {/each}
@@ -3498,7 +3709,60 @@
               : 'Import from /models'}
         </button>
       {/if}
+
+      {#if allAvailableModels.length > 0}
+        <button
+          type="button"
+          onclick={handleCheckAllModels}
+          disabled={isCheckingAll}
+          class="flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-surface-2 hover:bg-surface-3 px-3 py-2 text-xs text-text-main transition-colors sm:w-auto cursor-pointer disabled:opacity-50"
+          title="Send a minimal request to every model and mark the ones that fail"
+        >
+          <span class="material-symbols-outlined text-sm">{isCheckingAll ? 'progress_activity' : 'troubleshoot'}</span>
+          {isCheckingAll
+            ? `Checking ${checkAllProgress.done}/${checkAllProgress.total}...`
+            : `Check All Models (${allAvailableModels.length})`}
+        </button>
+      {/if}
+
+      {#if canListLiveModels && providerConnections.some((c) => c.isActive !== 0)}
+        <button
+          type="button"
+          onclick={handleCheckLatestModels}
+          disabled={isCheckingLatest}
+          class="flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-surface-2 hover:bg-surface-3 px-3 py-2 text-xs text-text-main transition-colors sm:w-auto cursor-pointer disabled:opacity-50"
+          title="Fetch the provider's live catalog and list models you have not added yet"
+        >
+          <span class="material-symbols-outlined text-sm">{isCheckingLatest ? 'progress_activity' : 'cached'}</span>
+          {isCheckingLatest ? 'Checking...' : 'Check Latest Models'}
+        </button>
+      {/if}
     </div>
+
+    {#if latestModels.length > 0 || latestError}
+      <div class="w-full mt-2 rounded-lg border border-border bg-surface-2 p-3">
+        {#if latestModels.length > 0}
+          <p class="text-xs text-text-muted mb-2">{latestModels.length} new model(s) not yet added:</p>
+          <div class="flex flex-col gap-1.5">
+            {#each latestModels as m (m.id)}
+              <div class="flex items-center gap-2">
+                <code class="flex-1 truncate text-xs font-mono bg-sidebar px-1.5 py-1 rounded">{m.id}</code>
+                <button
+                  type="button"
+                  onclick={() => handleAddLatestModel(m.id, m.name)}
+                  class="shrink-0 inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-primary hover:bg-primary/10 border border-primary/40 cursor-pointer"
+                >
+                  <span class="material-symbols-outlined text-[13px]">add</span>
+                  Add
+                </button>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="text-xs text-text-muted">{latestError}</p>
+        {/if}
+      </div>
+    {/if}
     <!-- Suggested models from provider API — show only models not yet added -->
     {#if suggestedNotAdded.length > 0}
       <div class="w-full mt-2">

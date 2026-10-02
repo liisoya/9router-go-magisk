@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/constants"
+	"9router/proxy/internal/proc"
 )
 
 // StartupTimeout is how long start waits for the proxy to stay up.
@@ -82,7 +83,7 @@ func clearPid(dataDir string) {
 // GetManagedPid returns the PID from the pid file if it is still alive.
 func GetManagedPid(dataDir string) int {
 	pid := readPid(dataDir)
-	if pid > 0 && pidAlive(pid) {
+	if pid > 0 && proc.Alive(pid) {
 		return pid
 	}
 	return 0
@@ -134,7 +135,7 @@ func StartHeadroomProxy(dataDir string, port int, codeAware, kompress bool) (Sta
 	cmd := exec.Command(binary, args...)
 	cmd.Stdout = f
 	cmd.Stderr = f
-	cmd.SysProcAttr = detachedProcAttr() // detached: survives server restart
+	cmd.SysProcAttr = proc.Detached() // detached: survives server restart
 
 	if err := cmd.Start(); err != nil {
 		f.Close()
@@ -169,20 +170,16 @@ func StartHeadroomProxy(dataDir string, port int, codeAware, kompress bool) (Sta
 	}
 }
 
-// StopHeadroomProxy sends SIGTERM, waits 2s, then SIGKILL if still alive.
+// StopHeadroomProxy asks the proxy to exit, then kills it if it overruns the
+// graceful window.
 func StopHeadroomProxy(dataDir string) (StopResult, error) {
 	pid := GetManagedPid(dataDir)
 	if pid == 0 {
 		return StopResult{Stopped: false, Reason: "not_running"}, nil
 	}
-	if err := sendSigTerm(pid); err != nil {
+	if !proc.Terminate(pid, 2000) {
 		clearPid(dataDir)
-		return StopResult{}, fmt.Errorf("%w: %v", ErrStopFailed, err)
-	}
-	// Give it a moment, then force if still alive.
-	time.Sleep(2 * time.Second)
-	if pidAlive(pid) {
-		sendSigKill(pid)
+		return StopResult{PID: pid}, fmt.Errorf("%w: pid %d did not exit", ErrStopFailed, pid)
 	}
 	clearPid(dataDir)
 	return StopResult{Stopped: true, PID: pid}, nil
@@ -191,15 +188,7 @@ func StopHeadroomProxy(dataDir string) (StopResult, error) {
 // RestartHeadroomProxy stops the managed proxy (up to ~3s), then starts fresh.
 func RestartHeadroomProxy(dataDir string, port int, codeAware, kompress bool) (StartResult, error) {
 	if pid := GetManagedPid(dataDir); pid > 0 {
-		sendSigTerm(pid)
-		// Wait up to ~3s for graceful exit, force-kill if still alive.
-		for i := 0; i < 30 && pidAlive(pid); i++ {
-			time.Sleep(100 * time.Millisecond)
-		}
-		if pidAlive(pid) {
-			sendSigKill(pid)
-			time.Sleep(300 * time.Millisecond)
-		}
+		proc.Terminate(pid, 3000)
 		clearPid(dataDir)
 	}
 	return StartHeadroomProxy(dataDir, port, codeAware, kompress)

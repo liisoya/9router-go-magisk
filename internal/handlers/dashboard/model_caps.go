@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"net/http"
+	"strings"
 
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/providers"
@@ -39,6 +40,22 @@ func (h *DashboardHandler) HandleGetModelCaps(w http.ResponseWriter, r *http.Req
 	resolved := providers.ResolveAlias(provider)
 	models := providers.GetProviderModels(resolved)
 	if len(models) == 0 {
+		if strings.HasPrefix(provider, "openai-compatible") || strings.HasPrefix(provider, "anthropic-compatible") {
+			handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+				"provider": provider,
+				"caps":     map[string]any{},
+			})
+			return
+		}
+		if h.Repo != nil {
+			if node, _, err := h.Repo.GetProviderNodeByID(provider); err == nil && node != nil {
+				handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+					"provider": provider,
+					"caps":     map[string]any{},
+				})
+				return
+			}
+		}
 		handlerutil.WriteJSONError(w, http.StatusNotFound, "unknown provider or no static models")
 		return
 	}

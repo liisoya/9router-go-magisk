@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -381,6 +382,17 @@ func LoginClientIP(r *http.Request) string {
 				return strings.TrimSpace(first)
 			}
 		}
+	}
+	if strings.TrimSpace(r.Header.Get("x-9r-real-ip")) != "" ||
+		strings.TrimSpace(r.Header.Get("X-Forwarded-For")) != "" ||
+		strings.TrimSpace(r.Header.Get("CF-Connecting-IP")) != "" {
+		return "unknown"
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && strings.TrimSpace(host) != "" {
+		return strings.TrimSpace(host)
+	}
+	if addr := strings.TrimSpace(r.RemoteAddr); addr != "" {
+		return addr
 	}
 	return "unknown"
 }
