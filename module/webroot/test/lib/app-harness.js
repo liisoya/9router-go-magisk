@@ -80,6 +80,7 @@ function createHarness({ execHandler }) {
   }
 
   /** 按 index.html 声明的顺序，在同一个 vm 上下文里跑完全部脚本（等价于浏览器） */
+  let lastWin = null;
   function loadApp() {
     const els = new Map();
     const win = {
@@ -102,6 +103,7 @@ function createHarness({ execHandler }) {
     win.ksu = makeExec(win);
 
     const ctx = vm.createContext(win);
+    lastWin = win;
     for (const rel of scriptFiles()) {
       const file = path.join(WEBROOT, rel);
       if (!fs.existsSync(file)) {
@@ -134,7 +136,9 @@ function createHarness({ execHandler }) {
     return { list, stop: () => process.off('unhandledRejection', on) };
   }
 
-  return { loadApp, recordRejections };
+  // lastWin：最近一次 loadApp 的 vm 全局 —— 顶层函数（如 page-dns 的 toggleCandidate）
+  // 就挂在那里，测试可以直接驱动（芯片是 innerHTML 字符串，桩 DOM 的 querySelectorAll 驱动不了）
+  return { loadApp, recordRejections, get lastWin() { return lastWin; } };
 }
 
 module.exports = { createHarness, scriptFiles, WEBROOT };

@@ -23,11 +23,13 @@ const DNS_STORE = {
    *  于是「回滚上一版」实际回到首版，用户丢掉最近一次优选前的状态。
    *  优选是自动应用的，回滚正是它唯一的安全网。先删旧的，backupOnce 才会真正写入本版。 */
   async refreshPrev() { await KB.remove(DNS_PREV); return KB.backupOnce(UPSTREAMS, DNS_PREV); },
-  /** 写入 + **必热重载**。前置：回滚点已由调用方确认可用（ensureInitial / refreshPrev）。 */
+  /** 写入 + **必热重载**。前置：回滚点已由调用方确认可用（ensureInitial / refreshPrev）。
+   *  返回：false=写盘失败；{ reload:bool }=已写入（reload=false 表示热重载没生效 —— 
+   *  reloadDns 已如实警告，调用方不得再报"已生效"（双 toast 互相打脸，2026-10-02）。 */
   async write(body) {
     if (!await KB.writeFile(UPSTREAMS, body + '\n')) return false;
-    await reloadDns(true);
-    return true;
+    const reload = await reloadDns(true);
+    return { ok: true, reload };
   },
   /** 从某个回滚点恢复 + **必热重载** */
   async restore(from) {
@@ -46,11 +48,17 @@ const DNS_CANDIDATES = [
   { cat: '明文', label: '阿里',     v: 'nameserver 223.6.6.6' },
   { cat: '明文', label: '字节',     v: 'nameserver 180.184.1.1' },
   { cat: '明文', label: '114',      v: 'nameserver 114.114.114.114' },
+  { cat: '明文', label: '百度',     v: 'nameserver 180.76.76.76' },
+  { cat: '明文', label: 'CNNIC',    v: 'nameserver 1.2.4.8' },
   { cat: 'DoH',  label: '阿里',     v: 'doh https://223.5.5.5/dns-query' },
   { cat: 'DoH',  label: '阿里域名', v: 'doh https://dns.alidns.com/dns-query' },
   { cat: 'DoH',  label: '腾讯',     v: 'doh https://doh.pub/dns-query' },
+  { cat: 'DoH',  label: '腾讯IP',   v: 'doh https://120.53.53.53/dns-query' },
   { cat: 'DoH',  label: '360',      v: 'doh https://doh.360.cn/dns-query' },
-  { cat: 'DoT',  label: '阿里',     v: 'dot 223.5.5.5' }
+  { cat: 'DoT',  label: '阿里',     v: 'dot 223.5.5.5' },
+  { cat: 'DoT',  label: '阿里域名', v: 'dot dns.alidns.com' },
+  { cat: 'DoT',  label: '腾讯',     v: 'dot dot.pub' },
+  { cat: 'DoT',  label: '腾讯IP',   v: 'dot 120.53.53.53' }
 ];
 const DNS_CATS = ['明文', 'DoH', 'DoT'];
 const b64Text = KB.b64Decode; // upstreams_b64 解码（UTF-8 安全，实现收敛在 bridge）
@@ -200,17 +208,45 @@ function renderCandChips() {
            `<div class="chips">${chips}</div></div>`;
   }).join('');
   box.querySelectorAll('.chip').forEach(ch => {
-    ch.onclick = () => {
-      const v = ch.dataset.v;
-      const ta = document.getElementById('upstreams');
-      // 切换语义（2026-10-02 用户报障）：绿（已加入）再点一次 = 从配置移除并变灰；
-      // 灰再点 = 加入。仍要「保存」才落盘 —— 与手输添加是同一条编辑缓冲区。
-      const r = KP.toggleUpstreamLine(ta.value, v);
-      ta.value = r.text;
-      renderCandChips();
-      toast(r.removed ? '已从配置移除，记得「保存」' : '已加入配置，记得「保存」');
-    };
+    ch.onclick = () => toggleCandidate(ch.dataset.v);
   });
+}
+// 芯片点击的完整动作（2026-10-02 用户反馈：不要"记得手动保存"，要**自动生效**）：
+// 切换编辑缓冲区 → 走 DNS_STORE 的备份→写盘→热重载次序，失败把缓冲区还原到切换前
+// （界面与设备永远一致，不出现"看着改了其实没改"）。收成顶层函数：桩测试可直接驱动
+// （renderCandChips 的芯片是 innerHTML 字符串，桩 DOM 的 querySelectorAll 驱动不了）。
+// 在途位：写盘+热重载在途时再点会读到中间态 —— 芯片没有按钮可禁用，用位挡住。
+let _toggleBusy = false;
+async function toggleCandidate(v) {
+  if (_toggleBusy) return;
+  const ta = document.getElementById('upstreams');
+  const prev = ta.value;
+  const r = KP.toggleUpstreamLine(prev, v);
+  _toggleBusy = true;
+  try {
+    // 移除后若配置里再无可生效行 → 拒绝（dnsfwd 拿空配置 = 域名解析全挂）
+    if (r.removed && !r.text.split('\n').some(l => l.trim() && !l.trim().startsWith('#'))) {
+      toast('至少保留一条 DNS 上游，未移除', 3200);
+      return;
+    }
+    ta.value = r.text;
+    renderCandChips();
+    if (!await DNS_STORE.ensureInitial()) {
+      toast('⚠️ 备份失败（没有回滚点，未改写配置）', 3600);
+      return;
+    }
+    const w = await DNS_STORE.write(r.text);
+    if (!w) {
+      ta.value = prev; renderCandChips();
+      toast('❌ 写入失败，已还原', 3200);
+      return;
+    }
+    loadCurrentUpstreams();
+    // 热重载失败时 reloadDns 已警告过（配置确实已写入，界面跟着配置走）——不再报"已生效"
+    if (w.reload) toast(r.removed ? '✅ 已移除并生效' : '✅ 已加入并生效', 2400);
+  } finally {
+    _toggleBusy = false;
+  }
 }
 async function addUpstream() {
   const inp = document.getElementById('in-add');
@@ -220,10 +256,9 @@ async function addUpstream() {
   const ta = document.getElementById('upstreams');
   // 同一条整行判据（曾用子串，'223.5.5.5' 会被 doh URL 误判"已存在"）
   if (KP.hasUpstreamLine(ta.value, v)) { toast('已存在'); return; }
-  ta.value = (ta.value.trim() ? ta.value.trim() + '\n' : '') + v;
+  // 手输添加与芯片同一套自动生效（toggleCandidate 会按 hasUpstreamLine 走加入分支）
+  await toggleCandidate(v);
   inp.value = '';
-  renderCandChips();
-  toast('已加入配置，记得「保存」');
 }
 // dnsfwd 开关：诚实回执走 runOpsAction（唯一实现，见 app-core.js）。
 // 原先这两处各写一遍「比对状态词 → 挑 toast」，且失败文案与其它动作不一致（'状态：xxx'）。
