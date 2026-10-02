@@ -236,6 +236,38 @@
     if (/^dot\s/.test(t) || /^tls:\/\//.test(t)) return 'DoT';
     return '明文';
   }
+  // 候选芯片的「已加入/取消」判据与切换动作（2026-10-02 用户报障：芯片变绿后点不灭）。
+  // 旧实现用 includes **子串**判定：'dot 223.5.5.5' 被 'doh https://223.5.5.5/dns-query'
+  // 误命中（DoT 芯片永远"已在配置中"）、'nameserver 223.6.6.6' 误命中 '223.6.6.67' ——
+  // 误判成已加入的芯片既加不进去也取消不掉。判定必须**整行**：忽略空白与注释行，
+  // nameserver 前缀等价（手写的裸 IP 行与候选算同一条）。
+  function upstreamLineEq(normLine, normV) {
+    return normLine === normV ||
+           normLine.replace(/^nameserver\s+/, '') === normV.replace(/^nameserver\s+/, '');
+  }
+  function hasUpstreamLine(text, v) {
+    const t = normUpstream(v);
+    return String(text == null ? '' : text).split('\n').some(l => {
+      const s = normUpstream(l.trim());
+      return !!s && !s.startsWith('#') && upstreamLineEq(s, t);
+    });
+  }
+  // 切换：已存在 → 删掉**第一处**匹配行（取消选中）；不存在 → 规范化后追加（选中）。
+  // 只动命中行，注释与其它行原样保留；返回 { text, removed } 供调用方出回执。
+  function toggleUpstreamLine(text, v) {
+    const t = normUpstream(v);
+    const lines = String(text == null ? '' : text).split('\n');
+    const idx = lines.findIndex(l => {
+      const s = normUpstream(l.trim());
+      return !!s && !s.startsWith('#') && upstreamLineEq(s, t);
+    });
+    if (idx === -1) {
+      const base = text.trim();
+      return { text: base ? base + '\n' + t : t, removed: false };
+    }
+    lines.splice(idx, 1);
+    return { text: lines.join('\n').replace(/^\n+/, ''), removed: true };
+  }
 
   // ── 孤儿判定（结构性安全）──
   // 只有 openai-compatible-chat-<uuid> 形状且 UUID 不在存活集合里的别名才可清理。
@@ -403,7 +435,8 @@
     stripCr, parseProp, cmpVer,
     parseOpsStatus, parseMeminfo, parseProcRss, FAKEIP_RE,
     parseDnsProbeLine, parseDnsProbeOutput,
-    normUpstream, upType, UUID_ALIAS, extractAliases, computeOrphans,
+    normUpstream, upType, hasUpstreamLine, toggleUpstreamLine,
+    UUID_ALIAS, extractAliases, computeOrphans,
     ELF_MAGIC, ENGINE_MIN_BYTES, engineFileGate, checksumGate,
     LIFECYCLE_STATES, TONE_COLORS, stateLabel, stateTile, fmtMem, engineVersionSourceLabel, isAlreadyRunning,
     ACTION_WORDS, actionOk,

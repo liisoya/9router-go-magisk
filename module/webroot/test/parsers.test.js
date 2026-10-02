@@ -127,6 +127,41 @@ test('upType 分类', () => {
   assert.strictEqual(KP.upType('dot 223.5.5.5'), 'DoT');
 });
 
+// ── 候选芯片的判定与切换（2026-10-02 用户报障：变绿后点不灭）──
+// 旧实现用 includes 子串判定，两条真误判在此锁定（修复前必红）：
+//   ① 'dot 223.5.5.5' 被 'doh https://223.5.5.5/dns-query' 误命中 → DoT 芯片永远"已在配置中"；
+//   ② 'nameserver 223.6.6.6' 误命中 '223.6.6.67'（IP 前缀子串）。
+test('hasUpstreamLine 整行判定：子串不算同一条（修复前必红的两个误判形状）', () => {
+  assert.strictEqual(
+    KP.hasUpstreamLine('doh https://223.5.5.5/dns-query', 'dot 223.5.5.5'), false,
+    'DoT 芯片不得被 DoH URL 误判为已加入')
+  assert.strictEqual(
+    KP.hasUpstreamLine('nameserver 223.6.6.67', 'nameserver 223.6.6.6'), false,
+    'IP 前缀子串不得误判')
+});
+test('hasUpstreamLine：整行/裸 IP/注释空白都按语义判', () => {
+  const conf = '# 优选自动生成\nnameserver 119.29.29.29\n\ndoh https://doh.pub/dns-query\n';
+  assert.strictEqual(KP.hasUpstreamLine(conf, 'nameserver 119.29.29.29'), true);
+  assert.strictEqual(KP.hasUpstreamLine(conf, '119.29.29.29'), true, '裸 IP 行与候选等价');
+  assert.strictEqual(KP.hasUpstreamLine(conf, 'dot 223.5.5.5'), false);
+  assert.strictEqual(KP.hasUpstreamLine('', 'nameserver 1.2.3.4'), false);
+});
+test('toggleUpstreamLine：加入 → 再点移除（切换语义）', () => {
+  let r = KP.toggleUpstreamLine('# 注释保留\nnameserver 119.29.29.29', 'doh https://doh.pub/dns-query');
+  assert.strictEqual(r.removed, false);
+  assert.strictEqual(r.text, '# 注释保留\nnameserver 119.29.29.29\ndoh https://doh.pub/dns-query');
+  r = KP.toggleUpstreamLine(r.text, 'doh https://doh.pub/dns-query');
+  assert.strictEqual(r.removed, true, '第二次点击 = 取消选中');
+  assert.strictEqual(r.text, '# 注释保留\nnameserver 119.29.29.29', '只删命中行，注释与其它行原样保留');
+});
+test('toggleUpstreamLine：裸 IP 行也可被取消；移除后不留行首空行', () => {
+  let r = KP.toggleUpstreamLine('119.29.29.29\nnameserver 8.8.8.8', 'nameserver 119.29.29.29');
+  assert.strictEqual(r.removed, true);
+  assert.strictEqual(r.text, 'nameserver 8.8.8.8');
+  r = KP.toggleUpstreamLine('nameserver 1.1.1.1\n', 'nameserver 1.1.1.1');
+  assert.strictEqual(r.text, '', '移除最后一行后为空（保存侧有"上游不能为空"护栏）');
+});
+
 // ── 孤儿判定：曾误删 oc/qd 内置别名的自定义模型（结构护栏）──
 const LIVE = new Set([
   'openai-compatible-chat-069fdcc2-f29b-41da-b3b9-11f4702667ac', // 存活节点

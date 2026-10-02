@@ -189,10 +189,10 @@ function renderCandChips() {
   const box = document.getElementById('cand-chips');
   const cur = document.getElementById('upstreams').value;
   // 三类各起一行：类别名做行首标签，芯片只留区分词（"腾讯 / 阿里 / 字节 / 114"）。
-  // 已加入的芯片靠 added 底色表示，不再加 ✓ 前缀 —— 那是文字噪音。
+  // 已加入的芯片靠 added 底色表示（判定=整行匹配 KP.hasUpstreamLine —— 子串误判见 parsers 注释）。
   box.innerHTML = DNS_CATS.map(cat => {
     const chips = DNS_CANDIDATES.filter(c => c.cat === cat).map(c => {
-      const added = cur.includes(c.v.replace(/^nameserver\s/, ''));
+      const added = KP.hasUpstreamLine(cur, c.v);
       return `<span class="chip${added ? ' added' : ''}" data-v="${escAttr(c.v)}"` +
              ` title="${escAttr(c.v)}">${esc(c.label)}</span>`;
     }).join('');
@@ -203,10 +203,12 @@ function renderCandChips() {
     ch.onclick = () => {
       const v = ch.dataset.v;
       const ta = document.getElementById('upstreams');
-      if (ta.value.includes(v.replace(/^nameserver\s/, ''))) { toast('已在配置中'); return; }
-      ta.value = (ta.value.trim() ? ta.value.trim() + '\n' : '') + v;
+      // 切换语义（2026-10-02 用户报障）：绿（已加入）再点一次 = 从配置移除并变灰；
+      // 灰再点 = 加入。仍要「保存」才落盘 —— 与手输添加是同一条编辑缓冲区。
+      const r = KP.toggleUpstreamLine(ta.value, v);
+      ta.value = r.text;
       renderCandChips();
-      toast('已加入配置，记得「保存」');
+      toast(r.removed ? '已从配置移除，记得「保存」' : '已加入配置，记得「保存」');
     };
   });
 }
@@ -216,7 +218,8 @@ async function addUpstream() {
   if (!v) { toast('请输入 DNS 地址'); return; }
   if (/127\.0\.0\.1|::1/.test(v)) { toast('❌ 禁止 127.0.0.1 / ::1'); return; }
   const ta = document.getElementById('upstreams');
-  if (ta.value.includes(v.replace(/^nameserver\s/, ''))) { toast('已存在'); return; }
+  // 同一条整行判据（曾用子串，'223.5.5.5' 会被 doh URL 误判"已存在"）
+  if (KP.hasUpstreamLine(ta.value, v)) { toast('已存在'); return; }
   ta.value = (ta.value.trim() ? ta.value.trim() + '\n' : '') + v;
   inp.value = '';
   renderCandChips();
