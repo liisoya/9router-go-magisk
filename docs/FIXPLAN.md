@@ -1337,6 +1337,38 @@
   版本弄成 1.9.5 → 保留分支未触发 → 兜底恢复接管），设备终态 1.9.6 全家 up ✓。
   顺手清掉 `engine_version_sync` 重构残留的 `_force` 悬挂引用（`set -u` 下是潜伏炸弹，S5 变红抓到）。
 
+## Phase 41 · 上游同步 v1.9.6 + 发布 v1.9.6-r1（含 r3→r4 模块更新报错的定性）✅ 2026-10-02
+
+> 用户目标：随上游 v1.9.6 发 v1.9.6-r1 模块包，再实测一次模块更新（此前 r3→r4 面板报错，无法复现）。
+
+- [x] **41.1 同步（186 文件 / ~20 提交 / 零文本冲突解决 5 处）**：README 取我方（§10.2）；
+  version.json 取上游；LoginView 整体取上游 1.9.6 的 `api.login(password, newPassword?)` 形状
+  （配套 client.ts 与服务端 login-lockout 修复），并重放 35.1 的 `Mantep210→123456`；
+  **ProfileSettingsView 保留我方结构（密码弹层 + 在途守卫）+ 移植上游 zip 归档**：
+  db-backup.ts 导出 `?format=zip`、文件体导入（密码走 `x-9r-password` 头，服务端 settings.go:169
+  两可）、文件名 `.json→.zip`，契约测试 6/6 同步重写；DEADH 抓到上游新增 `RegisterPID` →
+  豁免（不是 HTTP handler，生产调用点 cmd/9router-go/main.go:198，扫描器只认 handlers 路由）。
+- [x] **41.2 门禁与构建**：`gen-schema --check` ✅、`go build` ✅、`tsc -b` ✅、离线档 18/0 ✅
+  （GO-TEST 含上游新测试）、`FORCE=1 bash build.sh` 七步绿 → `9router-go-1.9.6-r1-magisk.zip`
+  （包内 `etc/engine-version=1.9.6`，引擎 26,542,240B）。versionCode 109060（大版本归 r1）。
+- [x] **41.3 真机**：模块自己的 `install-module` 装包 → 面板/自报一致（1.9.6 / 109060）、
+  engine·dns·watchdog 全 up；全量门禁 T\* 38/38 + A\* 7/7（T10c/T9/T13a/T2 全绿）。
+- [x] **41.4 计划外发现（定性 r3→r4 报错）：install-module 后存在 KernelSU 镜像抖动窗口**
+  - 现场证据：装机成功（engine=up）后 2 分钟内，`/data/adb/modules/<id>` 的**可见性抖动**
+    （`ls` 时有时无、`sh lib/ops.sh` 间歇 Permission denied，目录上下文正常 `system_file`；
+    该设备上 `/data/adb/modules` 是 ksud 的 loop 挂载 `/dev/block/loop37`）；约 1–2 分钟后
+    自愈，连续 6 次采样全稳定。
+  - 定性：**不是模块代码 bug** —— install-module 换目录触发 ksud 的模块镜像重建/重挂窗口，
+    而面板 `modUpdate` 装完**立刻** `refresh()`，撞进窗口就是一句报错（r3→r4 的症状完全吻合；
+    "之后自己好了/重启后正常"也是这个窗口的特征）。
+  - 待办（下一轮）：面板 modUpdate 成功后的 refresh 前加退避重试（或提示"镜像重建中，稍候刷新"）；
+    T10b 同理可加一次重试。
+- [x] **41.5 发布**：tag `v1.9.6-r1` + main 推送（HTTP/1.1）、`gh release create` 附 zip；
+  公开 URL 经设备加速节点实测下载 15,317,825B，sha256 与本地 dist **逐字节一致**
+  （`eadaabd3…`）、`isDraft=false`（35.1 坑①②的核对动作照做）。
+- [ ] **待用户验收**：面板「检查更新」应显示已是最新（109060）；下一次模块发版时实测
+  更新链路（重点观察 41.4 的窗口期报错是否已消除）。
+
 ## 验收矩阵（每 Phase 完成后真机过一遍）
 
 
