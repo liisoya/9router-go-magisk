@@ -38,7 +38,10 @@ const VERB_EMITTERS = {
 function verbWords(fn) {
   const m = shell.match(new RegExp('(^|\\n)' + fn + '\\(\\)\\s*\\{([\\s\\S]*?)\\n\\}', 'm'));
   assert.ok(m, `找不到动词函数 ${fn}()（改名了吗？本门禁需要同步）`);
-  return [...m[2].matchAll(/echo\s+"?([a-z][a-z0-9-]*(?:=[a-z0-9-]+)?)"?/g)].map(x => x[1]);
+  // 判定词有两个 emit 形态：直 `echo "词"`（分派行内联/编排函数）与
+  // `life_verdict_emit "词"`（ensure 家族：守护直调时判定经文件带回，2026-10-02）。
+  // 两者都必须算 emit —— 漏掉后者 = 改 emit 通道时契约门禁静默失明。
+  return [...m[2].matchAll(/(?:echo|life_verdict_emit)\s+"?([a-z][a-z0-9-]*(?:=[a-z0-9-]+)?)"?/g)].map(x => x[1]);
 }
 // 面板是多文件、清单唯一来源 = index.html 的 <script src>：键消费必须扫**全部**脚本。
 // 按文件名写死会漏掉新增的页面文件 —— 那些页面读的键就不再受契约约束（静默失覆盖）。

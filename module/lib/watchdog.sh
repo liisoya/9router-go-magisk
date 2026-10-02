@@ -122,12 +122,31 @@ wd_own_if_started() { [ "${1:-}" = "started" ]; }
 # 不会被迟到的 CHLD 打断"，清位是免费的保险——只在没子进程可确认时。）
 wd_keep_chld_pending() { [ -n "${1:-}" ] || [ -n "${2:-}" ]; }
 
+# ── ensure 直调（**整份守护里唯一合法的 ensure 调用方式**）────────────────────
+# 绝不能用 `x="$(life_ensure_engine)"`：$() 把整个 ensure 放进子 shell，引擎/dnsfwd 成了
+# 那个短命子 shell 的孩子，子 shell 一退出即被 init 收养 —— 2026-10-02 真机实锤
+# （引擎 PPID=1），后果三连：① 引擎死亡永远没有 SIGCHLD（事件驱动失效）；
+# ② wait 取不到退出码 → 死因取证恒「退出码 127」（假的）；③ eng_ours 非空让守护睡
+# 60s 长周期 —— 自愈从 ~1s 退化成最长 60s（T5 红 / T15 实测 60s 就是这个形状）。
+# 判定词经 LIFE_ENSURE_VERDICT 文件带回（life_verdict_emit，stdout 照旧吐但不消费）。
+wd_verdict=""
+wd_ensure() {
+  _we_v="$DATA_DIR/.wd-ensure-verdict"
+  LIFE_ENSURE_VERDICT="$_we_v"
+  : > "$_we_v" 2>/dev/null
+  "$@" >/dev/null 2>&1
+  wd_verdict="$(cat "$_we_v" 2>/dev/null)"
+  rm -f "$_we_v" 2>/dev/null
+  LIFE_ENSURE_VERDICT=""
+}
+
 # 拉起 → 等就绪 → 记账 → 取证锚点 → 日志（restart 请求与监督判死共用；S3 纪律只剩这一处）。
 # 全局写 eng_ours。参数 = 成功/失败日志的场景词（两侧措辞不同，行为完全同构）。
 # 失败**如实返回 1**：调用方据此决定是否继续（restart 还要拉 DNS，监督记完日志继续兜底）。
 wd_bring_up() {
   _bu_ok="${1:-引擎已拉起}"; _bu_fail="${2:-拉起失败}"
-  _bu_ee="$(life_ensure_engine 2>/dev/null)"
+  wd_ensure life_ensure_engine
+  _bu_ee="$wd_verdict"
   if wait_engine; then
     wd_own_if_started "$_bu_ee" && eng_ours="$(life_engine_pid)"
     mark_engine_alive "$eng_ours"
@@ -241,15 +260,18 @@ while :; do
       confirmed_eng=0
       # stop_all 把 DNS 也停了：请求既然停了它，就必须由同一处把它拉回来
       # （否则只能靠下面的监督分支补救，白等一个周期）
-      _de="$(life_ensure_dns 2>/dev/null)"
+      wd_ensure life_ensure_dns
+      _de="$wd_verdict"
       wd_own_if_started "$_de" && dns_ours="$(life_dns_pid)"
       miss_dns=0
       confirmed_dns=0
       ;;
     start)
       # 请求受理**不等就绪**（健康与取证锚点由下一轮监督分支处理），但 S3 记账纪律同一条
-      _ee="$(life_ensure_engine 2>/dev/null)"
-      _de="$(life_ensure_dns 2>/dev/null)"
+      wd_ensure life_ensure_engine
+      _ee="$wd_verdict"
+      wd_ensure life_ensure_dns
+      _de="$wd_verdict"
       wd_own_if_started "$_ee" && eng_ours="$(life_engine_pid)"
       wd_own_if_started "$_de" && dns_ours="$(life_dns_pid)"
       miss_eng=0
@@ -300,18 +322,21 @@ while :; do
       miss_dns=$((miss_dns + 1))
       if wd_should_act "$confirmed_dns" "$miss_dns"; then
         log "dnsfwd 不在，拉起"
-        _de="$(life_ensure_dns 2>/dev/null)"
+        wd_ensure life_ensure_dns
+        _de="$wd_verdict"
         wd_own_if_started "$_de" && dns_ours="$(life_dns_pid)"
         miss_dns=0
         confirmed_dns=0
       fi
     fi
   else
-    # 不在管辖范围（用户停服 / 维护窗口 / 未武装）：计数清零，回来时不会立刻动手
+    # 不在管辖范围（用户停服 / 维护窗口 / 未武装）：**未确认的**计数清零，回来时不会
+    # 拿陈旧的 miss 去凑"连续两次判死"。但 confirmed_* 不能清 —— 那是 CHLD 确认过的
+    # **既成事实**（引擎真的死了），不是会过期的怀疑：hold 到期后第一轮就该动手
+    # （2026-10-02 真机实测：清零让 hold 后的复活从 ~11s 拖到 ~23s）。
+    # 成活/请求分支会把它们归零（引擎健康 → confirmed 失义；restart 重建归属）。
     miss_eng=0
     miss_dns=0
-    confirmed_eng=0
-    confirmed_dns=0
   fi
 
   # ── 维护（缺省每轮 ≈60s）：日志轮转 + 内存证据 ──

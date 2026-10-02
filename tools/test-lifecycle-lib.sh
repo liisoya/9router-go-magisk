@@ -445,6 +445,59 @@ _ens="$(grep -c 'life_ensure_stack' module/lib/lifecycle.sh; grep -c 'life_ensur
   && ok "L21c 拉回清单收进 life_ensure_stack（lifecycle + ops 共用）" \
   || no "L21c life_ensure_stack 收口不完整（lifecycle/ops 各自的计数：$_ens）"
 
+echo "== L22 父子关系：守护必须**直调** ensure，CHLD 才可达（2026-10-02 真机实锤）=="
+# bug 形状（T5 红 / T15 实测 60s 的根源）：wd_bring_up 原来写 `x="$(life_ensure_engine)"`
+# —— $() 把整个 ensure 放进子 shell，引擎成了那个短命子 shell 的孩子，子 shell 一退出
+# 即被 init 收养（真机实测引擎 PPID=1）。后果三连：① 引擎死亡永远没有 SIGCHLD（事件
+# 驱动对引擎死亡失效）；② wait 取不到退出码 → 死因取证恒「退出码 127」（假的）；
+# ③ eng_ours 非空让守护睡 60s 长周期 —— 自愈从 ~1s 退化成最长 60s。
+# (a) 先用 $() 差分锁住 bug 形状（保证本组断言真的能红），(b) 锁 wd_ensure 直调路径。
+. module/lib/lifecycle.sh            # 还原 L15–L17 桩掉的真实函数体（重新 source 即还原）
+_WD_LIB_ONLY=1 . module/lib/watchdog.sh >/dev/null 2>&1 \
+  || no "L22 前置失败：无法 source watchdog.sh（判定核 + wd_ensure）"
+printf '#!/bin/sh\nsleep 30\n' > "$_TMPD/fake-engine"; chmod 0755 "$_TMPD/fake-engine"
+LIFE_BIN="$_TMPD/fake-engine"
+_ppid_of() { awk '{print $4}' "/proc/$1/stat" 2>/dev/null; }
+_ve22="$(life_ensure_engine)"        # 旧形态：经 $() 调用
+_a22="$(cat "$LIFE_ST_ENGINE" 2>/dev/null)"
+if [ -n "$_a22" ] && [ "$(_ppid_of "$_a22")" != "$$" ]; then
+  ok "L22a 差分：经 \$() 调用引擎被 init 收养（PPID=$(_ppid_of "$_a22")，bug 形状可观测）"
+else
+  no "L22a 差分失败：\$() 路径观察不到收养形状（pid=$_a22 ppid=$(_ppid_of "$_a22")）—— 断言失去拦截能力"
+fi
+kill "$_a22" 2>/dev/null; rm -f "$LIFE_ST_ENGINE"
+wd_ensure life_ensure_engine         # 新形态：直调（当前 shell）
+_b22="$(cat "$LIFE_ST_ENGINE" 2>/dev/null)"
+if [ -n "$_b22" ] && [ "$(_ppid_of "$_b22")" = "$$" ]; then
+  ok "L22b wd_ensure 直调 → 引擎 PPID==守护（$$），CHLD 从此可达"
+else
+  no "L22b wd_ensure 没有产生真子进程（pid=$_b22 ppid=$(_ppid_of "$_b22")，期望 $$）—— 自愈退化回 60s"
+fi
+if [ "$wd_verdict" = "started" ]; then
+  ok "L22c 判定词经 LIFE_ENSURE_VERDICT 文件如实带回（started）"
+else
+  no "L22c 判定词没带回（wd_verdict=[$wd_verdict]，期望 started）"
+fi
+kill "$_b22" 2>/dev/null
+# (d) 回潮扫描：守护里 ensure **只许直调** —— 任何一处 `$(life_ensure` 都是子 shell 收养回归
+# （排除注释行：反例文本写在 wd_ensure 的说明注释里，第一次跑就被它误红了）
+_n22="$(grep '\$(life_ensure' module/lib/watchdog.sh | grep -cv '^[[:space:]]*#')"
+[ "$_n22" = "0" ] && ok "L22d 守护里 \$() 调 ensure 残留 = 0（直调纪律）" \
+                 || no "L22d 出现 $_n22 处 \$(life_ensure…（CHLD 会再次不可达）"
+# (e) 行为断言：wd_bring_up 必须**消费**判定词记账（S3：只有亲手拉起的才 eng_ours）
+# 变异自证：把 wd_bring_up 改回 \$() 后，_bu_ee 恒空 → eng_ours 不记账 → 此条精确变红
+_p22() { echo 5551; }
+life_ensure_engine() { life_verdict_emit "started"; }
+life_engine_pid()     { echo 5551; }
+life_engine_healthy() { return 0; }
+wait_engine()         { return 0; }
+mark_engine_alive()   { :; }
+log()                 { :; }
+eng_ours=""
+wd_bring_up 测试成功 测试失败
+[ "$eng_ours" = "5551" ] && ok "L22e wd_bring_up 消费判定词 → eng_ours 记账（S3 纪律生效）" \
+                         || no "L22e 判定词没被消费（eng_ours=[$eng_ours]）—— 亲手拉起的引擎丢了归属"
+
 echo "== 结果：通过 $PASS / 失败 $FAIL / 跳过 $SKIP =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

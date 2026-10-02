@@ -54,8 +54,9 @@ life_cgroup_memory_events() { echo ""; return 1; }   # 模拟"本机无 memory.e
 life_engine_pid() { echo 4242; }
 
 # 场景 a：亲手拉起（started）且就绪 → 记 eng_ours + 成功日志
+# （判定词走 life_verdict_emit：wd_bring_up 经 wd_ensure 直调 ensure，stdout 不再是判定通道）
 eng_ours=""; oom_base=""
-life_ensure_engine() { echo started; }
+life_ensure_engine() { life_verdict_emit started; }
 life_engine_healthy() { return 0; }
 if wd_bring_up "引擎已拉起" "拉起失败" && [ "$eng_ours" = "4242" ]; then
   ok "W4a started + 就绪 → eng_ours=4242（S3 记账）"
@@ -65,7 +66,7 @@ fi
 
 # 场景 b：引擎是别人起的（running）→ 不记归属，但仍算成功
 eng_ours=""; oom_base=""
-life_ensure_engine() { echo running; }
+life_ensure_engine() { life_verdict_emit running; }
 if wd_bring_up "引擎已拉起" "拉起失败" && [ -z "$eng_ours" ]; then
   ok "W4b running → 成功但不记归属（S3：不是子进程）"
 else
@@ -74,7 +75,7 @@ fi
 
 # 场景 c：拉起后仍不就绪 → 如实失败（桩 wait_engine 避免真等 10s）
 eng_ours=""; oom_base=""
-life_ensure_engine() { echo started; }
+life_ensure_engine() { life_verdict_emit started; }
 life_engine_healthy() { return 1; }
 wait_engine() { return 1; }
 if ! wd_bring_up "引擎已拉起" "拉起失败" && [ -z "$eng_ours" ]; then
@@ -106,6 +107,20 @@ if [ -n "$_w" ] && [ -n "$_c" ] && [ "$_w" -lt "$_c" ]; then
 else
   no "W6 顺序反了（wait=[$_w] 校正=[$_c]）—— CHLD 取证会拿到别的子进程的状态"
 fi
+
+echo "== W7 事实不丢弃：不在管辖分支（hold/停服）不得清 confirmed_*（2026-10-02）=="
+# confirmed_* 是 CHLD 确认过的既成事实（引擎真的死了），不是会过期的怀疑：
+# hold 到期后第一轮就该动手。清零让 hold 后的复活多等两轮轮询（真机实测 ~23s vs ~11s）。
+_blk="$(awk '/if life_wd_should_supervise; then/{f=1} f{print} f&&/^  fi$/{exit}' module/lib/watchdog.sh)"
+_else="$(printf '%s\n' "$_blk" | sed -n '/^  else$/,/^  fi$/p')"
+case "$_else" in
+  "") no "W7 没取到监督 if 的 else 块（缩进/结构变了？本门禁需要同步）" ;;
+  *confirmed_eng=0*|*confirmed_dns=0*)
+     no "W7 不在管辖分支清了 confirmed_*（hold 后复活多等两轮）" ;;
+  *) ok "W7 else 分支只清 miss 计数，confirmed 事实保留" ;;
+esac
+# 反向：确证 else 块真的取到了（非空转自检）
+case "$_else" in *miss_eng=0*) ok "W7b 自检：else 块内容已取到（miss_eng=0 在场）" ;; *) no "W7b else 块为空/取错（断言会假绿）" ;; esac
 
 echo "== 结果：通过 $PASS / 失败 $FAIL =="
 [ "$FAIL" = 0 ]

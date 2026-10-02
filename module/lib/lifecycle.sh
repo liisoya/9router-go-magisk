@@ -550,19 +550,33 @@ life_prep() {
   echo "$_rc"
 }
 
+life_verdict_emit() {
+  # 判定词（started/running/…）的唯一出口：stdout 语义不变（所有既有调用方按全等消费）；
+  # 当 LIFE_ENSURE_VERDICT 指向文件时同步落盘 —— 守护以 wd_ensure **直调** ensure 时只能靠
+  # 文件拿判定。为什么不能走 stdout：`x="$(life_ensure_engine)"` 与"让引擎成为守护的
+  # **真子进程**"不可兼得 —— $() 把整个 ensure 放进子 shell，引擎成了那个短命子 shell 的
+  # 孩子，子 shell 一退出即被 init 收养（2026-10-02 真机实锤：引擎 PPID=1）→ CHLD 永远
+  # 不可达、wait 取不到退出码（死因恒 127）、自愈退化成最长 60s。判定走文件，进程留家里。
+  echo "$1"
+  case "${LIFE_ENSURE_VERDICT:-}" in
+    '') : ;;
+    *) printf '%s\n' "$1" > "$LIFE_ENSURE_VERDICT" 2>/dev/null ;;
+  esac
+  return 0
+}
 life_ensure_engine() {
   # 引擎启动的唯一实现（service.sh / 守护 / WebUI 重启 / 更新后重启都走这里）
-  life_user_stopped && { echo "off-by-user"; return 0; }
+  life_user_stopped && { life_verdict_emit "off-by-user"; return 0; }
   if life_engine_healthy; then
     life_cgroup_escape "$(life_pid_of "$LIFE_ST_ENGINE")"   # 已在跑的那个也补一次逃逸
-    echo "running"; return 0
+    life_verdict_emit "running"; return 0
   fi
   # 已在启动中 → **等它就绪，绝不投第二个**（见 life_engine_process_exists）。
   # 起两个实例的下场：后者 bind 端口失败退出，pidfile 被它覆盖成死号，
   # 守护下一轮判死再拉 —— 用户侧就是"点了一下启动，服务反而不稳"。
   if life_engine_process_exists; then
     life_wait_engine_ready >/dev/null 2>&1
-    echo "starting"; return 0
+    life_verdict_emit "starting"; return 0
   fi
   _prep="$(life_prep)"
   [ "$_prep" = "ok" ] || life_log "ensure-engine: prep=$_prep（后果见上方日志）"
@@ -590,7 +604,7 @@ life_ensure_engine() {
   else
     life_log "ensure-engine: pid=$_p cgroup 迁移未成功（依赖守护兜底）"
   fi
-  echo "started"
+  life_verdict_emit "started"
 }
 
 life_stop_engine() {
@@ -630,16 +644,16 @@ life_dns_healthy() {
 # 上限 30 次 ×1s：真机约 21s 到位，留足余量，又不至于让按钮长时间转圈。
 life_wait_dns_settled() { wait_for "${1:-30}" 1 life_dns_healthy; }
 life_ensure_dns() {
-  life_user_stopped && { echo "off-by-user"; return 0; }
-  life_dns_disabled && { echo "disabled"; return 0; }
+  life_user_stopped && { life_verdict_emit "off-by-user"; return 0; }
+  life_dns_disabled && { life_verdict_emit "disabled"; return 0; }
   if life_dns_running; then
     life_cgroup_escape "$(life_pid_of "$LIFE_ST_DNS")"
-    echo "running"; return 0
+    life_verdict_emit "running"; return 0
   fi
-  life_port53_busy && { echo "yielded"; return 0; }
+  life_port53_busy && { life_verdict_emit "yielded"; return 0; }
   # 让位宽限窗口：Magisk 服务早于普通 App 启动，第三方 DNS 服务可能还没起。
   sleep 5
-  life_port53_busy && { echo "yielded"; return 0; }
+  life_port53_busy && { life_verdict_emit "yielded"; return 0; }
   _BIND="$(life_read_bind)"
   if command -v setsid >/dev/null 2>&1; then
     setsid "$LIFE_DNSFWD" -f "$LIFE_UPSTREAMS" -b "$_BIND" >>"$LIFE_DNS_LOG" 2>&1 &
@@ -648,7 +662,7 @@ life_ensure_dns() {
   fi
   echo $! > "$LIFE_ST_DNS"
   life_cgroup_escape "$(life_pid_of "$LIFE_ST_DNS")"
-  echo "started"
+  life_verdict_emit "started"
 }
 life_stop_dns() {
   # 先按 pidfile 精确杀（含身份校验）；再按完整二进制路径兜底（pidfile 失联会留下占
