@@ -55,9 +55,11 @@ TMPD="$(mktemp -d 2>/dev/null || echo /tmp/cflag.$$)"
 mkdir -p "$TMPD/bin"
 printf '#!/bin/sh\nexit 0\n' > "$TMPD/bin/adb"
 chmod 755 "$TMPD/bin/adb"
-PATH="$TMPD/bin:$PATH" chk --device >"$TMPD/a.log" 2>&1
+# 对照的前提是"没有设备"——但 check.sh 还认 $DEVICE（显式指定设备号），它会把
+# 假 adb 的对照整个击穿（2026-10-02 真机在线跑 --all 时实测假红）→ 一并剥离。
+PATH="$TMPD/bin:$PATH" DEVICE= chk --device >"$TMPD/a.log" 2>&1
 A=$?
-PATH="$TMPD/bin:$PATH" chk --require-device >"$TMPD/b.log" 2>&1
+PATH="$TMPD/bin:$PATH" DEVICE= chk --require-device >"$TMPD/b.log" 2>&1
 B=$?
 if [ "$A" = 0 ] && grep -q "⏭\|SKIP" "$TMPD/a.log"; then
   ok "C3 非严格 + 无设备 → 按约定 SKIP 且退出 0"
