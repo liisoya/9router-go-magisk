@@ -14,72 +14,6 @@ env:
   REGISTRY_IMAGE: luqmenul/9router-go
 
 jobs:
-  binaries:
-    name: Build release binaries
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-
-      - name: Build Web SPA
-        run: |
-          cd web
-          bun install --frozen-lockfile
-          bun run build
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.27"
-          cache: true
-
-      # 只出 linux-arm64：模块是 arm64-only（customize.sh 校验 ABI），其余平台产物
-      # 与发布无关（2026-10-02 用户决策）；交叉编译用 Makefile 的单目标入口
-      - name: Build linux-arm64 binary
-        run: make cross-one CROSS_OS=linux CROSS_ARCH=arm64 OUT=9router-go-linux-arm64
-
-      - name: Generate checksums
-        run: |
-          (sha256sum 9router-go-linux-arm64 || shasum -a 256 9router-go-linux-arm64) > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-
-      - name: Generate changelog
-        id: changelog
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          # Try to extract section for this version tag from CHANGELOG.md
-          if [ -f CHANGELOG.md ]; then
-            NOTES=$(awk "/## \\[$TAG\\]/{flag=1; next} /## \\[v/{flag=0} flag" CHANGELOG.md)
-          fi
-          if [ -n "$NOTES" ]; then
-            echo "$NOTES" > /tmp/changelog.md
-          else
-            # Fallback to git log
-            PREV_TAG=$(git tag --sort=-version:refname | grep '^v' | head -2 | tail -1)
-            if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${GITHUB_REF_NAME}" ]; then
-              LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
-            else
-              LOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${PREV_TAG}..${GITHUB_REF_NAME})
-            fi
-            echo "$LOG" > /tmp/changelog.md
-          fi
-          cat /tmp/changelog.md
-
-      - name: Upload binaries to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            9router-go-linux-arm64
-            SHA256SUMS.txt
-          body_path: /tmp/changelog.md
-          generate_release_notes: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   docker:
     name: Build and push Docker image
     # ADR-0008：Docker 与模块发布无关；fork 无 DOCKERHUB_* secret 与 prod environment，
@@ -124,10 +58,10 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ADR-0008：模块整包发布——由 sync-upstream 流水线打的 vX.Y.Z-rN tag 触发（或手动 dispatch）。
-  # needs binaries 保证 Release 已创建，避免两个 job 并发建 release 竞态。
+  # fork 上唯一发布 job：Release 最终产物只有模块 zip（linux-arm64 等都是过程产物，不上架，
+  # 2026-10-02 用户决策）；引擎多平台二进制与 Docker 属上游仓库的发布形态。
   magisk:
     name: Build and publish Magisk module zip
-    needs: binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -148,10 +82,33 @@ jobs:
       - name: Build module zip
         run: ./build.sh
 
+      - name: Generate changelog
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Try to extract section for this version tag from CHANGELOG.md
+          if [ -f CHANGELOG.md ]; then
+            NOTES=$(awk "/## \\[$TAG\\]/{flag=1; next} /## \\[v/{flag=0} flag" CHANGELOG.md)
+          fi
+          if [ -n "$NOTES" ]; then
+            echo "$NOTES" > /tmp/changelog.md
+          else
+            # Fallback to git log
+            PREV_TAG=$(git tag --sort=-version:refname | grep '^v' | head -2 | tail -1)
+            if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${GITHUB_REF_NAME}" ]; then
+              LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+            else
+              LOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${PREV_TAG}..${GITHUB_REF_NAME})
+            fi
+            echo "$LOG" > /tmp/changelog.md
+          fi
+          cat /tmp/changelog.md
+
       - name: Upload module zip to release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
+          body_path: /tmp/changelog.md
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
