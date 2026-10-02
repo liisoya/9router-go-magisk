@@ -34,8 +34,13 @@ cp "$ROOT/module/module.prop" "$MOD/module.prop"
 # 断言会假绿（本轮就踩了一次：S2 的"失败的新引擎还在"因为三份文件字节相同而误报）。
 mk_engine() {
   printf '\177ELF%s' "${1##*/}" > "$1" || return 1
-  dd if=/dev/zero bs=1 count=0 seek=6291456 >> "$1" 2>/dev/null
+  # 稀疏扩展用 truncate：`dd count=0 seek=N` 在部分 coreutils 版本上不扩展文件
+  #（CI 实测夹具只剩十几字节 → 全部夹具被体积门禁拒掉，2026-10-02 v1.9.7-r1）
+  truncate -s 6291456 "$1" 2>/dev/null \
+    || dd if=/dev/zero bs=1048576 count=6 >> "$1" 2>/dev/null
   chmod 0755 "$1"
+  # 夹具自检：体积门禁的两个判据必须真的满足，否则后续 8 个失败全是误导
+  [ "$(wc -c < "$1")" -ge 5242880 ] || { echo "mk_engine: 夹具体积不足（$1）" >&2; return 1; }
 }
 sum_of() { cksum < "$1" 2>/dev/null | tr -d '\n'; }
 

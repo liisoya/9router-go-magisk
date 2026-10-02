@@ -37,8 +37,15 @@ jobs:
           go-version: "1.27"
           cache: true
 
-      - name: Build all platforms
-        run: make cross
+      # 只出 linux-arm64：模块是 arm64-only（customize.sh 校验 ABI），其余平台产物
+      # 与发布无关（2026-10-02 用户决策）；交叉编译用 Makefile 的单目标入口
+      - name: Build linux-arm64 binary
+        run: make cross-one CROSS_OS=linux CROSS_ARCH=arm64 OUT=9router-go-linux-arm64
+
+      - name: Generate checksums
+        run: |
+          (sha256sum 9router-go-linux-arm64 || shasum -a 256 9router-go-linux-arm64) > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Generate changelog
         id: changelog
@@ -66,11 +73,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            9router-go-linux-amd64
             9router-go-linux-arm64
-            9router-go-darwin-amd64
-            9router-go-darwin-arm64
-            9router-go-windows-amd64.exe
             SHA256SUMS.txt
           body_path: /tmp/changelog.md
           generate_release_notes: false
