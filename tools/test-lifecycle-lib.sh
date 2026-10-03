@@ -498,6 +498,41 @@ wd_bring_up 测试成功 测试失败
 [ "$eng_ours" = "5551" ] && ok "L22e wd_bring_up 消费判定词 → eng_ours 记账（S3 纪律生效）" \
                          || no "L22e 判定词没被消费（eng_ours=[$eng_ours]）—— 亲手拉起的引擎丢了归属"
 
+echo "== L23 默认 DNS 兜底：不得混入境外公共解析器（2026-10-03 真机事故）=="
+# 事故：默认第三条是 `nameserver 1.1.1.1`。它给 www.codebuddy.ai 返回的是
+# 43.17x 段（与国内 DNS 的 43.160.158.125 完全不同批），而这批节点从国内运营商
+# 出去 TLS 握手反复卡 16–20s —— 撞上 10s 硬超时就是一次 502。同一台手机上
+# 两条国内腿给的都是好节点（0.8s）。dnsfwd 只在**查询**失败时切腿，不会在
+# "解析成功但节点握手差"时切，所以这条腿是纯负债。
+#
+# 断言打在**行为**上而不是 grep 源码：真调 life_prep 生成一份，读它的内容。
+# 修复前这里会精确变红（文件里就有那行 nameserver 1.1.1.1）。
+_L23D="$_TMPD/l23"; mkdir -p "$_L23D"
+_OLD_DATA23="$DATA_DIR"; _OLD_ENV23="${LIFE_RUNTIME_ENV:-}"; _OLD_UP23="$LIFE_UPSTREAMS"
+# LIFE_UPSTREAMS 是 source 时按 DATA_DIR 展开的派生量（见 :35），只改 DATA_DIR
+# 不会让它重算 —— 必须与 L13 同样显式重设派生路径，否则断言读到的是旧目录。
+DATA_DIR="$_L23D"; LIFE_RUNTIME_ENV="$_L23D/runtime.env"; LIFE_UPSTREAMS="$_L23D/dns-upstreams.conf"
+life_prep >/dev/null 2>&1
+DATA_DIR="$_OLD_DATA23"; LIFE_RUNTIME_ENV="$_OLD_ENV23"; LIFE_UPSTREAMS="$_OLD_UP23"
+if [ -s "$_L23D/dns-upstreams.conf" ]; then
+  ok "L23a life_prep 生成了默认上游文件"
+  # 境外公共解析器清单：出现任何一条都红。判的是 nameserver/doh/dot 三个前缀之下
+  # 的**地址**（注释行不算，所以上面的说明文字里提到 1.1.1.1 不会误红）。
+  _overseas=""
+  for _bad in 1.1.1.1 8.8.8.8 8.8.4.4 9.9.9.9 8.26.56.26 64.6.64.6 208.67.222.222 208.67.220.220; do
+    if grep -E "^[[:space:]]*(nameserver|doh|dot)[[:space:]]+[^#]*${_bad}" "$_L23D/dns-upstreams.conf" >/dev/null 2>&1; then
+      _overseas="$_overseas $_bad"
+    fi
+  done
+  [ -z "$_overseas" ] && ok "L23b 默认兜底里没有境外公共解析器" \
+    || no "L23b 默认兜底混进了境外解析器：$_overseas（会给出握手卡死的 CDN 节点）"
+  _ns="$(grep -c '^[[:space:]]*nameserver[[:space:]]' "$_L23D/dns-upstreams.conf" 2>/dev/null | tr -d ' ')"
+  [ "$_ns" -ge 1 ] && ok "L23c 默认兜底仍留了明文上游（$_ns 条，删腿不等于删兜底）" \
+    || no "L23c 默认兜底一条明文上游都没有了 —— 解析全靠面板手写，首启即解析失败"
+else
+  no "L23a life_prep 没有生成默认上游文件（DNS 兜底是首启唯一的解析来源）"
+fi
+
 echo "== 结果：通过 $PASS / 失败 $FAIL / 跳过 $SKIP =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

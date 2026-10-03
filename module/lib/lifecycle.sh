@@ -536,9 +536,13 @@ life_prep() {
   if [ ! -s "$LIFE_UPSTREAMS" ]; then
     {
       echo "# 9router-go 生成：公共 DNS 兜底（无优选）"
+      echo "# 只给国内明文解析器：境外公共 DNS（1.1.1.1 / 8.8.8.8 等）会给出与国内
+      # 不同的 CDN 节点，而这些节点从国内运营商出去常常握手卡死。真机实测
+      # （CMCC 宽带）：www.codebuddy.ai 经 1.1.1.1 解析到 43.17x 段，TLS 握手
+      # 反复卡 16–20s；经下面任何一条国内解析器都是同一个 43.160.158.125，
+      # 稳定 0.8s。要加更多上游请用面板的 DNS 优选（它会实测 RTT 与可用率）。"
       echo "nameserver 223.5.5.5"
       echo "nameserver 119.29.29.29"
-      echo "nameserver 1.1.1.1"
     } > "$LIFE_UPSTREAMS.tmp" 2>/dev/null || rm -f "$LIFE_UPSTREAMS.tmp"
     # 原子落盘（架构审查 S8）：半份 upstreams 会让 dnsfwd 起不来或解析到坏上游
     [ -s "$LIFE_UPSTREAMS.tmp" ] && { mv "$LIFE_UPSTREAMS.tmp" "$LIFE_UPSTREAMS" 2>/dev/null || rm -f "$LIFE_UPSTREAMS.tmp"; }
