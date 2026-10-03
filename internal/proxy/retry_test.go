@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+
+	"9router/proxy/internal/constants"
 )
 
 // The delays are seconds upstream, so a test that exercises them for real would
@@ -210,3 +216,126 @@ func TestSleepCtx_ReturnsImmediatelyForNonPositiveDelay(t *testing.T) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }
+
+// 真机事故的复现：到 codebuddy.ai 的 TLS 握手间歇性 stall，10s 硬超时把
+// 「卡死」原样报成 502，客户端零重试、零换号。这是唯一让那类错误变成硬失败的
+// 原因，所以钉住「连接层失败必须被重拨」这条语义。
+func TestIsTransientTransportError_ClassifiesConnectionFailures(t *testing.T) {
+	// A net.Error timeout is the shape net/http reports for a blown
+	// TLSHandshakeTimeout, wrapped in *url.Error the way client.Do returns it.
+	handshake := &url.Error{
+		Op:  "Post",
+		URL: "https://www.codebuddy.ai/v2/chat/completions",
+		Err: &timeoutErr{},
+	}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"tls handshake timeout", handshake, true},
+		{"wrapped handshake timeout", fmt.Errorf("upstream request: %w", handshake), true},
+		{"raw net timeout", &timeoutErr{}, true},
+		{"eof", io.EOF, true},
+		{"unexpected eof", io.ErrUnexpectedEOF, true},
+		{"connection reset", fmt.Errorf("upstream request: %w", syscall.ECONNRESET), true},
+		{"dns failure", &net.DNSError{Err: "no such host", Name: "nope.invalid"}, false},
+		{"client gone", context.Canceled, false},
+		{"deadline exceeded", context.DeadlineExceeded, false},
+		{"upstream 502 body", &UpstreamError{StatusCode: 502}, false},
+	}
+	for _, tc := range cases {
+		if got := IsTransientTransportError(tc.err); got != tc.want {
+			t.Errorf("%s: IsTransientTransportError = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A stalled handshake must be re-dialled inside the same client turn: the
+// gateway used to hand the client a bare 502 after one 10s timeout, while the
+// very next dial succeeded in under a second.
+func TestDoRequest_ReDialsTransportFailures(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) <= 2 {
+			// Hijack and drop without a TLS handshake ever completing, the
+			// way a stalled edge node resets a fresh connection.
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"ok\":true}\n\n")
+	}))
+	defer srv.Close()
+
+	resp, err := DoRequest(context.Background(), srv.Client(), "POST", srv.URL, nil, []byte(`{"model":"m"}`))
+	if err != nil {
+		t.Fatalf("a recovered connection must serve the request, got %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 1 initial attempt + 2 re-dials (transportRetryPolicy.attempts).
+	if got := calls.Load(); got != 3 {
+		t.Errorf("expected 3 dials (2 reset + 1 served), got %d", got)
+	}
+}
+
+// Re-dialing must stop as soon as the connection works; it must not keep
+// re-dialling a healthy upstream.
+func TestDoRequest_TransportRetryStopsOnFirstSuccess(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"ok\":true}\n\n")
+	}))
+	defer srv.Close()
+
+	resp, err := DoRequest(context.Background(), srv.Client(), "POST", srv.URL, nil, []byte(`{"model":"m"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("a healthy connection must be dialled exactly once, got %d", got)
+	}
+}
+
+// An upstream that refuses the tunnel is a routing decision, not a blip: the
+// direct re-dial already happened inside doRequestOnce, and a silently retried
+// proxy failure would hide an operator-assigned proxy that is not working.
+func TestDoRequest_DoesNotReDialProxyFailures(t *testing.T) {
+	assigned := &http.Client{
+		Transport: constants.DefaultHTTPTransportConfig.NewTransport(),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// A bare text/plain 403 is what isProxyFailure reads as a local proxy
+		// refusing the tunnel.
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, "blocked by proxy allowlist")
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	_, err := DoRequest(context.Background(), assigned, "POST", srv.URL, nil, []byte(`{"model":"m"}`))
+	if time.Since(start) > time.Second {
+		t.Error("a proxy refusal must not be retried")
+	}
+	if err == nil {
+		t.Fatal("expected the proxy refusal to surface")
+	}
+}
+
+// timeoutErr is a net.Error that reports Timeout, matching what net/http hands
+// back when TLSHandshakeTimeout expires.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "net/http: TLS handshake timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
