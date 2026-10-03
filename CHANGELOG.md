@@ -1,5 +1,14 @@
 # Changelog
 
+## [v1.9.7-r2] - 2026-10-03
+
+### 🐛 Module & engine — a stalled TLS handshake became a hard 502, and the default DNS fallback shipped a resolver that hands out dead CDN nodes
+
+- 🔴 **One stalled handshake was enough to fail the request.** `TLSHandshakeTimeout` was a hard-coded 10 s and transport-level failures were never repeated — `retryTransientUpstream` only retried statuses, and `fallback.go` returned a non-`UpstreamError` immediately, so nothing re-dialed and no account rotated either. On a path where the TLS handshake to an international CDN intermittently stalls, every stall reached the client as `502 … net/http: TLS handshake timeout` after exactly 10 s. Measured on-device (CMCC broadband): **5/10 requests failed, every one at 10.0–10.1 s** — the timeout value itself was the fingerprint. The timeout is now **3 s**, overridable through `HTTP_TLS_HANDSHAKE_TIMEOUT` so it can be retuned without a rebuild, and connection-level failures are re-dialled. A re-dial is *not* a repeat: the handshake never completed, so no application byte ever reached the upstream — no duplicated work and no duplicated billing, which is exactly why this is retryable while a 502 is not. Worst case fell from 16 s to 9.8 s with a *higher* success rate (measured 3 s×3 = 9/10 against 5 s×3 = 8/10 and 20 s-single = 3/8). Three exclusions are locked by tests so the retry cannot quietly widen: an operator-assigned proxy still fails loudly, a client that hung up is not kept waiting, and a DNS failure is not re-dialled.
+- 🔴 **The default DNS fallback shipped a resolver that hands out dead CDN nodes.** The third default upstream was `nameserver 1.1.1.1`. It resolves `www.codebuddy.ai` to a *different* EdgeOne batch (43.17x) than either domestic leg (both 43.160.158.125), and from this device that batch stalls the TLS handshake at 16–20 s repeatedly while the domestic legs sit at 0.8 s. `dnsfwd` only switches legs when the *query* fails — never when a resolved node is bad — so the leg was pure downside with no path to recovery. Removed from the default set; the two domestic plaintext legs stay. Add more through the panel's DNS 优选, which measures RTT and availability instead of shipping a guess. The reason is recorded next to the list so it is not read as redundant capacity and added back.
+
+**Verified:** `tools/check.sh --offline` 18/18; `go test ./internal/constants ./internal/proxy` green with 7 new cases, each mutation-checked; LIFECYCLE L23a–L23c green, and red before the fix. On-device end-to-end: 12/12 then 5/5 at 1.1–1.5 s, and one request that hit a stall returned 200 at 14 s instead of a 502 at 10 s.
+
 ## [v1.9.5-r4] - 2026-10-01
 
 ### 🐛 Module — restart and start returned before DNS had settled; the module update source is now fixed
