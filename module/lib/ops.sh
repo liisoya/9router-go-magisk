@@ -302,11 +302,24 @@ cmd_export_logs() {
 
   # 引擎日志：过滤后的错误行 + 尾部 50 行，分开两个文件而不是拼一个 ——
   # 维护者读的时候不必在一堆 INFO 里翻，且 tail 明显是"最近发生了什么"。
-  diag_engine_lines "$DATA_DIR/9router.log" 2>/dev/null | diag_redact > "$_stage/engine-errors.log"
-  tail -n 50 "$DATA_DIR/9router.log" 2>/dev/null | diag_redact > "$_stage/engine-tail.log"
-  for _f in dnsfwd.log watchdog.log gate-lifecycle.log; do
-    diag_redact < "$DATA_DIR/$_f" > "$_stage/$_f" 2>/dev/null || rm -f "$_stage/$_f"
+  # 日志路径经 log_path_of 取（lifecycle.sh:27 已 source log.sh，这里本来就可用）。
+  # 之前是硬编码 "$DATA_DIR/9router.log" 之类 —— 路径这个概念于是有了两个家：log.sh 声明
+  # 路径与上限并提供访问器，本函数另写一份。加第 4 份日志时诊断包会带上它、轮转却不管它。
+  _eng_log="$(log_path_of engine)"
+  diag_engine_lines "$_eng_log" 2>/dev/null | diag_redact > "$_stage/engine-errors.log"
+  tail -n 50 "$_eng_log" 2>/dev/null | diag_redact > "$_stage/engine-tail.log"
+  # 模块自己的三份日志按声明取，basename 才是包内文件名
+  for _k in dns watchdog; do
+    _p="$(log_path_of "$_k")" || continue
+    diag_redact < "$_p" > "$_stage/$(basename "$_p")" 2>/dev/null || rm -f "$_stage/$(basename "$_p")"
   done
+  # gate-lifecycle.log **不是模块的日志**：它是真机门禁 tools/device/test-lifecycle.sh 的产物，
+  # log.sh 不声明它的路径与上限（模块运行期不写、守护也不轮转它）。所以这里显式作为
+  # "外人"处理，而不是混进上面的声明式循环 —— 混进去等于让它看起来归 log.sh 管。
+  if [ -s "$DATA_DIR/gate-lifecycle.log" ]; then
+    diag_redact < "$DATA_DIR/gate-lifecycle.log" > "$_stage/gate-lifecycle.log" 2>/dev/null \
+      || rm -f "$_stage/gate-lifecycle.log"
+  fi
 
   {
     echo "9router 诊断包 —— 由模块「设置 → 诊断导出」生成。"

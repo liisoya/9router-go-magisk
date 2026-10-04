@@ -139,6 +139,30 @@ _l="$(diag_engine_lines "$_F" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$_l" -ge 1 ] && ok "E8 含 NUL 的日志仍能过滤出行（$_l 行）" \
                 || no "E8 过滤结果为空 —— diag_engine_lines 少了 grep -a"
 
+echo "== E9a 日志路径必须经 log_path_of 取（路径概念只能有一个家）==="
+# 这条锁的是 locality：log.sh 是路径与上限的唯一声明并提供访问器，cmd_export_logs
+# 若自己再写一份 "$DATA_DIR/9router.log"，加第 4 份日志时诊断包会带上它、轮转却不管它。
+_body0="$(sed -n '/^cmd_export_logs()/,/^}/p' module/lib/ops.sh | grep -v '^[[:space:]]*#')"
+case "$_body0" in
+  *'log_path_of engine'*) ok "E9a 引擎日志经 log_path_of 取" ;;
+  *) no "E9a 引擎日志没有经 log_path_of 取（路径概念又有了第二个家）" ;;
+esac
+# 代码是循环形态（for _k in dns watchdog + log_path_of "$_k"），不是两句字面量
+case "$_body0" in
+  *'for _k in dns watchdog'*'log_path_of "$_k"'*) ok "E9b dns/watchdog 也经 log_path_of 取（循环形态）" ;;
+  *) no "E9b dns/watchdog 日志没有经 log_path_of 取" ;;
+esac
+# 唯一允许的裸路径是 gate-lifecycle.log —— 它不是模块的日志（log.sh 不声明它），
+# 必须在场且必须带"不是模块日志"的说明，否则将来有人会把它塞进 log.sh 的声明式循环。
+case "$_body0" in
+  *'gate-lifecycle.log'*) ok "E9c gate-lifecycle.log 显式处理（它是真机门禁产物，不归 log.sh）" ;;
+  *) no "E9c gate-lifecycle.log 处理被删了" ;;
+esac
+case "$_body0" in
+  *'"$DATA_DIR/9router.log"'*) no "E9d 又出现了硬编码的 9router.log 路径" ;;
+  *) ok "E9d 无硬编码的模块日志路径" ;;
+esac
+
 echo "== E9/E10 真跑一次导出，开 tar 验清单与回执 =="
 # 这一段刻意**不用扫源码文本**判断"有没有拷凭据文件"：扫不出来的。源码里
 # runtime.env / data.sqlite 出现在 README.txt 的 echo 文案里（那句恰恰是
@@ -177,18 +201,18 @@ if [ -n "$_ZIPF" ] && [ -s "$_ZIPF" ]; then
   done
   for f in summary.txt README.txt engine-errors.log; do
     case "$LIST" in
-      *"$f"*) ok "E9b $f 在 tar 里（该有的都有）" ;;
-      *) no "E9b $f 缺失 —— 清单不对，断言可能假绿" ;;
+      *"$f"*) ok "E9f $f 在 tar 里（该有的都有）" ;;
+      *) no "E9f $f 缺失 —— 清单不对，断言可能假绿" ;;
     esac
   done
   # 包内也必须已脱敏（不能只验函数输出，还要验落到包里��那份）
   if grep -rq "xxx3515575@gmail.com" "$_TMPD/x" 2>/dev/null; then
-    no "E9c tar 里仍有邮箱明文 —— 脱敏只做了一半"
+    no "E9g tar 里仍有邮箱明文 —— 脱敏只做了一半"
   else
-    ok "E9c tar 里无邮箱明文"
+    ok "E9g tar 里无邮箱明文"
   fi
 else
-  no "E9/E10 没能产出 tar 包（落点 $_OUT），后续清单断言全部无法进行"
+  no "前一步没能产出 tar 包（落点 $_OUT），后续清单断言全部无法进行"
 fi
 
 echo "== 结果：通过 $PASS / 失败 $FAIL ="

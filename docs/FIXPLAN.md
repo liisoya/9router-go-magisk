@@ -1421,3 +1421,69 @@
 - Q5 Phase 2 迁移 → **(a)** 渐进：先加命名操作，按类迁移，每类真机验收后再删旧路径
 
 **计划外发现（Phase 1 验收中）**：mksh 参数展开模式 `|` 为"或"运算符的跨 shell 差异 bug，已修复并沉淀为教训（见 1.3）
+
+## Phase 43 · 上游 v1.9.8 同步：**已合并、已验证、主动不合入**（29 条 parity 缺口等上游）· 2026-10-04
+
+### 结论先行
+
+同步本身**零冲突风险、零回归**，全部门禁绿；**唯一挡住发布的是 29 条 parity 缺口，而它们是上游欠我们的端口**。
+按 ADR-0008「不做机械补丁重放」与用户决策（"我们做也是填窟窿"），**主动中止合并、保持 main 在已发布的
+v1.9.7-r2**，只留这份记录，等上游补完再走一遍 §7。
+
+### 已完成并验证的（下次可直接复用）
+
+- **合并**：`git merge --no-ff v1.9.8`，5 处冲突全部按 §10.2 裁决 —— `VERSION` / `version.json` /
+  `web/package.json` / `web/bun.lock` 跟上游，`README.md` 保我们的（§10.2 早已声明"上游原文不在本仓留副本"）。
+- **补丁复核 10/10 全在**：`router.go` 四条（`/web/fetch`、`/api/health`、SSO 两条 501）、
+  `db/heal.go` 的 `HealProviderNodePrefixes`、`chat/prefix_heal.go`、`web/lib/session.ts`、
+  以及 10-03 新增的 `constants/transport.go`（3s + env 入口）与 `proxy/retry.go`（传输层重拨）。
+  **上游 v1.9.8 未吸收我们任何一条补丁** → 全部保留，不需要撤。
+- **上游未动 `retry.go` / `transport.go`**；`proxy.go` 虽改 244 行，但 `DoRequest` 签名与实现**逐字未变**，
+  `isProxyFailure` 签名也未变 → 我们那两处改动在 1.9.8 上原样成立。
+- `gen-schema.py --check` ✅、`build.sh` 七步 ✅、产出 `dist/9router-go-1.9.8-r1-magisk.zip`。
+- `scripts/bump-version.sh 1.9.8` → `v1.9.8-r1` / `versionCode=109080`（跨基线归 -r1，规则只有这一处）。
+
+### 挡住发布的那 29 条
+
+参照树 `decolua/9router` 克隆到 **v0.5.95**，而 1.9.8 的 release notes 写的就是"upstream v0.5.95 sync"
+——**两边对齐同一版本，所以这个对比是干净的**。缺口全部是「Node v0.5.95 有、我们 Go 侧从未有过」：
+
+| 缺口 | 条数 | 性质 |
+|---|---|---|
+| `/api/cli-tools/*`（codewhale / codex-profiles / crush / forge / omp / pi / smelt × GET/POST/DELETE） | 21 | v0.5.95 新扩（基线里已有 49 条 cli-tools，说明是**又一批**） |
+| `/api/combos/presets` | 2 | Node 领先 |
+| `/api/oauth/xiaomi-mimo/login/{start,status}` | 2 | Node 领先 |
+| `/api/oauth/zed/{import,auto-import}` | 2 | Node 领先 |
+| `POST /api/usage/{}/claude-reset`、`POST /api/v1/systemone` | 2 | Node 领先 |
+
+**逐条核过：不是本次合并弄丢的**（`combos/presets` / `xiaomi-mimo` / `zed` / `claude-reset` 在 v1.9.7 与
+v1.9.8 的 `internal/` 里都是 0 命中），是 1.9.8 同步 v0.5.95 时**没同步完**的遗留。
+
+**为什么不 `--write-baseline` 收进基线**：那会把棘轮从 131 永久降到 160。这 29 条客观存在，收不收都一样红，
+但**降棘轮会让"真·新增缺口"更难被发现** —— 而 ADR-0008 的熔断设计正是为了这个。保持红，等上游补完，
+是更诚实的状态。
+
+### 顺带的收获：候选 1 在 1.9.8 之后**仍然开放**
+
+原计划在 1.9.7 上抽「连接资格判定」，查过 1.9.8 后**必须改期**——上游在那个方向上动了但没做完：
+
+| 符号 | v1.9.7 | v1.9.8 |
+|---|---|---|
+| `pinnedConnectionIneligible` | 1 处 | **2 处**（仍自带一份 model-lock 判据） |
+| `ConnectionBlockedUntil` | 1 处 | **2 处** |
+| `connectionModelBlocked`（1.9.8 新增） | — | 1 处，**只被策略循环调用**，只覆盖 4 条规则里的 2 条（双键锁 + quota 缓存） |
+
+也就是说：上游**新增**了一个集中判定函数，但 `pinnedConnectionIneligible` 仍带自己那一份、
+combo 路径仍有自己的 → **一个概念三个家的问题从 3 个变成 3 个 + 1 个新函数**。
+`combo.go` 也被大改（+258/−187），正是架构候选 2 的地盘。
+
+**结论：架构候选 1 / 2 / 3 全部等 1.9.8 合入之后再动**，在 1.9.7 上改必冲突且可能重复上游已做的一半。
+候选 4（`ops.sh` 硬编码日志路径、不用 `log.sh:22-37` 访问器）与候选 5（`bridge.js` 把 `_cmds` 留在
+生产导出面）在 `module/**` 内，**1.9.8 的 diff 里 `module/` 与 `tools/` 完全为空** → 与同步零冲突，可立即修。
+
+### 下一步（上游补完 29 条后）
+
+1. `git fetch origin --tags` → 确认 1.9.8 或更新版已含那 29 条端点
+2. 重跑 §7 全流程（合并 → §10.2 复核 → schema → parity → build.sh → 真机 `install-module` → `check.sh --all`）
+3. `scripts/bump-version.sh` → tag → release
+4. 再动架构候选 1/2/3
