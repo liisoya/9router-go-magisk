@@ -8,13 +8,14 @@
 #
 # 用法：tools/deploy-device.sh [设备序列号]
 #   设备序列号缺省取 `adb devices` 中第一台 usb 设备。
-# 推送内容：lib/*.sh、service.sh、
+# 推送内容：module.prop、lib/*.sh、service.sh、
 #           webroot/*.{js,html}（glob；清单唯一来源 = index.html 的 <script src>）、etc/engine-version
 # 自检：注入后占位符计数必须为 0；远端执行 ops.sh panel 显示 engine=up 且 watchdog=up。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MOD_ID="$(grep '^id=' module/module.prop | cut -d= -f2)"
+WANT_VERSION="$(grep '^version=' module/module.prop | cut -d= -f2)"
 SERIAL="${1:-}"
 ADB="adb"
 [ -n "$SERIAL" ] && ADB="adb -s $SERIAL"
@@ -38,6 +39,10 @@ cp module/webroot/*.js module/webroot/*.html "$STAGING/webroot/"
 cp module/lib/*.sh "$STAGING/lib/"
 cp module/service.sh "$STAGING/"
 cp module/etc/engine-version "$STAGING/etc/" 2>/dev/null || true
+# module.prop 也要推：版本号是 ops.sh status / 面板「模块版本」的唯一来源。
+# 漏推的后果很隐蔽 —— **代码是新版、版本号停在旧版**（2026-10-04：推完 r2 的 webroot，
+# 面板仍显示 v1.9.7-r1），排查时第一眼就会怀疑部署没生效。
+cp module/module.prop "$STAGING/"
 # 注入唯一实现（与 build.sh 同一份；全树注入 + 自己断言零残留）。
 # 此前这里手写 sed + 列了 4 个文件，与 build.sh 的 2 个文件清单不同 —— 加新占位符文件时会漏。
 sh tools/inject-mod-id.sh module "$STAGING"
@@ -47,6 +52,7 @@ $ADB push "$STAGING/lib" /data/local/tmp/d-lib >/dev/null
 $ADB push "$STAGING/service.sh" /data/local/tmp/d-service.sh >/dev/null
 $ADB push "$STAGING/webroot" /data/local/tmp/d-webroot >/dev/null
 $ADB push "$STAGING/etc" /data/local/tmp/d-etc >/dev/null
+$ADB push "$STAGING/module.prop" /data/local/tmp/d-module.prop >/dev/null
 
 step "4/4 设备侧落位 + 自检"
 $ADB shell "su -c '
@@ -56,9 +62,12 @@ cp /data/local/tmp/d-service.sh \$M/service.sh
 cp /data/local/tmp/d-webroot/* \$M/webroot/
 for _f in \$M/webroot/*.js; do [ -f /data/local/tmp/d-webroot/\$(basename \$_f) ] || rm -f \$_f; done
 [ -f /data/local/tmp/d-etc/engine-version ] && cp /data/local/tmp/d-etc/engine-version \$M/etc/engine-version
+cp /data/local/tmp/d-module.prop \$M/module.prop
 chmod 0755 \$M/*.sh \$M/lib/*.sh
-rm -rf /data/local/tmp/d-lib /data/local/tmp/d-service.sh /data/local/tmp/d-webroot /data/local/tmp/d-etc
+rm -rf /data/local/tmp/d-lib /data/local/tmp/d-service.sh /data/local/tmp/d-webroot /data/local/tmp/d-etc /data/local/tmp/d-module.prop
 if grep -q __MOD_ID__ \$M/webroot/index.html; then echo \"FAIL: 占位符残留\"; exit 1; fi
+    _got=\$(grep -E '^version=' \$M/module.prop | cut -d= -f2)
+    [ "$WANT_VERSION" = "\$_got" ] || { echo \"FAIL: 版本号未落位（期望 $WANT_VERSION，设备 \$_got）\"; exit 1; }
 [ -x \$M/lib/watchdog.sh ] || { echo \"FAIL: lib/watchdog.sh 不可执行\"; exit 1; }
 [ -x \$M/lib/lifecycle.sh ] || { echo \"FAIL: lib/lifecycle.sh 不可执行\"; exit 1; }
 \$M/lib/ops.sh panel | head -c 160; echo

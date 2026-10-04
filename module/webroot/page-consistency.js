@@ -124,43 +124,37 @@ $id('btn-clean-orphans').onclick = cleanOrphans;
 $id('btn-scan-conn').onclick = scanCred;
 
 // ── 诊断导出（2026-10-04）──────────────────────────────────────────
-// 为什么摘要与附件两条通道都要：排障时真正缺的往往不是"完整日志"，而是
-// "版本 + 状态快照 + 最近错误"这三样能一眼看完的东西。附件给人深挖，摘要让人秒回。
+// 台面形状与同页「检查孤儿数据」「扫描」完全一致：一个 primary 按钮 + 一个
+// .listbox 结果容器（空时不占版面，有结果才出现）。曾经在这里多摆了一段
+// .hint 备注、一个「选中摘要」按钮和一个 textarea —— 三样都是这一页独有的
+// 形状，而且那个带边框的框把卡片下半截压成了日志区，与两个兄弟卡片不像同类。
+// 「不含凭据」不是台面信息，是动作语义，按这一页既有的规矩进按钮 title。
 async function exportDiag() {
+  const box = $id('diag-out');
   return runOpsAction({
     btn: $id('btn-export-logs'),
     label: '导出中…',
     subcmd: 'export-logs',
     refreshAfter: false,   // 导出不改任何运行状态，别让整页重载
     failMsg: r => `❌ 导出失败（shell 回：${String(r.out || '').trim() || '空'}）`,
-    okMsg: async r => {
+    okMsg: async () => {
       // **落点必须读回来，不能猜**。ops.sh 的回执只能是 `exported`
       // （actionOk 全等匹配，且路径带 / 与 . 也过不了 contract-keys 的抽词形状），
       // 真实路径由 shell 写进 $DATA_DIR/last-export。读失败就说读失败 ——
       // 兜底落到 /data/local/tmp 时谎报「Download」会让用户白找半天。
       const lr = await KB.readFile(`${CFG.DATA_DIR}/last-export`);
-      const box = /** @type {HTMLTextAreaElement} */ ($id('diag-summary'));
       if (lr.ok !== true || !lr.out.trim()) {
-        return '✅ 已导出，但**读不到落点路径**（last-export 缺失），请到「下载」目录查看';
+        box.innerHTML = '<div class="hint">✅ 已导出，但读不到落点路径（last-export 缺失），请到「下载」目录查看</div>';
+        return '✅ 已导出，但读不到落点路径';
       }
       const path = lr.out.trim();
       const inDownload = path.indexOf('/sdcard/Download') === 0 || path.indexOf('/storage/emulated') === 0;
-      box.value = `诊断包: ${path}\n\n（完整内容见压缩包；这段摘要够日常排障用）`;
-      box.focus();
-      box.setSelectionRange(0, box.value.length);
-      return inDownload
-        ? `✅ 已导出到「下载」目录：${path.split('/').pop()}`
-        : `⚠️ 已导出，但**不在「下载」目录**（该目录不可写）：${path}`;
+      // 用既有的 .addr 而非 .hint：全仓凡是显示地址/路径的地方都用它
+      // （mono + word-break:break-all），`.hint` 没有断行规则 —— 落点路径
+      // 是无空格的连续串，窄屏上会溢出卡片。
+      box.innerHTML = `<div class="addr">${esc(path)}</div>`;
+      return inDownload ? '✅ 已导出' : '⚠️ 已导出，但不在「下载」目录';
     }
   });
 }
 $id('btn-export-logs').onclick = exportDiag;
-$id('btn-copy-diag').onclick = () => {
-  const box = /** @type {HTMLTextAreaElement} */ ($id('diag-summary'));
-  if (!box.value.trim()) { toast('还没有摘要，先点「导出诊断包」', 2600); return; }
-  box.focus();
-  box.setSelectionRange(0, box.value.length);
-  // 不用 navigator.clipboard：KSU 的 WebView 宿主是否支持没验证过。
-  // 纯 DOM 的 focus+select 必然可用，用户按一下就能复制。
-  toast('已全选，按复制键即可粘贴', 2600);
-};
