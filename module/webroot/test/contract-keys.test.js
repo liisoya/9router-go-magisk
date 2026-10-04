@@ -33,7 +33,8 @@ const VERB_EMITTERS = {
   'enable-dns': ['life_ensure_dns'],
   'stop-dns': null,             // 回词由 ops.sh 分派行内联 echo（见断言内的特例）
   'install-engine': ['cmd_install_engine'],
-  'install-module': ['cmd_install_module']
+  'install-module': ['cmd_install_module'],
+  'export-logs':    ['cmd_export_logs']
 };
 function verbWords(fn) {
   const m = shell.match(new RegExp('(^|\\n)' + fn + '\\(\\)\\s*\\{([\\s\\S]*?)\\n\\}', 'm'));

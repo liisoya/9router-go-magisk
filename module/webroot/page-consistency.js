@@ -1,5 +1,7 @@
 // @ts-check
-/* page-consistency.js — 一致性检查页：孤儿数据扫描与清理 / 无凭据活跃连接扫描
+/* page-consistency.js — 设置页（原「一致性检查」，2026-10-04 改名）
+ *
+ * 三块：孤儿数据扫描与清理 / 无凭据活跃连接扫描 / 诊断导出。
  *
  * 顺序不变量来自 KP.ORPHAN_CLEAN_PLAN（本文件只按求值结果执行，不自己判断顺序）。
  * 出厂 key 的检查/补入 UI 已移除（用户无感）：新装由 service.sh 开机自动补入；导入场景
@@ -120,3 +122,45 @@ async function scanCred() {
 $id('btn-scan').onclick = scanOrphans;
 $id('btn-clean-orphans').onclick = cleanOrphans;
 $id('btn-scan-conn').onclick = scanCred;
+
+// ── 诊断导出（2026-10-04）──────────────────────────────────────────
+// 为什么摘要与附件两条通道都要：排障时真正缺的往往不是"完整日志"，而是
+// "版本 + 状态快照 + 最近错误"这三样能一眼看完的东西。附件给人深挖，摘要让人秒回。
+async function exportDiag() {
+  return runOpsAction({
+    btn: $id('btn-export-logs'),
+    label: '导出中…',
+    subcmd: 'export-logs',
+    refreshAfter: false,   // 导出不改任何运行状态，别让整页重载
+    failMsg: r => `❌ 导出失败（shell 回：${String(r.out || '').trim() || '空'}）`,
+    okMsg: async r => {
+      // **落点必须读回来，不能猜**。ops.sh 的回执只能是 `exported`
+      // （actionOk 全等匹配，且路径带 / 与 . 也过不了 contract-keys 的抽词形状），
+      // 真实路径由 shell 写进 $DATA_DIR/last-export。读失败就说读失败 ——
+      // 兜底落到 /data/local/tmp 时谎报「Download」会让用户白找半天。
+      const lr = await KB.readFile(`${CFG.DATA_DIR}/last-export`);
+      const box = /** @type {HTMLTextAreaElement} */ ($id('diag-summary'));
+      if (lr.ok !== true || !lr.out.trim()) {
+        return '✅ 已导出，但**读不到落点路径**（last-export 缺失），请到「下载」目录查看';
+      }
+      const path = lr.out.trim();
+      const inDownload = path.indexOf('/sdcard/Download') === 0 || path.indexOf('/storage/emulated') === 0;
+      box.value = `诊断包: ${path}\n\n（完整内容见压缩包；这段摘要够日常排障用）`;
+      box.focus();
+      box.setSelectionRange(0, box.value.length);
+      return inDownload
+        ? `✅ 已导出到「下载」目录：${path.split('/').pop()}`
+        : `⚠️ 已导出，但**不在「下载」目录**（该目录不可写）：${path}`;
+    }
+  });
+}
+$id('btn-export-logs').onclick = exportDiag;
+$id('btn-copy-diag').onclick = () => {
+  const box = /** @type {HTMLTextAreaElement} */ ($id('diag-summary'));
+  if (!box.value.trim()) { toast('还没有摘要，先点「导出诊断包」', 2600); return; }
+  box.focus();
+  box.setSelectionRange(0, box.value.length);
+  // 不用 navigator.clipboard：KSU 的 WebView 宿主是否支持没验证过。
+  // 纯 DOM 的 focus+select 必然可用，用户按一下就能复制。
+  toast('已全选，按复制键即可粘贴', 2600);
+};

@@ -564,7 +564,7 @@ test('parseCurlTimings：失败原因必须带出来（只说"不可用"没法�
 // started 的两起事故面）。词表 + actionOk 收成一处；shell 侧对齐由 contract-keys 门禁守。
 test('ACTION_WORDS：每个动词都有非空成功词集，动词集变化必须显式过门禁', () => {
   const KNOWN = ['start-user', 'restart-engine', 'stop-user', 'enable-dns', 'stop-dns',
-                 'install-engine', 'install-module'];
+                 'install-engine', 'install-module', 'export-logs'];
   assert.deepStrictEqual(Object.keys(KP.ACTION_WORDS).sort(), [...KNOWN].sort(),
     '词表动词集变了：contract-keys 的 VERB_EMITTERS 需要同步');
   for (const [verb, w] of Object.entries(KP.ACTION_WORDS)) {
@@ -578,6 +578,11 @@ test('actionOk：命中成功词才算成功；未知 subcmd / 空输出缺省�
   assert.strictEqual(KP.actionOk('enable-dns', 'running'), true, '幂等分支不许判失败');
   assert.strictEqual(KP.actionOk('stop-user', 'stopped'), true);
   assert.strictEqual(KP.actionOk('install-module', 'engine=up'), true);
+  assert.strictEqual(KP.actionOk('export-logs', 'exported'), true);
+  // 落点路径**不能**进回执：actionOk 是 trim 后全等匹配，带换行/多余输出即判失败
+  assert.strictEqual(KP.actionOk('export-logs', 'exported\n/sdcard/Download/x.tar.gz'), false,
+    '回执带了落点路径就过不了全等匹配 —— 路径必须走 last-export 单独读回');
+  assert.strictEqual(KP.actionOk('export-logs', 'fail'), false, '打包失败不算成功');
   assert.strictEqual(KP.actionOk('no-such-verb', 'anything'), false, '未知动词必须拒绝');
   assert.strictEqual(KP.actionOk('stop-user', ''), false, '空输出（shell 没吐词）不许算成功');
 });

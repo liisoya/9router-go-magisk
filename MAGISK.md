@@ -18,7 +18,7 @@
 │   ├── uninstall.sh          # 卸载：停进程（保留数据）
 │   ├── bin/                  # 9router-go（构建产物）、dnsfwd、sqlite3
 │   ├── etc/schema.sql        # 数据库 schema 引导（上游 DATABASE.md 派生，构建期断言防漂移）
-│   └── webroot/              # 模块 WebUI（KSU/WebUIX）：概览/DNS/一致性检查/更新
+│   └── webroot/              # 模块 WebUI（KSU/WebUIX）：概览/DNS/设置/更新
 │       ├── index.html        # HTML 结构（MODDIR 由构建期注入 __MOD_ID__）
 │       ├── upstream.js       # 上游 release 地址契约（tag 归一/资产名/校验和/加速前缀）
 │       ├── parsers.js        # 纯函数解析层（可离线 node --test 回归）
@@ -149,7 +149,7 @@ su -c '/data/adb/modules/ninerouter-go/lib/ops.sh status' # watchdog=up|down|sta
 |---|---|
 | 概览 | 引擎/dnsfwd 状态与内存占用、引擎端口修改（写 `port` 文件并重启） |
 | DNS | 上游增删改、`dnsfwd -P` 探测、优选评分（可用率/RTT/fake-ip）一键应用 Top5、回滚、绑定范围 |
-| 一致性检查 | 修复 Dashboard 出厂 key、清理孤儿 customModels/disabledModels（已删节点的残留，即客户端模型列表里 `openai-compatible-chat-<uuid>` 噪音的来源）、无凭据活跃连接警告 |
+| 设置 | 修复 Dashboard 出厂 key、清理孤儿 customModels/disabledModels（已删节点的残留，即客户端模型列表里 `openai-compatible-chat-<uuid>` 噪音的来源）、无凭据活跃连接警告、**诊断导出**（`ops.sh export-logs`：状态快照 + 脱敏后的错误日志，写到「下载」目录；不含 `runtime.env` 与数据库，邮箱/连接 id/token 已抹值） |
 | 更新 | GitHub 加速节点本机测速选优（初始清单来自 moretools.app 聚合，可自定义）、引擎 release 检查/更新（SHA256 校验）、模块 zip 覆盖更新 |
 
 - 加速节点选中值存 `$DATA_DIR/github-accel`，自定义清单 `$DATA_DIR/accel-list.conf`

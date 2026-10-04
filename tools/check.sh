@@ -181,6 +181,11 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/test-lifecycle-lib.sh ]; then
       run "LIFECYCLE 生命周期原语离线自证（lifecycle.sh）" sh tools/test-lifecycle-lib.sh
     fi
+    # EXPORTLOGS：诊断导出的脱敏行为 —— 起因是它是**唯一一条把本地数据发到设备外**
+    # 的路径，而保障它的是一串 sed 正则：漏抹与误伤都不会让任何其它门禁变红
+    if [ -f tools/test-export-logs.sh ]; then
+      run "EXPORTLOGS 诊断导出脱敏离线自证（ops.sh）" sh tools/test-export-logs.sh
+    fi
     # WATCHDOG：守护判定核（去抖 / S3 记账 / S4 位保持 / 死因取证）——
     # 起因：2026-10-01 架构走查候选 3，主循环 336 行此前离线零覆盖，
     # A2/A3/S3/S4 四条审查规则的"测试"是真机档 + 注释

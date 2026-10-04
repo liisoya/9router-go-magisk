@@ -154,7 +154,12 @@
     'enable-dns':     { ok: ['started', 'running'] },
     'stop-dns':       { ok: ['stopped'] },
     'install-engine': { ok: ['engine=up'] },
-    'install-module': { ok: ['engine=up'] }
+    'install-module': { ok: ['engine=up'] },
+    // 诊断包导出：只有 exported 算成功。**不能把落点塞进回执** —— actionOk 是
+    // trim 后全等匹配（见下），而路径带 `/` 和 `.` 也不符合 contract-keys 抽词的
+    // `[a-z][a-z0-9-]*` 形状。真实绝对路径由 shell 写进 $DATA_DIR/last-export，
+    // 面板读完再如实展示 —— 兜底落到 /data/local/tmp 时才能不谎报 Download。
+    'export-logs':   { ok: ['exported'] }
   };
   /** 判定一个动作回词是否算成功（trim 后全等命中成功词集之一）。runOpsAction 与
    *  手工路径（install 流程）共用这一个判定 —— "哪个词算成功"不许再有第二个家。 */

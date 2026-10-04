@@ -6,7 +6,7 @@
 #   生命周期 = lib/lifecycle.sh（进程启停、用户意图、状态文件、cgroup 脱组）。本文件只 source 它，
 #              **绝不自己读写任何 lifecycle 状态文件**（否则"状态无主"的老毛病会立刻回来）。
 # 输出约定：机器可读的 key=value 行（WebUI 解析）；部分子命令输出状态词。
-USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port>"
+USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port|export-logs>"
 # 环境变量: DATA_DIR（默认 /data/adb/9router-go）、PORT（显式覆盖端口）
 
 # PATH 显式声明（架构审查 S2）：本脚本被 WebUI(ksu.exec)/管理器/Termux 多上下文执行，
@@ -212,6 +212,123 @@ engine_src_ok() {
   [ "$_sz" -ge "$ENGINE_MIN_BYTES" ] || return 1
   [ "$(head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d '[:space:]')" = "7f454c46" ] || return 1
   return 0
+}
+
+# ── 诊断导出（2026-10-04）────────────────────────────────────────────
+# 给"把现场发给维护者"用。三条自我约束，任何一条都不能为了省事破：
+#   1. **不导全量日志**。引擎日志日常 300KB+ 起步，附件没人看；只留 WRN/ERR、
+#      生命周期关键行，再加尾部 50 行做上下文。
+#   2. **不带任何凭据**。runtime.env 含面板初始密码（0600）、db/data.sqlite
+#      含全部连接凭据 —— 一律不进包，不是"脱敏后进"，是根本不出现在打包清单里。
+#   3. **脱敏后才给人看**。真机实测一份日常日志里 connName= 出现 416 次、
+#      email= 26 次，而 connName 的值通常就是账号邮箱。
+#
+# 脱敏强度是刻意选的，不是越狠越好：抹掉模型名会让"哪个模型在失败"这条线索消失，
+# 而 reqID 无害（没它查不了单次请求）。所以只抹"能认出你"的三类。
+# 引擎侧有 log.MaskSecret，但模块这边读不到它（全仓 0 调用点），只能各自实现。
+# 键名走**枚举**而不是正则猜：早先用 [Kk]ey= 试探，结果 factory_key=1 会被
+# 误伤成 factory_***=1，把状态快照的字段名毁了。
+#
+# **Authorization 必须单独一条规则**（2026-10-04 离线自证抓到的真漏洞）：它和上面
+# 那批键的形状不同 —— 值是 `Bearer <JWT>`，**带空格**。混进 `(...)=([^ ]+)` 那条时，
+# `[^ ]+` 吃到 "Bearer" 就停，**真正的 token 原样留在后面**：
+#   改前：Authorization=*** eyJhbGciOi     ← JWT 泄露，且"看起来已经脱敏了"
+#   改后：Authorization=***
+# 它的值不跨行（一条日志一行），所以抹到行尾是安全的。
+# **先 tr -d '\000' 再 sed**：真机实测三份日志里都混着 NUL 字节（9router.log 280 个、
+# watchdog.log 220 个、dnsfwd.log 99 个，来源是引擎自己写的，不是我这层引入的）。
+# 不清掉的话维护者一 grep 就得到 "binary file matches" 且**什么都不显示** ——
+# 那恰好是这个功能要解决的问题本身。NUL 在文本日志里没有语义，清掉是纯收益。
+diag_redact() {
+  tr -d '\000' | sed -E \
+    -e 's/(^|[^A-Za-z0-9_])email=[^ ]*/\1email=***/g' \
+    -e 's/(^|[^A-Za-z0-9_])(conn|connName|connID)=([^ ]{8})[^ ]*/\1\2=\3***/g' \
+    -e 's/(^|[^A-Za-z0-9_])(apiKey|accessToken|refreshToken|token|secret|password)=([^ ]+)/\1\2=***/g' \
+    -e 's/(^|[^A-Za-z0-9_])Authorization=.*/\1Authorization=***/g' \
+    -e 's#(https?://)[^/@ ]+:[^/@ ]+@#\1***:***@#g'
+}
+
+# 引擎日志取行：级别行 + 生命周期关键行。关键行是"不看就没法判断发生了什么"的那几种
+# —— 开机判据、DNS 拉起/让路、连接被锁、上游失败。
+diag_engine_lines() {
+  [ -s "$1" ] || return 0
+  # `grep -a`：源日志混着 NUL 字节（见 diag_redact 的说明），不带 -a 时 grep 判定
+  # "binary file matches" 后**只打那一行提示、不输出任何内容** —— 过滤结果会是空的。
+  grep -aE 'WRN|ERR|boot:|拉起|让路|stop-dns:|upstream failed|install-|degraded|不是本模块' "$1"
+}
+
+cmd_export_logs() {
+  # 落点优先 /sdcard/Download（用户浏览得到的唯一地方）；不可写则退 /data/local/tmp。
+  # **真实绝对路径写进 $DATA_DIR/last-export**：面板要如实报落在哪，不能猜 ——
+  # 兜底发生时如果还 toast "已导出到 Download"，用户会白找半天（§2.6 状态必须与事实一致）。
+  # DIAG_OUT_DIR 是测试与「导出到别处」的唯一入口：落点探测是实现细节，不该硬编码在
+  # 实现里 —— tools/test-export-logs.sh 靠它把导出**真的跑一遍**再开 tar 验清单
+  # （扫源码文本找文件名不可靠：它分不清"拷贝这个文件"和"README 文案里提到它"）。
+  _out="${DIAG_OUT_DIR:-}"
+  if [ -z "$_out" ]; then
+    for _d in /sdcard/Download /storage/emulated/0/Download; do
+      if [ -d "$_d" ] && touch "$_d/.9r-w" 2>/dev/null; then
+        rm -f "$_d/.9r-w" 2>/dev/null
+        _out="$_d"
+        break
+      fi
+    done
+  fi
+  [ -n "$_out" ] || _out="/data/local/tmp"
+  _ts="$(date '+%Y%m%d-%H%M%S' 2>/dev/null || echo diag)"
+  _zip="$_out/9router-diag-${_ts}.tar.gz"
+  _stage="$DATA_DIR/.diag"
+
+  rm -rf "$_stage" 2>/dev/null
+  mkdir -p "$_stage" 2>/dev/null || { echo "fail"; return 0; }
+
+  # summary：状态快照是人读的运维接口（ops.sh status 的唯一消费者就是它），
+  # 也是排障第一步要看的东西。DNS 三个状态词全在里面（up/yielded/disabled/down）。
+  {
+    echo "# 9router 诊断摘要"
+    echo "生成时间: $(date '+%F %T' 2>/dev/null)"
+    echo "模块版本: $(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)"
+    echo "引擎版本: $(cat "$DATA_DIR/engine-version" 2>/dev/null)"
+    echo
+    echo "## 状态快照（ops.sh status）"
+    cmd_status 2>/dev/null | diag_redact
+    echo
+    echo "## :53 占用（1=有服务，0=空 —— 引擎解析只认回环 53）"
+    if life_port53_busy; then echo 1; else echo 0; fi
+    echo
+    echo "## DNS 状态词"
+    life_state 2>/dev/null
+  } > "$_stage/summary.txt" 2>/dev/null
+
+  # 引擎日志：过滤后的错误行 + 尾部 50 行，分开两个文件而不是拼一个 ——
+  # 维护者读的时候不必在一堆 INFO 里翻，且 tail 明显是"最近发生了什么"。
+  diag_engine_lines "$DATA_DIR/9router.log" 2>/dev/null | diag_redact > "$_stage/engine-errors.log"
+  tail -n 50 "$DATA_DIR/9router.log" 2>/dev/null | diag_redact > "$_stage/engine-tail.log"
+  for _f in dnsfwd.log watchdog.log gate-lifecycle.log; do
+    diag_redact < "$DATA_DIR/$_f" > "$_stage/$_f" 2>/dev/null || rm -f "$_stage/$_f"
+  done
+
+  {
+    echo "9router 诊断包 —— 由模块「设置 → 诊断导出」生成。"
+    echo
+    echo "内容：summary.txt（状态快照）/ engine-errors.log（错误与生命周期行）/"
+    echo "      engine-tail.log（最近 50 行）/ dnsfwd.log / watchdog.log / gate-lifecycle.log"
+    echo
+    echo "已做脱敏：email 抹值、连接 id 只留前 8 位、token/key/password 抹值、"
+    echo "URL 里的 user:pass 抹值。**不含** runtime.env 与 db/data.sqlite（凭据不进包）。"
+  } > "$_stage/README.txt"
+
+  # 双判据（照抄 sqlSnapshot 的形状）：tar 失败时退出码可能仍是 0（管道截断等），
+  # 所以除了退出码还要看产物非空；失败即删空文件，不给用户留一个"看着像日志"的 0 字节包。
+  if ! (cd "$_stage" && tar -czf "$_zip" . 2>/dev/null) || [ ! -s "$_zip" ]; then
+    rm -f "$_zip" 2>/dev/null
+    rm -rf "$_stage" 2>/dev/null
+    echo "fail"
+    return 0
+  fi
+  rm -rf "$_stage" 2>/dev/null
+  printf '%s\n' "$_zip" > "$DATA_DIR/last-export"
+  echo "exported"
 }
 
 cmd_install_engine() {
@@ -449,6 +566,7 @@ case "${1:-}" in
   port53-busy)     if life_port53_busy; then echo 1; else echo 0; fi ;;
   seed-key)        shift; cmd_seed_key "$@" ;;
   get-port)        life_get_port ;;
+  export-logs)     cmd_export_logs ;;
   get)             shift; cmd_get "$@" ;;
   *)               echo "usage: $USAGE"; exit 1 ;;
 esac

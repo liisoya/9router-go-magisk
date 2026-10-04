@@ -512,7 +512,7 @@ td b { color: var(--acc); font-weight: 600; }
       </button>
       <button type="button" data-page="p-consistency">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.4 4 5v5c0 3.4 2.4 6.4 6 7.6 3.6-1.2 6-4.2 6-7.6V5z"/><path d="M7.4 10.2 9.3 12l3.3-3.6"/></svg>
-        <span>一致性检查</span>
+        <span>设置</span>
       </button>
       <button type="button" data-page="p-update">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v9M6.2 8.6 10 12.4l3.8-3.8"/><path d="M3.2 16h13.6"/></svg>
@@ -632,7 +632,7 @@ td b { color: var(--acc); font-weight: 600; }
       </div>
     </section>
 
-    <!-- ═══════════════ 一致性检查 ═══════════════ -->
+    <!-- ═══════════════ 设置（原「一致性检查」，2026-10-04 改名：这一页会继续长） ═══════════════ -->
     <section class="page" id="p-consistency">
       <!-- 出厂 key 卡片已移除：全新安装由 service.sh 开机自动补入；备份导入后仪表盘
            走会话鉴权（引擎 /api/models/test 不再依赖 apiKeys 表），用户全程无感。
@@ -660,6 +660,24 @@ td b { color: var(--acc); font-weight: 600; }
           <div class="row"><button class="primary" id="btn-scan-conn" title="扫描缺 token / key 的活跃连接（仅警告，不自动处理）">扫描</button></div>
           <div id="cred-list" class="listbox"></div>
         </div>
+      </div>
+      <div class="card">
+        <h2 class="card-h">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7.4 3.2h5.2l3.4 3.4v10.2H4V3.2z"/><path d="M12.4 3.4v3.4h3.4M7 10.6h6M7 13.4h4"/></svg></span>
+          诊断导出
+        </h2>
+        <div class="row">
+          <button class="primary" id="btn-export-logs" title="打包状态快照 + 脱敏后的错误日志，写到「下载」目录；不含任何凭据">导出诊断包</button>
+        </div>
+        <p class="hint">
+          导出的包<b>不含</b>任何凭据（<code>runtime.env</code> 与数据库不会进包），
+          邮箱与连接 id 已抹值。发之前请自行过一眼——<b>日志里有你的模型名和内网 IP。</b>
+        </p>
+        <div class="row" style="margin-top:10px">
+          <button id="btn-copy-diag" title="选中下方摘要，全选复制后发给维护者（比传附件更快）">选中摘要</button>
+        </div>
+        <textarea id="diag-summary" spellcheck="false" rows="7"
+          placeholder="点击「导出诊断包」后，这里会出现一段可复制的诊断摘要"></textarea>
       </div>
     </section>
 
