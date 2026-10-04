@@ -14,16 +14,23 @@
  *      -list 强制管道输出）；database is locked 自动重试（引擎与 WebUI 共库）
  *   5. 命名操作层（Phase 2）：readFile / writeFile / download / … 的命令拼装
  *      与引号转义（shq）只有这一个家，app.js 不再内联拼 shell。构造器是纯
- *      函数（_cmds 导出），离线可测（test/bridge-commands.test.js）。
+ *      函数，离线可测（test/bridge-commands.test.js）—— 但**只在 Node 的
+ *      CommonJS 分支上挂载**（factory 的 forTest 参数），生产页面拿不到 _cmds。
+ *      页面要执行某个动作请走 db/diag 命名层，不要伸手进构造器表。
  *
  * 依赖：index.html 先注入 window.CFG = { MODDIR, DATA_DIR }，再加载本文件。
  */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory();
-  else root.KBridge = factory();
+  // forTest 只在 Node（离线测试）下为真：生产页面拿不到构造器表。
+  // 这条分界是本 seam 的全部意义 —— 2026-10-01 架构评审 #3 要解决的就是
+  //「同一对象既是测试私有表又是生产 API」，当时补了 db/diag 命名层却没把
+  // _cmds 从导出面撤出（只说「保持原样留给测试断言」），于是形状没闭合：
+  // 页面现在都走 db 了，但 KB._cmds 仍对外可见，下一个人完全可能重新伸手进去。
+  if (typeof module === 'object' && module.exports) module.exports = factory(true);
+  else root.KBridge = factory(false);
   // 类型闸说明：`this` 分支转 any —— 本文件带了 module.exports，TS 按 CJS 模块处理，
   // 顶层 `this` 的类型是"模块导出对象"，而浏览器分支要的是宿主全局（同 parsers.js）。
-})(typeof self !== 'undefined' ? self : /** @type {any} */ (this), function () {
+})(typeof self !== 'undefined' ? self : /** @type {any} */ (this), function (forTest) {
   'use strict';
 
   let _chain = Promise.resolve();
@@ -37,6 +44,16 @@
   // ── 引号转义：所有拼进命令的路径/URL/内容都经此处理（唯一出口）──
   function shq(s) {
     return "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
+  }
+
+  // ── promise 降级形态的输出包裹（**运行层设施，不是命令构造器**）──
+  // 多行输出整体 base64 收敛为单行，"只剩末行"的实现也能收回完整输出
+  // （Phase 4：该环境补偿从此只存在于 bridge 一层）。
+  // 为什么不在 _cmds 里：它包裹的是**执行形态**而非某条命令，唯一的调用方是
+  // execForm。放在 _cmds 会让"命令构造器表"混进一条没有任何命令用得到的东西 ——
+  // 而 _cmds 的读者是测试断言命令形状，混进运行层设施就污染了这个interface。
+  function promiseWrap(cmd) {
+    return `{ ${cmd}\n} 2>/dev/null | base64 | tr -d '\n'`;
   }
 
   // ── UTF-8 安全的 base64（writeFile 内容通道 / panel 的 upstreams_b64 解码）──
@@ -149,9 +166,9 @@
       const cbName = '_ksu_cb_' + Math.random().toString(36).slice(2);
       return sentinelExec(mode, cmd, cbName, timeoutMs);
     }
-    // promise 降级形态：整体 base64 包裹（见 _cmds.promiseWrap），
-    // 收回后解码——多行输出（SQL 结果、dnsfwd 探测等）不再失真只剩末行
-    const r = callForm('promise', _cmds.promiseWrap(cmd));
+    // promise 降级形态：整体 base64 包裹（见 promiseWrap），收回后解码——
+    // 多行输出（SQL 结果、dnsfwd 探测等）不再失真只剩末行
+    const r = callForm('promise', promiseWrap(cmd));
     if (r && typeof r.then === 'function') {
       return r.then(v => {
         const raw = String(typeof v === 'string' ? v : (v && v.stdout) || '').replace(/\r/g, '').trim();
@@ -310,9 +327,6 @@
       return `mkdir -p ${shq(dir)}; `
         + `{ ${dump} > ${shq(out)} 2>/dev/null && [ -s ${shq(out)} ] && echo snap-ok; } || { rm -f ${shq(out)}; echo snap-fail; }`;
     },
-    // promise 降级形态包裹：多行输出整体 base64 收敛为单行，"只剩末行"的实现
-    // 也能收回完整输出（Phase 4：该环境补偿从此只存在于 bridge 一层）
-    promiseWrap: cmd => `{ ${cmd}\n} 2>/dev/null | base64 | tr -d '\n'`,
     // ops.sh 子命令：脚本路径与每个 token 都过 shq（ver/路径不再裸拼——shq 是唯一转义出口）
     ops: sub => `${shq(cfg().MODDIR + '/lib/ops.sh')} ${String(sub == null ? '' : sub).trim().split(/\s+/).map(shq).join(' ')}`,
     // ── dbOps：SQL 文本唯一所有者（离线可断言；别名一律来自 computeOrphans，已过 UUID 形状校验）──
@@ -423,12 +437,19 @@
   // 诊断用（不是业务动作）：列出模块目录内容，供 diag 文案说明"缺了什么"
   const diag = { libListing: () => sh(_cmds.libListing()) };
 
-  return {
+  // 生产 interface：不含 _cmds。构造器表只在 Node 的 CommonJS 分支上挂载
+  // （见文件头的 forTest），生产页面看不见它 —— 想断言命令形状的测试请读
+  // test/bridge-commands.test.js，不要从页面伸手进来。
+  const api = {
     sh, sqlFile, ops, openUrl, detectMode, db, diag,
     readFile, writeFile, appendLine, remove, backupOnce, restoreBackup,
     probeDns, curlTimingBatch, fetch, download, sha256, zipList, sqlSnapshot,
     fileSize, elfMagic,
-    b64Decode,
-    _cmds // 纯函数构造器，供离线测试
+    b64Decode
   };
+  if (forTest) {
+    api._cmds = _cmds;          // 命令构造器表（纯函数，断言命令形状）
+    api._internal = { promiseWrap };  // 运行层内部件：包裹执行形态，不是命令
+  }
+  return api;
 });

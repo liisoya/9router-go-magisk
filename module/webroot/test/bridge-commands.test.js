@@ -245,8 +245,11 @@ test('sqlSnapshot()：shell 报失败时返回 false（不得凭 !r.err 假成�
 });
 
 // ── promise 降级形态包裹（Phase 4：多行安全收敛在 bridge 一层）──
+// 2026-10-04 候选 5：promiseWrap 已从 _cmds 提为运行层函数 —— 它包裹的是**执行形态**
+// 而不是某条命令，唯一调用方是 execForm。留在 _cmds 会让「命令构造器表」混进一条没有
+// 命令用得到的东西，污染 _cmds 这个 interface 的语义。改从 test-only 的 _internal 取。
 test('promiseWrap：多行命令整体 base64 收敛为单行', () => {
-  const cmd = C.promiseWrap("cat > /d/cc.sql <<'__EOSQL__'\nSELECT 1;\n__EOSQL__\nsqlite3 db < /d/cc.sql");
+  const cmd = KB._internal.promiseWrap("cat > /d/cc.sql <<'__EOSQL__'\nSELECT 1;\n__EOSQL__\nsqlite3 db < /d/cc.sql");
   assert.ok(cmd.startsWith('{ '), '复合命令包裹');
   assert.ok(cmd.includes("\n} 2>/dev/null | base64 | tr -d '\n'"), 'base64 管道收敛为单行');
   assert.ok(cmd.includes("SELECT 1;"), '内部命令原样保留');
@@ -271,4 +274,53 @@ test('fileSize / elfMagic：只读探针，输出收敛为单值供 engineFileGa
   const m = C.elfMagic('/d/engine');
   assert.ok(m.includes('head -c 4'), m);
   assert.ok(m.includes('od -An -tx1'), m);
+});
+
+// ── 生产 interface 不得携带构造器表（2026-10-04 候选 5 的核心断言）──
+// 背景：2026-10-01 架构评审 #3 指出「同一对象既是测试私有表又是生产 API」，当时补了
+// db/diag 命名层，却只说「_cmds 保持原样留给测试断言」而没把它撤出导出面 —— 形状没闭合：
+// 页面现在都走 db 了，KB._cmds 却仍对外可见，下一个人完全可以重新伸手进去。
+// 这里断言两件事：生产分支拿不到 _cmds，且生产页面代码里不出现 _cmds。
+const fs = require('node:fs');
+const path = require('node:path');
+const SRC = fs.readFileSync(path.join(__dirname, '..', 'bridge.js'), 'utf8');
+
+test('生产 interface 不含 _cmds：构造器表只在 Node 的 CommonJS 分支挂载', () => {
+  assert.ok(
+    /if \(forTest\)\s*\{[\s\S]*?api\._cmds = _cmds/.test(SRC),
+    'bridge.js 必须只在 forTest 分支挂载 _cmds（否则生产页面又看得见构造器表）'
+  );
+  // 生产 export 的对象字面量里不许出现 _cmds
+  const i = SRC.lastIndexOf('const api = {');
+  const lit = SRC.slice(i, SRC.indexOf('};', i));
+  assert.ok(!/_cmds/.test(lit),
+    '生产 export 的对象字面量里不得出现 _cmds（它只在 forTest 分支单独挂）');
+  // 浏览器分支不得以 forTest=true 调用 factory
+  assert.ok(!/root\.KBridge = factory\(true\)/.test(SRC),
+    '浏览器分支必须是 factory(false) —— 生产页面不能拿到构造器表');
+});
+
+test('生产页面代码不伸手进 _cmds（走 db/diag 命名层）', () => {
+  // **先剥注释再扫**：注释里提到 _cmds 是在说明"SQL 的唯一所有者在哪"，
+  // 不是伸手。踩过一次同样的坑 —— 上一版把 page-consistency.js:78 那句
+  // 「SQL 来自 _cmds.orphanSnapshotSql」判成了违规。扫源码文本必须分清
+  // 代码与描述代码的文字（与 export-logs 的 E9 同一条教训）。
+  const stripComments = src => src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')          // 块注释
+    .replace(/^\s*\/\/.*$/gm, ' ')               // 整行注释
+    .replace(/([^:])\/\/[^\n]*/g, '$1 ');        // 行尾注释（粗略：不碰 http://）
+  const dir = path.join(__dirname, '..');
+  const REACH = /\b_cmds\b\s*[.)\[]|KB\._cmds|window\._cmds/;
+  const offenders = fs.readdirSync(dir)
+    .filter(f => f.endsWith('.js') && f !== 'bridge.js')
+    .filter(f => REACH.test(stripComments(fs.readFileSync(path.join(dir, f), 'utf8'))));
+  assert.deepStrictEqual(offenders, [],
+    `生产页面不得伸手进 _cmds：${offenders.join(', ')}（要执行动作请走 db/diag 命名层）`);
+});
+
+test('promiseWrap 不再挂在 _cmds 上（它是运行层设施，不是命令构造器）', () => {
+  assert.strictEqual(C.promiseWrap, undefined,
+    'promiseWrap 混进命令构造器表会让 _cmds 混进一条没有命令用得到的东西');
+  assert.strictEqual(typeof KB._internal.promiseWrap, 'function',
+    '它必须仍可被测试断言（经 test-only 的 _internal）');
 });
