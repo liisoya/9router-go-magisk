@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 
 	"go.uber.org/fx"
 
@@ -77,11 +76,10 @@ func ProvideDatabase(lc fx.Lifecycle, cfg *config.Config) (*sql.DB, error) {
 	if res, err := db.NewRepo(conn).HealProviderNodePrefixes(); err != nil {
 		_, statErr := conn.Exec("SELECT 1")
 		if statErr == nil {
-			log.Printf("[db] 展示前缀自愈失败（不影响启动）：%v", err)
+			log.Warn("db", "展示前缀自愈失败（不影响启动）", "error", err)
 		}
 	} else if res.Nodes > 0 || res.Connections > 0 || res.Resurrected > 0 {
-		log.Printf("[db] 展示前缀自愈：补回节点 %d 个 / 连接 %d 个 / 悬空连接补回节点 %d 个",
-			res.Nodes, res.Connections, res.Resurrected)
+		log.Info("db", "展示前缀自愈", "nodes", res.Nodes, "connections", res.Connections, "resurrected", res.Resurrected)
 	}
 
 	lc.Append(fx.Hook{

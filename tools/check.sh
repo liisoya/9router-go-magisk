@@ -126,9 +126,12 @@ if [ "$OFFLINE" = 1 ]; then
 
   # BUN-UNIT：引擎 Dashboard 纯函数（bun；无 bun 但有 npx 时用 `npx --yes bun` 兜底）
   if have bun; then
-    run "BUN-UNIT Dashboard 纯函数（bun test）" bash -c 'cd web && bun test'
+    # 只跑纯函数单测（src/ + scripts/）。e2e/ 是 Playwright 套件（需 @playwright/test + 起真实网关），
+    # 由 package.json 的 `bun test e2e/` 单独跑；上游 1.9.13 新增 e2e/ 后，未加范围的 `bun test`
+    # 会把 e2e 拖进本"纯函数"门禁（缺 @playwright/test 即 7 个 load error）。
+    run "BUN-UNIT Dashboard 纯函数（bun test src/ scripts/）" bash -c 'cd web && bun test src/ scripts/'
   elif have npx; then
-    run "BUN-UNIT Dashboard 纯函数（npx bun test）" bash -c 'cd web && npx --yes bun test'
+    run "BUN-UNIT Dashboard 纯函数（npx bun test src/ scripts/）" bash -c 'cd web && npx --yes bun test src/ scripts/'
   else
     skip "BUN-UNIT" "缺少 bun 与 npx"
   fi
