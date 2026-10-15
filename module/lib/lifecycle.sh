@@ -854,14 +854,31 @@ life_dns_health_round1() {
   # shellcheck disable=SC2086
   if life_dns_probe_dead "$(life_dns_probe_output $_hr_d)"; then echo dead; else echo ok; fi
 }
+# 纯判定（与 I/O 分离，ADR-0010 纪律；2026-10-15 架构评审 C5）：
+#   dnsfwd -P --tsv 的输出 → 可达上游的规范形式（TSV 第 1 列 = up_ident，可原样写回；去重保序）。
+# 判据只看第 5 列 ok/total：total 须是合法数字且 ok>0；表头行（第 1 列是字面量 upstream 或空）跳过。
+# 为什么抽出来：它是自愈"选谁"的唯一规则，却曾内联在 life_dns_recover 的管道里 ——
+# 自动改写用户配置的判据离线零覆盖（B3）。抽成纯函数后可离线断言（L27）。
+life_dns_select_reachable() {
+  awk -F'\t' '$1=="upstream"||$1==""{next}
+      { n=split($5,a,"/"); if(n!=2||a[1]!~/^[0-9]+$/) next; if(a[1]+0>0 && !seen[$1]++) print $1 }'
+}
 # I/O：恢复动作（ADR-0010 决策 3）。连续全败后：备份优先 + 可达性硬门槛 + 原子写盘 + 热重载。
 #   选择规则**只做可达性**（保留 ok>0 的上游），不复制面板 page-dns.js 的 RTT/可用率评分优选
 #   （§2.1 单一所有者：紧急恢复 ≠ 手动优选）。完整"优选"待把候选池收敛为单一来源后的后续阶段。
 #   候选 = 当前配置项（用户明示意图优先）∪ 内置默认集（module/etc/dns-defaults，
 #   C3 单一来源，life_prep 落盘的正是它；不含境外公共解析器，见 L23）。
-#   一条都不可达 → 不改写（保留原配置等人工/下轮）；如实返回成败，由调用方记日志。
+#   判据（stdout 一词，watchdog 如实记账 —— ADR-0010 决策 5"不谎报成功"；C5 前这里
+#   reload 失败也 return 0，守护记的是"已完成并热重载"，那是谎报）：
+#     recovered               已按可达性重选并热重载生效
+#     recovered-reload-failed 已写盘但热重载没生效（配置在盘上、dnsfwd 未换）
+#     none-reachable          一条都不可达 → 不改写（保留原配置等人工/下轮）
+#     no-candidates           候选集为空（当前配置与默认集——含硬编码兜底——都取不到）
+#     stale-config            探测期间配置被改（用户编辑优先，不覆盖其意图）
+#     no-dnsfwd               dnsfwd 不在跑
+#     write-failed            落盘失败（原配置未动）
 life_dns_recover() {
-  life_dns_running || return 1
+  life_dns_running || { echo no-dnsfwd; return 0; }
   _rc_cand="$DATA_DIR/dns-heal-cand.tmp"
   {
     cat "$LIFE_UPSTREAMS" 2>/dev/null
@@ -870,7 +887,13 @@ life_dns_recover() {
     | grep -Ev '(127\.0\.0\.1|::1)' \
     | awk 'NF>=2 && ($1=="nameserver"||$1=="doh"||$1=="dot")' \
     | awk '!s[$0]++' > "$_rc_cand" 2>/dev/null
-  [ -s "$_rc_cand" ] || { rm -f "$_rc_cand"; return 1; }
+  [ -s "$_rc_cand" ] || { rm -f "$_rc_cand"; echo no-candidates; return 0; }
+
+  # 配置形态快照（cksum）：写盘前复核。自愈与 WebUI 手动编辑之间无锁（C4 起 WebUI 写入
+  # 走 ops.sh write-upstreams，两边都是 tmp+mv，原子性保证不了"谁的意图留下"）—— 这个
+  # 复核关掉常见窗口：用户在一次 ~60s 探测窗口里点了保存，自愈不覆盖他。残余的
+  # "复核后、mv 前"微秒级窗口由 .prev 回滚点兜（保存/优选也都会留新 .prev）。
+  _rc_sig="$(cksum < "$LIFE_UPSTREAMS" 2>/dev/null)"
 
   # 治愈判据与健康探测同源：用真实供应商主机的首轮代表做 -d；取不到则退回 dnsfwd 默认域名
   _rv_hosts="$(life_dns_probe_hosts 2>/dev/null)"
@@ -882,13 +905,16 @@ life_dns_recover() {
       _rv_d="$_rv_d -d $_rv_h"; _rv_i=$((_rv_i + 1))
     done
   fi
-  # 可达项 = 对真实主机 ok>0 的上游（TSV 第 1 列=up_ident 规范形式，可原样写回；去重）
+  # 可达项 = 对真实主机 ok>0 的上游（判据是纯函数 life_dns_select_reachable，离线可断言）
   # shellcheck disable=SC2086
   _rc_good="$("$LIFE_DNSFWD" -f "$_rc_cand" -P --tsv $_rv_d 2>/dev/null \
-    | awk -F'\t' '$1=="upstream"||$1==""{next}
-        { n=split($5,a,"/"); if(n!=2||a[1]!~/^[0-9]+$/) next; if(a[1]+0>0 && !seen[$1]++) print $1 }')"
+    | life_dns_select_reachable)"
   rm -f "$_rc_cand"
-  [ -n "$_rc_good" ] || return 1                       # 可达性硬门槛
+  [ -n "$_rc_good" ] || { echo none-reachable; return 0; }   # 可达性硬门槛
+
+  # 写盘前复核：探测期间配置被改过 → 让位（用户的编辑优先，不自愈覆盖）
+  [ "$(cksum < "$LIFE_UPSTREAMS" 2>/dev/null)" = "$_rc_sig" ] \
+    || { echo stale-config; return 0; }
 
   # 备份优先：.prev 每次刷新、.initial 首次（回滚点语义的唯一实现，与 ops.sh
   # write-upstreams 共用；C4 收敛前这里曾内联一份同款次序）
@@ -900,9 +926,14 @@ life_dns_recover() {
   {
     printf '# DNS 解析健康自愈（ADR-0010）%s：原上游集全部不可达，按可达性重选\n' "$(date '+%F %T')"
     printf '%s\n' "$_rc_good"
-  } > "$_rc_new" 2>/dev/null || { rm -f "$_rc_new"; return 1; }
-  mv "$_rc_new" "$LIFE_UPSTREAMS" 2>/dev/null || { rm -f "$_rc_new"; return 1; }
-  life_reload_dns >/dev/null 2>&1
+  } > "$_rc_new" 2>/dev/null || { rm -f "$_rc_new" 2>/dev/null; echo write-failed; return 0; }
+  mv "$_rc_new" "$LIFE_UPSTREAMS" 2>/dev/null || { rm -f "$_rc_new" 2>/dev/null; echo write-failed; return 0; }
+  # 热重载成败分开回报（C5 前：失败被吞、无条件 return 0 —— 谎报"已热重载"）
+  if [ "$(life_reload_dns 2>/dev/null)" = "reloaded" ]; then
+    echo recovered
+  else
+    echo recovered-reload-failed
+  fi
   return 0
 }
 

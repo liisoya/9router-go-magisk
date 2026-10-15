@@ -641,6 +641,102 @@ _ns26="$(grep -c '^[[:space:]]*nameserver[[:space:]]' "$_L26D/data2/dns-upstream
   || no "L26d 默认源缺失时 life_prep 没生成兜底——首启即解析失败"
 DATA_DIR="$_OLD_DATA26"; LIFE_RUNTIME_ENV="$_OLD_ENV26"; LIFE_UPSTREAMS="$_OLD_UP26"; LIFE_DNS_DEFAULTS="$_OLD_DEF26"
 
+echo "== L27 自愈选谁：纯判定 life_dns_select_reachable（2026-10-15 架构评审 C5）=="
+# 打在**行为**上（真实 TSV 形状，列序同 dnsfwd.c 的 --tsv 表头）：判据是"ok>0 才算可达"，
+# 而它曾内联在 life_dns_recover 的管道里——自动改写用户配置的规则离线零覆盖（B3）。
+# 为什么用 --tsv 形状：DoH 标识含空格（doh https://host/path），按空白切列会错位。
+_tsv() { printf 'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\tanswers\tfakeip\ttcp_ms\ttcp_ok/total\ttcp_ip\n'; }
+_r1="$({ _tsv; printf 'nameserver 223.5.5.5\tv4\th\t4\t2/2\t1\t1.2.3.4\t\t0/0\t\n'; printf 'nameserver 10.0.0.1\tv4\th\t-\t0/2\t0\t\t\t0/0\t\n'; } | life_dns_select_reachable)"
+[ "$_r1" = "nameserver 223.5.5.5" ] && ok "L27a ok>0 保留、0/N 剔除" || no "L27a 选择结果不对：[$_r1]"
+_r2="$({ _tsv; printf 'nameserver 10.0.0.1\tv4\th\t-\t0/2\t0\t\t\t0/0\t\n'; } | life_dns_select_reachable)"
+[ -z "$_r2" ] && ok "L27b 全 0/N → 空（无可写回项）" || no "L27b 全不可达却选了：[$_r2]"
+[ -z "$(_tsv | life_dns_select_reachable)" ] && ok "L27c 仅表头 → 空" || no "L27c 仅表头却选了"
+_r4="$({ _tsv; printf 'doh https://dns.alidns.com/dns-query\tv4\th\t9\t1/2\t1\t1.2.3.4\t\t0/0\t\n'; printf 'doh https://dns.alidns.com/dns-query\tv4\th\t9\t2/2\t1\t1.2.3.4\t\t0/0\t\n'; } | life_dns_select_reachable)"
+[ "$(printf '%s\n' "$_r4" | wc -l | tr -d ' ')" = 1 ] && [ "$_r4" = "doh https://dns.alidns.com/dns-query" ] \
+  && ok "L27d 去重 + DoH 标识含空格不错位（TSV 的意义）" || no "L27d 去重/空格处理不对：[$_r4]"
+_r5="$({ _tsv; printf 'nameserver 1.1.1.1\tv4\th\t4\tx/2\t1\t\t\t0/0\t\n'; printf 'nameserver 8.8.8.8\tv4\th\t4\t2\t1\t\t\t0/0\t\n'; } | life_dns_select_reachable)"
+[ -z "$_r5" ] && ok "L27e total 畸形（x/2、缺 /）→ 跳过，不误判可达" || no "L27e 畸形行没跳过：[$_r5]"
+[ -z "$(printf '' | life_dns_select_reachable)" ] && ok "L27f 空输入 → 空" || no "L27f 空输入却有输出"
+
+echo "== L28 自愈 I/O 端到端：verdict 如实 + 并发让位（C5）=="
+# C5 前：life_dns_recover 把 reload 失败吞成 return 0（守护记"已完成并热重载"= 谎报），
+# 且整条 I/O 路径（探测→备份→写盘→reload）离线零覆盖。这里用桩 dnsfwd（固定 TSV）+
+# 桩 reload + 桩进程判定，在临时目录上重放，断言每个 verdict 与文件结局。
+_L28D="$_TMPD/l28"; mkdir -p "$_L28D/data"
+cat > "$_L28D/defaults" <<'EOF'
+nameserver 223.5.5.5
+nameserver 119.29.29.29
+EOF
+cat > "$_L28D/fake-dnsfwd" <<'EOF'
+#!/bin/sh
+printf 'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\tanswers\tfakeip\ttcp_ms\ttcp_ok/total\ttcp_ip\n'
+printf 'nameserver 223.5.5.5\tv4\twww.example.com\t4\t2/2\t1\t1.2.3.4\t\t0/0\t\n'
+printf 'nameserver 10.0.0.1\tv4\twww.example.com\t-\t0/2\t0\t\t\t0/0\t\n'
+EOF
+cat > "$_L28D/fake-dnsfwd-dead" <<'EOF'
+#!/bin/sh
+printf 'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\tanswers\tfakeip\ttcp_ms\ttcp_ok/total\ttcp_ip\n'
+printf 'nameserver 223.5.5.5\tv4\twww.example.com\t-\t0/2\t0\t\t\t0/0\t\n'
+printf 'nameserver 10.0.0.1\tv4\twww.example.com\t-\t0/2\t0\t\t\t0/0\t\n'
+EOF
+# 探测期间"用户经 WebUI 保存了一下"：夹具在输出 TSV 前改配置（模拟并发编辑）
+cat > "$_L28D/fake-dnsfwd-edit" <<'EOF'
+#!/bin/sh
+printf 'nameserver 119.29.29.29\n' >> "$LIFE_UPSTREAMS"
+printf 'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\tanswers\tfakeip\ttcp_ms\ttcp_ok/total\ttcp_ip\n'
+printf 'nameserver 223.5.5.5\tv4\twww.example.com\t4\t2/2\t1\t1.2.3.4\t\t0/0\t\n'
+EOF
+chmod +x "$_L28D/fake-dnsfwd" "$_L28D/fake-dnsfwd-dead" "$_L28D/fake-dnsfwd-edit"
+_OLD_D28="$DATA_DIR"; _OLD_UP28="$LIFE_UPSTREAMS"; _OLD_DEF28="$LIFE_DNS_DEFAULTS"; _OLD_FWD28="$LIFE_DNSFWD"
+export LIFE_UPSTREAMS="$_L28D/data/dns-upstreams.conf"
+life_dns_running() { return 0; }                 # 进程层：当作 dnsfwd 在跑
+life_dns_probe_hosts() { echo "www.example.com"; }  # 主机提取另有 L25 覆盖，这里钉流程
+life_reload_dns() { echo "${_L28_RELOAD:-reloaded}"; }
+_l28_reset() { rm -f "$LIFE_UPSTREAMS" "$LIFE_UPSTREAMS.prev" "$LIFE_UPSTREAMS.initial" "$LIFE_UPSTREAMS.tmp"; }
+
+_l28_reset; printf 'nameserver 10.0.0.1\n' > "$LIFE_UPSTREAMS"
+LIFE_DNSFWD="$_L28D/fake-dnsfwd"; LIFE_DNS_DEFAULTS="$_L28D/defaults"; _L28_RELOAD=reloaded
+_v="$(life_dns_recover)"
+[ "$_v" = "recovered" ] && ok "L28a verdict=recovered（写盘+热重载都成）" || no "L28a verdict：[$_v]"
+grep -q '223.5.5.5' "$LIFE_UPSTREAMS" 2>/dev/null && ok "L28b 可达项写回配置" || no "L28b 可达项没写回"
+grep -q '10.0.0.1' "$LIFE_UPSTREAMS" 2>/dev/null && no "L28c 不可达项仍在配置里" || ok "L28c 不可达项被剔除"
+grep -q '10.0.0.1' "$LIFE_UPSTREAMS.prev" 2>/dev/null && ok "L28d .prev = 自愈前的配置（可回滚）" || no "L28d .prev 没留"
+[ ! -e "$LIFE_UPSTREAMS.tmp" ] && ok "L28e 无 tmp 残留" || no "L28e 留下 tmp"
+
+_L28_RELOAD=fail
+_v="$(life_dns_recover)"
+[ "$_v" = "recovered-reload-failed" ] && ok "L28f reload 失败 → 分开回报（C5 前是谎报 recovered）" || no "L28f verdict：[$_v]"
+grep -q '223.5.5.5' "$LIFE_UPSTREAMS" 2>/dev/null && ok "L28g reload 失败但配置已写盘" || no "L28g 配置没写盘"
+_L28_RELOAD=reloaded
+
+_l28_reset; printf 'nameserver 10.0.0.1\n' > "$LIFE_UPSTREAMS"
+LIFE_DNSFWD="$_L28D/fake-dnsfwd-dead"
+_v="$(life_dns_recover)"
+[ "$_v" = "none-reachable" ] && ok "L28h 一条都不可达 → none-reachable" || no "L28h verdict：[$_v]"
+[ "$(cat "$LIFE_UPSTREAMS")" = "nameserver 10.0.0.1" ] && ok "L28i 不可达时原配置一字未动" || no "L28i 原配置被改了"
+
+_l28_reset; printf 'nameserver 10.0.0.1\n' > "$LIFE_UPSTREAMS"
+LIFE_DNSFWD="$_L28D/fake-dnsfwd-edit"     # 探测期间用户保存了 119.29.29.29
+_v="$(life_dns_recover)"
+[ "$_v" = "stale-config" ] && ok "L28j 探测期间配置被改 → stale-config（让位）" || no "L28j verdict：[$_v]"
+grep -q '119.29.29.29' "$LIFE_UPSTREAMS" 2>/dev/null && ok "L28k 用户的编辑被保留（没被自愈覆盖）" || no "L28k 用户编辑被覆盖了"
+grep -q '223.5.5.5' "$LIFE_UPSTREAMS" 2>/dev/null && no "L28l 让位后却仍写进了自愈结果" || ok "L28l 让位后未写自愈结果"
+
+_l28_reset; rm -f "$LIFE_UPSTREAMS"
+LIFE_DNSFWD="$_L28D/fake-dnsfwd"; LIFE_DNS_DEFAULTS="$_L28D/nonexistent"
+_v="$(life_dns_recover)"
+# 默认源缺失不该让自愈瘫掉：life_dns_default_lines 退硬编码最小集（C3 的保底设计）
+[ "$_v" = "recovered" ] && ok "L28m 默认源缺失 → 仍可自愈（退内置最小集，C3 保底）" || no "L28m verdict：[$_v]"
+grep -q '223.5.5.5' "$LIFE_UPSTREAMS" 2>/dev/null && ok "L28m2 最小集里的可达项写回配置" || no "L28m2 没写回"
+
+life_dns_running() { return 1; }
+_v="$(life_dns_recover)"
+[ "$_v" = "no-dnsfwd" ] && ok "L28n dnsfwd 不在跑 → no-dnsfwd" || no "L28n verdict：[$_v]"
+life_dns_running() { return 0; }
+
+DATA_DIR="$_OLD_D28"; LIFE_UPSTREAMS="$_OLD_UP28"; LIFE_DNS_DEFAULTS="$_OLD_DEF28"; LIFE_DNSFWD="$_OLD_FWD28"
+unset _L28_RELOAD
+
 echo "== 结果：通过 $PASS / 失败 $FAIL / 跳过 $SKIP =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

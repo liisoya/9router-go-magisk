@@ -375,11 +375,20 @@ while :; do
           if life_dns_heal_due "$dns_fail" "$_hdn" "$dns_heal_at"; then
             dns_heal_at="$_hdn"
             log "DNS 解析健康：真实供应商主机首轮探测全部不可达（连续 ${dns_fail} 次），执行自愈（备份优先重选可达上游）"
-            if life_dns_recover; then
-              log "DNS 自愈完成：已按真实主机可达性重选上游并热重载（回滚点 .prev/.initial 已留）"
-            else
-              log "DNS 自愈未生效（真实主机均无可达上游或写盘/重载失败；原配置未动，详见 dnsfwd.log）"
-            fi
+            # 判据词如实记账（ADR-0010 决策 5"不谎报成功"；C5 前 life_dns_recover 的 reload
+            # 失败也被吞成 return 0，这里记的是"已完成并热重载"——那是谎报）。每个词一句话。
+            # 注意：$() 安全——recover 不启动进程（dnsfwd 已在跑，reload 只发信号），
+            # 与 L22"$() 包 ensure 会把引擎孤儿化"不同形。
+            _hr_v="$(life_dns_recover)"
+            case "$_hr_v" in
+              recovered)               log "DNS 自愈完成：已按真实主机可达性重选上游并热重载（回滚点 .prev/.initial 已留）" ;;
+              recovered-reload-failed) log "DNS 自愈：配置已写盘，但热重载未生效（dnsfwd 未换，详见 dnsfwd.log）" ;;
+              none-reachable)          log "DNS 自愈未生效：真实主机均无可达上游（原配置未动，等人工或下轮）" ;;
+              stale-config)            log "DNS 自愈让位：探测期间上游配置被修改过（用户编辑优先，不覆盖）" ;;
+              no-candidates)           log "DNS 自愈未执行：候选集为空（配置空且默认源缺失）" ;;
+              no-dnsfwd)               log "DNS 自愈未执行：dnsfwd 不在跑" ;;
+              *)                       log "DNS 自愈未生效（verdict=${_hr_v:-空}；原配置未动，详见 dnsfwd.log）" ;;
+            esac
             dns_fail=0
           fi ;;
         ok) dns_fail=0 ;;
