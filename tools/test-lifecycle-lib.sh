@@ -533,6 +533,73 @@ else
   no "L23a life_prep 没有生成默认上游文件（DNS 兜底是首启唯一的解析来源）"
 fi
 
+echo "== L24 DNS 解析健康自愈：纯判定（ADR-0010）=="
+# 打在**行为**上（真实 TSV 形状），不 grep 源码：判据是"至少一条可达就不动、全 0/N 才自愈"。
+# 为什么用 --tsv 形状：非 TSV 下 DoH 标识含空格（doh https://host/path），按空白切列会错位 ——
+# 这正是探测输出固定用 --tsv 的原因，用一条 DoH 可达样本把它钉住。
+_dead="$(printf 'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\n223.5.5.5\tv4\twww.baidu.com\t-1\t0/2\t0\n119.29.29.29\tv4\twww.baidu.com\t-1\t0/2\t0\n')"
+life_dns_probe_dead "$_dead" && ok "L24 全部 0/N → 判全亡（该自愈）" || no "L24 全 0/N 却没判亡"
+_mix="$(printf 'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\n223.5.5.5\tv4\twww.baidu.com\t4\t2/2\t2\n119.29.29.29\tv4\twww.baidu.com\t-1\t0/2\t0\n')"
+life_dns_probe_dead "$_mix" && no "L24b 有一条可达却判全亡（会误触发自愈）" || ok "L24b 有可达项 → 不判亡"
+_doh="$(printf 'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\ndoh https://dns.alidns.com/dns-query\tv4\twww.baidu.com\t30\t2/2\t2\n')"
+life_dns_probe_dead "$_doh" && no "L24c DoH 可达却判亡（按空白切列会错位，已用 TSV 规避）" || ok "L24c DoH 可达 → 不判亡"
+life_dns_probe_dead "" && no "L24d 空输出被判亡（探测抖动会触发改写配置）" || ok "L24d 空输出 → 信号不足不判亡"
+life_dns_probe_dead "$(printf 'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\n')" \
+  && no "L24e 仅表头被判亡" || ok "L24e 仅表头 → 无数据行不判亡"
+
+echo "== L24f life_dns_probe_due：秒级探测节流 =="
+life_dns_probe_due 100000 0 && ok "L24f 首探（last=0）→ 到期" || no "L24f 首探未到期"
+life_dns_probe_due 50 "$LIFE_DNS_PROBE_SEC" && no "L24f2 未到周期却到期（会每轮探测、费电）" || ok "L24f2 未到周期 → 不探"
+life_dns_probe_due $((LIFE_DNS_PROBE_SEC + 5)) 0 && ok "L24f3 到周期 → 探" || no "L24f3 到周期却未探"
+life_dns_probe_due "" 0 && no "L24f4 now 非法却到期" || ok "L24f4 now 非法 → 不探"
+life_dns_probe_due 100 abc && no "L24f5 last 非法却到期" || ok "L24f5 last 非法 → 不探"
+
+echo "== L24g life_dns_heal_due：连续失败门槛 + 冷却（防一次抖动就改写 / 防恢复风暴）=="
+life_dns_heal_due "$LIFE_DNS_HEAL_MIN_FAILS" 100000 0 && ok "L24g 达门槛且无冷却 → 动手" || no "L24g 达门槛却没动手"
+life_dns_heal_due $((LIFE_DNS_HEAL_MIN_FAILS - 1)) 100000 0 && no "L24g2 未达门槛却动手（一次网络抖动就改用户配置）" || ok "L24g2 未达门槛 → 不动"
+life_dns_heal_due "$LIFE_DNS_HEAL_MIN_FAILS" 100 $((LIFE_DNS_HEAL_COOLDOWN - 50)) && no "L24g3 冷却中却动手（恢复风暴）" || ok "L24g3 冷却中 → 不动"
+life_dns_heal_due "$LIFE_DNS_HEAL_MIN_FAILS" $((LIFE_DNS_HEAL_COOLDOWN + 50)) 0 && ok "L24g4 冷却过 → 可再动" || no "L24g4 冷却过却不动"
+life_dns_heal_due abc 100000 0 && no "L24g5 fails 非法却动手" || ok "L24g5 fails 非法 → 不动"
+
+echo "== L24h life_dns_host_from_url：URL → 主机（真实主机探测的取主机逻辑）=="
+[ "$(life_dns_host_from_url 'https://developer.amd.com.cn/radeon/api/v1')" = "developer.amd.com.cn" ] && ok "L24h 带 scheme+path → 主机" || no "L24h 取主机错"
+[ "$(life_dns_host_from_url 'https://API.OpenAI.com/v1')" = "api.openai.com" ] && ok "L24h2 大写转小写" || no "L24h2 未转小写"
+[ "$(life_dns_host_from_url 'http://host.example:8080/x')" = "host.example" ] && ok "L24h3 去端口" || no "L24h3 端口没去"
+[ "$(life_dns_host_from_url 'api.anthropic.com')" = "api.anthropic.com" ] && ok "L24h4 无 scheme 也认" || no "L24h4 无 scheme 失败"
+life_dns_host_from_url '' >/dev/null 2>&1 && no "L24h5 空 URL 却成功" || ok "L24h5 空 URL → 拒绝"
+life_dns_host_from_url 'https://ho st/x' >/dev/null 2>&1 && no "L24h6 含空格却成功" || ok "L24h6 非法主机形状 → 拒绝"
+
+echo "== L24i life_dns_proxy_is_remote：代理解析方式决定 dnsfwd 是否需要代劳 =="
+life_dns_proxy_is_remote 'socks5h://127.0.0.1:7890' && ok "L24i socks5h → 远端（不探该主机）" || no "L24i socks5h 未判远端"
+life_dns_proxy_is_remote 'http://127.0.0.1:7890' && ok "L24i2 http → 远端" || no "L24i2 http 未判远端"
+life_dns_proxy_is_remote 'https://p.example' && ok "L24i3 https → 远端" || no "L24i3 https 未判远端"
+life_dns_proxy_is_remote 'socks5://127.0.0.1:7890' && no "L24i4 socks5 误判远端" || ok "L24i4 socks5 → 本地（要探）"
+life_dns_proxy_is_remote '' && no "L24i5 空代理误判远端" || ok "L24i5 空代理 → 本地（要探）"
+
+echo "== L25 life_dns_probe_hosts：从 DB 取真实本地解析主机（fixture 库；含代理排除/去重）=="
+# 覆盖：嵌套 baseUrl / 顶层 baseUrl / socks5h+http 代理连接排除 / isActive=0 排除 / 无 baseUrl 排除 / 同主机去重
+_L25D="$_TMPD/l25"; mkdir -p "$_L25D/db"
+_OLD_DB25="$LIFE_DB"
+LIFE_DB="$_L25D/db/data.sqlite"
+"$LIFE_SQLITE3" "$LIFE_DB" "CREATE TABLE providerConnections (id TEXT PRIMARY KEY, provider TEXT, isActive INTEGER, data TEXT);" 2>/dev/null
+"$LIFE_SQLITE3" "$LIFE_DB" "INSERT INTO providerConnections (id,provider,isActive,data) VALUES
+ ('c1','openai-compatible-a',1,'{\"providerSpecificData\":{\"baseUrl\":\"https://developer.amd.com.cn/radeon/api/v1\"}}'),
+ ('c2','openai-compatible-b',1,'{\"baseUrl\":\"https://api.openai.com/v1\"}'),
+ ('c3','openai-compatible-c',1,'{\"baseUrl\":\"https://socks5h.example/v1\",\"connectionProxyEnabled\":true,\"connectionProxyUrl\":\"socks5h://127.0.0.1:7890\"}'),
+ ('c4','openai-compatible-d',1,'{\"baseUrl\":\"https://httpprox.example/v1\",\"connectionProxyEnabled\":true,\"connectionProxyUrl\":\"http://127.0.0.1:7890\"}'),
+ ('c5','openai-compatible-e',0,'{\"baseUrl\":\"https://inactive.example/v1\"}'),
+ ('c6','claude',1,'{\"accessToken\":\"tok\"}'),
+ ('c7','openai-compatible-f',1,'{\"baseUrl\":\"https://developer.amd.com.cn/other/path\"}');" 2>/dev/null
+_L25="$(life_dns_probe_hosts | tr '\n' ' ')"
+case "$_L25" in *developer.amd.com.cn*) ok "L25 含嵌套 baseUrl 主机" ;; *) no "L25 缺 developer.amd.com.cn：[$_L25]" ;; esac
+case "$_L25" in *api.openai.com*) ok "L25b 含顶层 baseUrl 主机" ;; *) no "L25b 缺 api.openai.com" ;; esac
+case "$_L25" in *socks5h.example*|*httpprox.example*) no "L25c 远端代理解析的连接没排除（会误判 DNS）" ;; *) ok "L25c socks5h/http 代理连接已排除" ;; esac
+case "$_L25" in *inactive.example*) no "L25d 非活跃连接主机混入" ;; *) ok "L25d 非活跃连接已排除" ;; esac
+case "$_L25" in *claude*) no "L25d2 无 baseUrl 的连接混入" ;; *) ok "L25d2 无 baseUrl 已排除" ;; esac
+_L25N="$(life_dns_probe_hosts | grep -c 'developer.amd.com.cn')"
+[ "$_L25N" = "1" ] && ok "L25e 同主机去重（c1/c7 → 1 次）" || no "L25e 主机重复（$_L25N 次）"
+LIFE_DB="$_OLD_DB25"
+
 echo "== 结果：通过 $PASS / 失败 $FAIL / 跳过 $SKIP =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0

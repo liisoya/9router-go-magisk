@@ -700,6 +700,182 @@ life_reload_dns() {
   fi
 }
 
+# ── DNS 解析健康自愈（ADR-0010）──────────────────
+# 背景：引擎只认 127.0.0.1:53（dnsfwd），而守护（ADR-0004）只判进程存活、不判解析健康 ——
+# "进程活着但上游全不可达 → 一律 SERVFAIL"的半死态能长期潜伏（2026-10-15 真机：5 个上游全亡，
+# 模型/更新全取不到）。这里补上"解析是否真的返回答案"这一维，但**只 reload / 备份优先恢复配置，
+# 绝不重启进程**（ADR-0004：解析不健康不是重启判据）。
+#
+# 单一所有者（ADR-0005）：谓词与 I/O 都住本文件；守护只持循环计数并调用（见 watchdog.sh 维护块）。
+# 节流用**秒**（§2.21），纯判定可离线断言（tools/test-lifecycle-lib.sh L24）；探测放主循环维护块，
+# 不在信号 handler 内 fork（§2.20）。
+LIFE_DNS_PROBE_SEC=120        # 多久探测一次上游可达性（dnsfwd -P 有真实网络开销，不宜每轮跑）
+LIFE_DNS_HEAL_MIN_FAILS=2     # 连续几次"全不可达"才动手（去抖：一次网络抖动不改写用户配置）
+LIFE_DNS_HEAL_COOLDOWN=600    # 自愈动作后多久内不再动作（防恢复风暴）
+LIFE_DNS_ROUND=4              # 每轮探测主机数（= dnsfwd MAXDOMAINS；首轮取代表=前 4 个）
+LIFE_DNS_MAX_HOSTS=12         # 真实主机总量上限（分轮探完；上限防呆）
+
+# 纯判定：URL → 主机名（去 scheme/path/userinfo/port，转小写，只接受域名形状）。
+life_dns_host_from_url() {
+  _hu="${1:-}"; [ -n "$_hu" ] || return 1
+  _hu="${_hu#*://}"; _hu="${_hu%%/*}"; _hu="${_hu##*@}"
+  case "$_hu" in *:*) _hu="${_hu%:*}" ;; esac     # 去 :port（IPv6 字面量罕见，不特殊处理）
+  _hu="$(printf '%s' "$_hu" | tr 'A-Z' 'a-z')"    # 仅转小写；内部空白交给下面域名校验拦（不 tr -d，否则 "ho st"→"host" 被洗白成合法主机）
+  _hu="${_hu#"${_hu%%[![:space:]]*}"}"            # 去首尾空白（POSIX trim）
+  _hu="${_hu%"${_hu##*[![:space:]]}"}"
+  case "$_hu" in ''|*[!a-z0-9.-]*) return 1 ;; esac
+  printf '%s\n' "$_hu"
+}
+# 纯判定：代理是否"远端解析"主机名。返回 0 = 远端（dnsfwd 不必解析该主机）；1 = 本地/无代理。
+#   socks5h / http / https(CONNECT) 由代理解析；socks5 / socks4 / 空 → 引擎本地解析（需 dnsfwd）。
+life_dns_proxy_is_remote() {
+  case "${1:-}" in
+    socks5h://*|http://*|https://*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# I/O：从 DB 取"引擎经 dnsfwd 本地解析"的真实供应商主机（去重、小写、域名校验、上限）。
+#   只覆盖**兼容节点**（用户自设 baseUrl，如 developer.amd.com.cn）；排除代理做远端解析的连接
+#   （socks5h/http——那些由代理解析，dnsfwd 无需代劳，测它们会误判）。**不硬编码代理/域名**，
+#   设备有无代理都通用（完全按连接的 DB 配置）。OAuth provider（无 baseUrl）的主机在引擎探针
+#   矩阵，shell 不复制（§2.1）→ 交给可达性诊断。
+life_dns_probe_hosts() {
+  [ -x "$LIFE_SQLITE3" ] && [ -f "$LIFE_DB" ] || return 1
+  _ph_urls="$("$LIFE_SQLITE3" -list "$LIFE_DB" "
+    SELECT COALESCE(json_extract(data,'\$.providerSpecificData.baseUrl'),
+                    json_extract(data,'\$.baseUrl'),
+                    json_extract(data,'\$.baseURL'),'')
+    FROM providerConnections
+    WHERE isActive=1
+      AND COALESCE(json_extract(data,'\$.providerSpecificData.baseUrl'),
+                   json_extract(data,'\$.baseUrl'),
+                   json_extract(data,'\$.baseURL'),'') <> ''
+      AND NOT (
+        COALESCE(json_extract(data,'\$.connectionProxyEnabled'),0) IN (1,'true')
+        AND (
+          lower(COALESCE(json_extract(data,'\$.connectionProxyUrl'),'')) LIKE 'socks5h://%'
+          OR lower(COALESCE(json_extract(data,'\$.connectionProxyUrl'),'')) LIKE 'http://%'
+          OR lower(COALESCE(json_extract(data,'\$.connectionProxyUrl'),'')) LIKE 'https://%'
+        )
+      );
+  " 2>/dev/null)"
+  [ -n "$_ph_urls" ] || return 1
+  printf '%s\n' "$_ph_urls" | while read -r _u; do
+    [ -n "$_u" ] && life_dns_host_from_url "$_u"
+  done | awk 'NF && !s[$0]++' | head -n "$LIFE_DNS_MAX_HOSTS"
+}
+
+# 纯判定：dnsfwd -P --tsv 的输出 → 当前上游集是否"全部不可达"。
+#   $1 = 探测输出（TSV；首行表头 upstream\tfamily\t...）。返回 0 = 全亡（该自愈）；1 = 有可达 / 信号不足。
+# 为什么用 --tsv：非 TSV 下 DoH 标识含空格（doh https://host/path），按空白切列会错位；TSV 第 5 列
+# 稳定是 ok/total。无数据行（空/仅表头/畸形）→ 判"信号不足"不判亡：避免把一次探测抖动当成全亡。
+life_dns_probe_dead() {
+  _pd_in="${1:-}"
+  [ -n "$_pd_in" ] || return 1
+  _pd_stat="$(printf '%s\n' "$_pd_in" | awk -F'\t' '
+    $1=="upstream" || $1=="" { next }
+    { n=split($5,a,"/"); if(n!=2) next; if(a[1] !~ /^[0-9]+$/) next
+      lines++; if(a[1]+0>0) anyok=1 }
+    END { printf "%d %d\n", lines+0, anyok+0 }')"
+  set -- $_pd_stat
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac        # 行数读不到 → 不当全亡
+  case "${2:-}" in ''|*[!0-9]*) _pd_anyok=1 ;; *) _pd_anyok="$2" ;; esac
+  [ "$1" -ge 1 ] && [ "$_pd_anyok" = "0" ]
+}
+# 纯判定：这次该不该跑探测（秒级节流）。$1=now $2=last_probe_at；到期返回 0。
+life_dns_probe_due() {
+  _pu_n="${1:-}"; _pu_l="${2:-}"
+  case "$_pu_n" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_pu_l" in ''|*[!0-9]*) _pu_l=0 ;; esac
+  [ $((_pu_n - _pu_l)) -ge "$LIFE_DNS_PROBE_SEC" ]
+}
+# 纯判定：该不该执行自愈动作（连续失败门槛 + 冷却）。$1=fails $2=now $3=last_act；该动返回 0。
+life_dns_heal_due() {
+  _hd_f="${1:-}"; _hd_n="${2:-}"; _hd_a="${3:-}"
+  case "$_hd_f" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_hd_n" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_hd_a" in ''|*[!0-9]*) _hd_a=0 ;; esac
+  [ "$_hd_f" -ge "$LIFE_DNS_HEAL_MIN_FAILS" ] || return 1
+  [ $((_hd_n - _hd_a)) -ge "$LIFE_DNS_HEAL_COOLDOWN" ]
+}
+# I/O：跑一次上游可达性探测（dnsfwd -P --tsv），对给定真实主机各加一个 -d（≤4）。无主机返回 1。
+#   只读，不改任何状态。-P 模式不绑端口（main 里探测分支在 bind 之前返回），与在跑的守护不冲突；
+#   内置超时（1.5s 明文 / 5s TLS）自限耗时。
+life_dns_probe_output() {
+  [ -x "$LIFE_DNSFWD" ] || return 1
+  _po_d=""
+  for _po_h in "$@"; do
+    case "$_po_h" in ''|*[!a-z0-9.-]*) continue ;; esac
+    _po_d="$_po_d -d $_po_h"
+  done
+  [ -n "$_po_d" ] || return 1
+  # shellcheck disable=SC2086   # _po_d 内主机已过域名形状校验，无空白/特殊字符
+  "$LIFE_DNSFWD" -f "$LIFE_UPSTREAMS" -P --tsv $_po_d 2>/dev/null
+}
+# 编排：取真实主机 → 首轮（代表，前 LIFE_DNS_ROUND 个）探当前上游 → 判死活。
+#   输出 dead / ok / none（无真实主机可探=无兼容节点或全走远端代理解析 → 不判 DNS，交可达性诊断）。
+life_dns_health_round1() {
+  _hr_hosts="$(life_dns_probe_hosts)" || { echo none; return 0; }
+  [ -n "$_hr_hosts" ] || { echo none; return 0; }
+  set -- $_hr_hosts
+  _hr_d=""; _hr_i=0
+  for _hr_h in "$@"; do
+    [ "$_hr_i" -ge "$LIFE_DNS_ROUND" ] && break
+    _hr_d="$_hr_d $_hr_h"; _hr_i=$((_hr_i + 1))
+  done
+  # shellcheck disable=SC2086
+  if life_dns_probe_dead "$(life_dns_probe_output $_hr_d)"; then echo dead; else echo ok; fi
+}
+# I/O：恢复动作（ADR-0010 决策 3）。连续全败后：备份优先 + 可达性硬门槛 + 原子写盘 + 热重载。
+#   选择规则**只做可达性**（保留 ok>0 的上游），不复制面板 page-dns.js 的 RTT/可用率评分优选
+#   （§2.1 单一所有者：紧急恢复 ≠ 手动优选）。完整"优选"待把候选池收敛为单一来源后的后续阶段。
+#   候选 = 当前配置项（用户明示意图优先）∪ 内置默认集（life_prep 同源；不含境外公共解析器，见 L23）。
+#   一条都不可达 → 不改写（保留原配置等人工/下轮）；如实返回成败，由调用方记日志。
+life_dns_recover() {
+  life_dns_running || return 1
+  _rc_cand="$DATA_DIR/dns-heal-cand.tmp"
+  {
+    cat "$LIFE_UPSTREAMS" 2>/dev/null
+    printf 'nameserver 223.5.5.5\nnameserver 119.29.29.29\n'
+  } | grep -Ev '^[[:space:]]*(#|$)' \
+    | grep -Ev '(127\.0\.0\.1|::1)' \
+    | awk 'NF>=2 && ($1=="nameserver"||$1=="doh"||$1=="dot")' \
+    | awk '!s[$0]++' > "$_rc_cand" 2>/dev/null
+  [ -s "$_rc_cand" ] || { rm -f "$_rc_cand"; return 1; }
+
+  # 治愈判据与健康探测同源：用真实供应商主机的首轮代表做 -d；取不到则退回 dnsfwd 默认域名
+  _rv_hosts="$(life_dns_probe_hosts 2>/dev/null)"
+  _rv_d=""
+  if [ -n "$_rv_hosts" ]; then
+    set -- $_rv_hosts; _rv_i=0
+    for _rv_h in "$@"; do
+      [ "$_rv_i" -ge "$LIFE_DNS_ROUND" ] && break
+      _rv_d="$_rv_d -d $_rv_h"; _rv_i=$((_rv_i + 1))
+    done
+  fi
+  # 可达项 = 对真实主机 ok>0 的上游（TSV 第 1 列=up_ident 规范形式，可原样写回；去重）
+  # shellcheck disable=SC2086
+  _rc_good="$("$LIFE_DNSFWD" -f "$_rc_cand" -P --tsv $_rv_d 2>/dev/null \
+    | awk -F'\t' '$1=="upstream"||$1==""{next}
+        { n=split($5,a,"/"); if(n!=2||a[1]!~/^[0-9]+$/) next; if(a[1]+0>0 && !seen[$1]++) print $1 }')"
+  rm -f "$_rc_cand"
+  [ -n "$_rc_good" ] || return 1                       # 可达性硬门槛
+
+  # 备份优先：.prev 每次刷新、.initial 首次（与 page-dns.js 的 DNS_STORE 回滚点同语义）
+  [ -f "$LIFE_UPSTREAMS" ] && { rm -f "$LIFE_UPSTREAMS.prev"; cp "$LIFE_UPSTREAMS" "$LIFE_UPSTREAMS.prev" 2>/dev/null; }
+  [ -f "$LIFE_UPSTREAMS.initial" ] || cp "$LIFE_UPSTREAMS" "$LIFE_UPSTREAMS.initial" 2>/dev/null
+
+  # 原子写盘 + 热重载（SIGHUP；dnsfwd 另有 5s mtime 自检双保险）
+  _rc_new="$DATA_DIR/dns-heal.new.tmp"
+  {
+    printf '# DNS 解析健康自愈（ADR-0010）%s：原上游集全部不可达，按可达性重选\n' "$(date '+%F %T')"
+    printf '%s\n' "$_rc_good"
+  } > "$_rc_new" 2>/dev/null || { rm -f "$_rc_new"; return 1; }
+  mv "$_rc_new" "$LIFE_UPSTREAMS" 2>/dev/null || { rm -f "$_rc_new"; return 1; }
+  life_reload_dns >/dev/null 2>&1
+  return 0
+}
+
 # ── 意图编排（调用方的主入口）─────────────────────
 life_boot() {
   # 开机 = 新的用户意图：清除"用户停止服务"与"关闭守护"两个标志，武装并启动守护。

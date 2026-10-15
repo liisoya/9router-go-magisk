@@ -195,6 +195,10 @@ eng_cg=""          # 引擎最后所在的 cgroup —— 判死时取死因证�
 oom_base=""        # oom_kill 计数基线（引擎拉起时采样；判死时算增量回答"是不是被内存回收杀的"）
 confirmed_eng=0    # CHLD 已确认该子进程真的退出 → 跳过"连续两次判死"去抖
 confirmed_dns=0
+# DNS 解析健康自愈（ADR-0010）循环计数：谓词与 I/O 在 lifecycle，这里只持计数并按墙钟调用
+dns_fail=0          # 连续几次探测全部上游不可达
+dns_probe_at=0      # 上次探测时刻（墙钟秒）
+dns_heal_at=0       # 上次自愈动作时刻（墙钟秒，冷却用）
 ev_chld=0
 ev_usr1=0
 # handler 内**只做算术赋值**（零 fork）：见文件头的风暴警告。
@@ -355,6 +359,35 @@ while :; do
   if [ "$(life_rss_log_due "$_r" "$elapsed" "$rss_at")" = "1" ]; then
     log "引擎内存 ${_r}kB（阈值 ${LIFE_RSS_WARN_KB}kB，守护已运行 ${elapsed}s）"
     rss_at=$elapsed
+  fi
+
+  # ── DNS 解析健康自愈（ADR-0010）──
+  # 谓词 / 探测 / 恢复都在 lifecycle（单一所有者）；这里只持 dns_fail / dns_probe_at / dns_heal_at
+  # 三个墙钟计数并按秒调用。只在 life_dns_healthy 时探：用户关闭 / :53 让路给第三方 = 正常稳态，
+  # 不是我们的责任。放维护块（≈60s、非信号路径）→ 满足 §2.20「handler 内零 fork」（探测会 fork dnsfwd -P）。
+  if life_dns_healthy; then
+    _hdn="$(date +%s)"
+    if life_dns_probe_due "$_hdn" "$dns_probe_at"; then
+      dns_probe_at="$_hdn"
+      case "$(life_dns_health_round1)" in
+        dead)
+          dns_fail=$((dns_fail + 1))
+          if life_dns_heal_due "$dns_fail" "$_hdn" "$dns_heal_at"; then
+            dns_heal_at="$_hdn"
+            log "DNS 解析健康：真实供应商主机首轮探测全部不可达（连续 ${dns_fail} 次），执行自愈（备份优先重选可达上游）"
+            if life_dns_recover; then
+              log "DNS 自愈完成：已按真实主机可达性重选上游并热重载（回滚点 .prev/.initial 已留）"
+            else
+              log "DNS 自愈未生效（真实主机均无可达上游或写盘/重载失败；原配置未动，详见 dnsfwd.log）"
+            fi
+            dns_fail=0
+          fi ;;
+        ok) dns_fail=0 ;;
+        none) : ;;   # 无真实主机可探（无兼容节点/全走远端代理解析）→ 不判 DNS，交可达性诊断
+      esac
+    fi
+  else
+    dns_fail=0
   fi
 
   # ── 睡到下一轮：被 CHLD / USR1 打断就立刻回到循环顶 —— 这就是"事件驱动" ──
