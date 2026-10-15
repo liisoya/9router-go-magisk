@@ -38,7 +38,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | BUN-UNIT | 引擎 Dashboard 纯函数回归 **82 例**（10 文件） | `bun test web/src` | bun | Dashboard 逻辑回归（请求形状、供应商解析、导入导出等） |
 | JSTYPES | 面板脚本类型闸（**棘轮两层**：`checkJs:false` → 只有顶部写了 `// @ts-check` 的文件被检查；严格度取"零注释成本"档）。拦的是 TS2304 找不到名字 / TS2554 参数个数 / TS2339·TS2551 属性拼错 / TS2300·TS2451 **跨文件顶层重名**（经典脚本共享一个词法作用域，重名 = 整页 SyntaxError） | `web/node_modules/.bin/tsc -p module/webroot/tsconfig.json` | `web/node_modules`（缺则 SKIP） | 面板在真机上"整页失效 / 点按钮报 undefined"（2026-09-27 事故：收编常量时漏改一处裸引用 → 面板只显示 localStorage 旧快照）。**为什么不直接上 strict**：先量过后定档 —— 仅 `parsers.js` 在 strict 下就有 41 条，**全是** `noImplicitAny`（缺 JSDoc 参数标注）、没有一条真 bug；一次补几百处标注会把"拦 bug"变成"补注释" |
 | GO-BUILD | 引擎可编译 | `go build ./...` | go | 引擎源码编译失败 |
-| GO-TEST | Go 单元测试（排除外网/真机依赖用例） | `go test ./... -skip '<见 §4>'` | go | 引擎侧回归 |
+| GO-TEST | Go 单元测试（排除外网/真机依赖用例；`-short` 跳过 honor `testing.Short()` 的 live 用例——FIXPLAN 15.2 挂账项 2026-10-15 落地：`TestHandleSystemone_Live_Opencode` 打真实外部端点，本网络必红且构建走 CHECK_FAST 时这道红从未被看见） | `go test ./... -short -skip '<见 §4>'` | go | 引擎侧回归 |
 | TSC | Dashboard 类型检查 | `npx tsc -b` | node_modules | 类型错误（构建前提前拦） |
 | DEADH | handler / 注册函数是否真的被挂载（定义了却没人调 = 点了必 404） | `python3 tools/check-dead-handlers.py` | python3 | 新增了一条"有实现、有测试、没路由"的代码（`HandleWebFetch`/`RegisterRoutes` 同类） |
 | PY-UNIT | 棘轮 module（基线／豁免／只拦新增／收紧）的接口级单测 | `python3 -m unittest discover -s tools -p 'test_*.py'` | python3 | 三个门禁共用的棘轮语义坏了（PARITY/UIPARITY/DEADH 会一起失真） |
@@ -50,6 +50,7 @@ bash build.sh                # 发布构建：七步，其中第 3 步复用 che
 | OPSSTATUS | `ops.sh` 的单行契约（`status`/`panel` 各一行、token 全为 `k=v`）+ 键访问器 `get <key>`（行首键/中间键/多键/缺键/非法键名）+ `action.sh` 端到端值与 `status` 对齐 | `sh tools/test-ops-get.sh` | sh | 管理器「操作」按钮状态全空、端口串成整行残余（2026-09-29 走查 A4：`action.sh` 自己重写了"怎么解析这一行"） |
 | INSTALLGATE | 装包**门禁先于动作**：坏包/截断包必须被挡在 `life_stop_all` 之前（断言 pidfile 仍在 = 服务没被停）、文件缺失仍回 `no-src`；成功路径用"门禁行早于 stop_all"的顺序断言兜住（测试里绝不真装包） | `sh tools/test-install-gate.sh` | sh | 装个坏包先把引擎/DNS 停掉，守护未武装时服务**永不回来**（2026-09-29 第二轮诊断 I1） |
 | INSTALLFLOW | **install-engine / install-module 的成功与回滚全路径**（当前 **30 例**）：把 `MODDIR` 指到临时目录 + `OPS_LIB_ONLY=1` 只加载定义，在真实文件系统上重放 —— 成功路径（引擎起来**才**写版本、**才**刷 `.bak`、清 `.prev`）、回滚路径（起不来 → 二进制回滚且**绝不谎报版本**）、门禁（太小/非 ELF/缺源 → 绝不碰现有二进制；当前二进制不合格时**不把它当回滚点**）、装包（`module.prop` 换新、包内引擎版本落盘、留档）、**引擎保留**（S6：包内基线旧于在跑引擎 → 不降级 + 记账走 `--keep`；在跑更旧 → 包内为准） | `sh tools/test-install-flow.sh` | sh | 安装是唯一"做错就变砖"的动作，而这两条分支过去**零测试**（`MODDIR` 写死 → 只能真写设备）；顺序保障只有 grep 行号，重排 `ops.sh` 会静默撤掉护栏（2026-09-30 架构扫描 C2）；整包更新把面板更新的引擎悄悄降级（Phase 40） |
+| UPDATEJSON | 模块更新清单（`update.json`）与 `module.prop` 一致：`version`/`versionCode`/`zipUrl`/`changelog` 四字段逐字比对（生成：`--write`，发布准备与 release.yml 同一条命令；URL 语义 = tag 直链，避开 `latest/download` 重定向） | `python3 tools/gen-update-json.py --check`；测试 `sh tools/test-update-json.sh`（**14 例**，含"仓库活体必须一致"断言 L1） | python3 | 版本物料漂移：清单 versionCode 低于模块 → 设备端"已是最新"恒真，本次发布对存量设备**静默不可见**（2026-10-15 架构评审 C1：漂移曾真实发生，清单 v1.9.7-r2/109071 vs 模块 v1.9.13-r1/109130） |
 
 ### 2.3 真机断言（`tools/check.sh --device`）
 

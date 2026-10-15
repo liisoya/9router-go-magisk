@@ -74,6 +74,10 @@ device_serial() {
 
 # GO-TEST 需要排除的用例（本地必红的网络/凭据依赖；名单与证据见 docs/TESTING.md §4）。
 # 逐条具名，不用宽泛前缀 —— 其余 e2e/live 用例自带 t.Skip，能自己跳过，别扩大排除范围。
+# 另加 -short：honor testing.Short() 的 live 用例（systemone / tts-synthesizers 等）
+# 在短模式下自跳过。这是 FIXPLAN 15.2 挂账的"Live 测试 -short/build-tag 跳过机制"，
+# 2026-10-15 落地：TestHandleSystemone_Live_Opencode 打真实外部免费模型端点，本网络
+# 必红；而构建走 CHECK_FAST 跳过 GO-TEST，这道红从未被看见——门禁形同虚设。
 go_skip_pattern() {
   printf '%s' 'TestHandleAudioVoices_elevenlabs|TestLiveE2E_Cline_SmartCombo|TestIntegration_OpenCode_MuseSpark13_ChatCompletions'
 }
@@ -143,7 +147,7 @@ if [ "$OFFLINE" = 1 ]; then
     if [ "${CHECK_FAST:-0}" = 1 ]; then
       skip "GO-TEST" "CHECK_FAST=1（build.sh 复用离线档；发布前请单独跑 tools/check.sh --offline）"
     else
-      run "GO-TEST Go 单元测试（跳过外网依赖用例）" go test ./... -skip "$(go_skip_pattern)"
+      run "GO-TEST Go 单元测试（跳过外网依赖用例）" go test ./... -short -skip "$(go_skip_pattern)"
     fi
   fi
 
@@ -170,6 +174,15 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/test_ratchet.py ]; then
       run "PY-UNIT 棘轮 module 单测（unittest discover tools）" \
         python3 -B -m unittest discover -s tools -p 'test_*.py'
+    fi
+    # UPDATEJSON：模块更新清单与 module.prop 一致（版本物料漂移闸门，2026-10-15 架构评审 C1）。
+    # update.json 是设备端应用内更新的清单（page-update.js 按 versionCode 比较）；
+    # 曾漂移（清单 v1.9.7-r2/109071 vs 模块 v1.9.13-r1/109130）→ versionCode 低于
+    # 清单值的设备永远看到"已是最新"，本次发布对存量设备静默不可见。生成器与发布
+    # 准备/CI 同一条命令：tools/gen-update-json.py --write；测试（含仓库活体断言）：
+    # tools/test-update-json.sh。
+    if [ -f tools/gen-update-json.py ]; then
+      run "UPDATEJSON 模块更新清单与 module.prop 一致" python3 tools/gen-update-json.py --check
     fi
     # INJECT：__MOD_ID__ 注入器（打包 / 直推两条路径共用一份实现，出错的表现是"上线后才炸"）
     if [ -f tools/test-inject-mod-id.sh ]; then

@@ -122,27 +122,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # update.json 是设备端在线更新的清单，必须在发布后同步指向新 zip
+      # update.json 是设备端在线更新的清单，必须在发布后同步指向新 zip。
+      # 单一实现：tools/gen-update-json.py --write —— 与本地发布准备同一条命令、语义
+      # 逐字一致（故正常流程下这里零 diff）。一致性由 tools/check.sh 的 UPDATEJSON
+      # 闸门兜底（清单低于 module.prop versionCode 即红）。
       - name: Update update.json
         env:
           REPO: ${{ github.repository }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          VER="${TAG#v}"
-          CODE="$(grep '^versionCode=' module/module.prop | cut -d= -f2)"
-          python3 - "$TAG" "$VER" "$CODE" "$REPO" <<'EOF'
-          import json, pathlib, sys
-          tag, ver, code, repo = sys.argv[1:5]
-          p = pathlib.Path("update.json")
-          d = json.loads(p.read_text())
-          d["version"] = tag
-          d["versionCode"] = int(code)
-          d["zipUrl"] = f"https://github.com/{repo}/releases/download/{tag}/9router-go-{ver}-magisk.zip"
-          # 管理器会把 changelog 当 URL 下载（不能放纯文本）；用 tag 直链——与 zipUrl
-          # 同域同可达性，且避开 latest/download 的重定向（部分网络栈/代理 502）
-          d["changelog"] = f"https://github.com/{repo}/releases/download/{tag}/changelog.md"
-          p.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
-          EOF
+          python3 tools/gen-update-json.py --write --repo "$REPO"
           cat update.json
 
       - name: Commit update.json to main
