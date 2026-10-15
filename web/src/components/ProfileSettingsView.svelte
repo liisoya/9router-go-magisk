@@ -7,7 +7,6 @@
     Download,
     Eye,
     EyeOff,
-    Globe,
     Key,
     Laptop,
     Loader2,
@@ -21,17 +20,11 @@
     Zap
   } from 'lucide-svelte'
   import Card from '../lib/ui/Card.svelte'
-  import Input from '../lib/ui/Input.svelte'
-  import Modal from '../lib/ui/Modal.svelte'
   import Toggle from '../lib/ui/Toggle.svelte'
-  import { api, type Settings } from '../api/client'
-  import {
-    backupFileName,
-    buildExportRequest,
-    buildImportFileRequest,
-    downloadBlob,
-    responseErrorMessage
-  } from '../lib/db-backup'
+  import Modal from '../lib/ui/Modal.svelte'
+  import Button from '../lib/ui/Button.svelte'
+  import Input from '../lib/ui/Input.svelte'
+  import { api, getAuthHeaders, responseErrorMessage, type DatabaseStats, type Settings } from '../api/client'
 
   interface Props {
     settings?: Settings
@@ -46,13 +39,19 @@
   // General Settings State
   let requireLogin = $state(false)
   let sessionTimeout = $state('24h')
-  let selectedLanguage = $state('en')
   let enableObservability = $state(false)
+  let observabilityMode = $state<'full' | 'errors_only' | 'off'>('full')
+  let retentionDays = $state<number>(7)
+  let maxRequestRecords = $state<number>(5000)
+  let dbStats = $state<DatabaseStats | null>(null)
+  let isPruning = $state(false)
+  let isVacuuming = $state(false)
 
   // Routing Strategy State
   let fallbackStrategy = $state('failover')
   let stickyRoundRobinLimit = $state(3)
   let comboStrategy = $state('first-model')
+  let forceFallback = $state(false)
 
   // Password Management State
   let currentPassword = $state('')
@@ -83,19 +82,24 @@
   let isDownloadingBackup = $state(false)
   let isImportingBackup = $state(false)
   let fileInput: HTMLInputElement | null = $state(null)
-  // 下载/导入前必须输密码：服务端要求 x-9r-password 头（上游 parity，见 lib/db-backup.ts）
-  let dbAuth = $state({ open: false, mode: '' as '' | 'export' | 'import', password: '' })
-  let pendingImportFile = $state<File | null>(null)
+  let dbPassword = $state('')
+  let dbAuthOpen = $state(false)
+  let pendingImportFile: File | null = $state(null)
 
   $effect(() => {
     if (settings) {
       requireLogin = !!settings.requireLogin
       enableObservability = !!settings.enableObservability
+      if (settings.observabilityMode === 'full' || settings.observabilityMode === 'errors_only' || settings.observabilityMode === 'off') {
+        observabilityMode = settings.observabilityMode
+      }
+      if (typeof settings.retentionDays === 'number') retentionDays = settings.retentionDays
+      if (typeof settings.maxRequestRecords === 'number') maxRequestRecords = settings.maxRequestRecords
       if (typeof settings.sessionTimeout === 'string') sessionTimeout = settings.sessionTimeout
-      if (typeof settings.language === 'string') selectedLanguage = settings.language
       if (typeof settings.fallbackStrategy === 'string') fallbackStrategy = settings.fallbackStrategy
       if (typeof settings.stickyRoundRobinLimit === 'number') stickyRoundRobinLimit = settings.stickyRoundRobinLimit
       if (typeof settings.comboStrategy === 'string') comboStrategy = settings.comboStrategy
+      if (typeof settings.forceFallback === 'boolean') forceFallback = settings.forceFallback
 
       // SSO
       if (settings.authMode === 'oidc' || settings.authMode === 'saml') authMode = settings.authMode
@@ -118,10 +122,10 @@
         requireLogin = !!s.requireLogin
         enableObservability = !!s.enableObservability
         if (s.sessionTimeout) sessionTimeout = String(s.sessionTimeout)
-        if (s.language) selectedLanguage = String(s.language)
         if (s.fallbackStrategy) fallbackStrategy = String(s.fallbackStrategy)
         if (typeof s.stickyRoundRobinLimit === 'number') stickyRoundRobinLimit = s.stickyRoundRobinLimit
         if (s.comboStrategy) comboStrategy = String(s.comboStrategy)
+        if (typeof s.forceFallback === 'boolean') forceFallback = s.forceFallback
 
         if (s.authMode === 'oidc' || s.authMode === 'saml') authMode = s.authMode
         if (s.oidcIssuerUrl) oidcIssuerUrl = String(s.oidcIssuerUrl)
@@ -150,11 +154,14 @@
       await api.updateSettings({
         requireLogin,
         sessionTimeout,
-        language: selectedLanguage,
         enableObservability,
+        observabilityMode,
+        retentionDays,
+        maxRequestRecords,
         fallbackStrategy,
         stickyRoundRobinLimit,
         comboStrategy,
+        forceFallback,
         authMode,
         oidcIssuerUrl,
         oidcClientId,
@@ -208,55 +215,98 @@
     }
   }
 
-  // ── 备份 / 恢复（上游 parity：都先弹层输密码，请求形状见 lib/db-backup.ts）──
-  // 在途判定只有这一个出口：Modal 的 Escape / 点击遮罩 / ✕ 全走 onClose={closeDbAuth}，
-  // 而**导入是破坏性的**（覆盖数据库）。不拦的后果（上游 #34 第二条缺陷，实测复现过）：
-  // 用户按 Esc 以为取消了，POST 照跑 → 跑完 alert 成功并刷新 → 数据库已被覆盖。
-  function dbRequestInFlight() {
-    return isDownloadingBackup || isImportingBackup
-  }
-  function openDbAuth(mode: 'export' | 'import') {
-    if (dbRequestInFlight()) return // 入口再校验：另一个请求在途时不得切换任务
-    dbAuth = { open: true, mode, password: '' }
-  }
+  // closeDbAuth is the single dismissal path for the password modal. Modal
+  // wires Escape, the overlay and both ✕ buttons to onClose, and an import
+  // already in flight is a destructive operation the user must not be able to
+  // abandon by pressing a key — dismissing the dialog would leave the POST
+  // running and then wipe the database on completion.
   function closeDbAuth() {
-    if (dbRequestInFlight()) return // 关闭路径一律到此为止（唯一的取消语义）
-    dbAuth = { open: false, mode: '', password: '' }
+    if (isImportingBackup || isDownloadingBackup) return
+    dbAuthOpen = false
+    dbPassword = ''
+    pendingImportFile = null
   }
+
   function handleDownloadBackup() {
-    openDbAuth('export')
+    if (isImportingBackup || isDownloadingBackup) return
+    dbPassword = ''
+    pendingImportFile = null
+    dbAuthOpen = true
   }
+
+  async function runDownloadBackup() {
+    isDownloadingBackup = true
+    const password = dbPassword
+    try {
+      const res = await fetch('/api/settings/database', {
+        headers: { ...getAuthHeaders(), 'x-9r-password': password },
+      })
+      if (!res.ok) {
+        throw new Error(await responseErrorMessage(res, 'Failed to export database'))
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const stamp = new Date().toISOString().replace(/[.:]/g, '-')
+      a.href = url
+      a.download = `9router-backup-${stamp}.json`
+      document.body.appendChild(a)
+      a.click()
+      setTimeout(() => {
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      }, 1000)
+    } catch (err) {
+      alert(`Failed to download backup: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      isDownloadingBackup = false
+      dbAuthOpen = false
+      dbPassword = ''
+    }
+  }
+
   function handleFileSelected(e: Event) {
+    if (isImportingBackup || isDownloadingBackup) return
     const target = e.target as HTMLInputElement
     const file = target.files?.[0]
     if (!file) return
-    pendingImportFile = file
-    openDbAuth('import')
+
     target.value = ''
+    pendingImportFile = file
+    dbPassword = ''
+    dbAuthOpen = true
   }
-  async function handleExportDatabase(password: string) {
-    isDownloadingBackup = true
-    try {
-      const { url, init } = buildExportRequest(password)
-      const res = await fetch(url, init)
-      if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to export database'))
-      downloadBlob(await res.blob(), backupFileName())
-    } catch (err) {
-      alert(`Failed to export database: ${err instanceof Error ? err.message : String(err)}`)
-    } finally {
-      isDownloadingBackup = false
-      pendingImportFile = null
-    }
-  }
-  async function handleImportDatabase(password: string) {
+
+  async function runImportBackup() {
     const file = pendingImportFile
     if (!file) return
+    // Snapshot the password before the first await: file.text() and
+    // JSON.parse() can both yield, and reading live state afterwards would let a
+    // concurrent dismissal blank the credential the request is authorized with.
+    const password = dbPassword
     isImportingBackup = true
     try {
-      // 上游 1.9.6：zip（内含 .json）与裸 json 都原样上传，密码走 x-9r-password 头
-      const { url, init } = buildImportFileRequest(file, password)
-      const res = await fetch(url, init)
-      if (!res.ok) throw new Error(await responseErrorMessage(res, 'Failed to import database'))
+      let res: Response
+      const isZip = file.name.endsWith('.zip') || file.type === 'application/zip'
+      if (isZip) {
+        const buffer = await file.arrayBuffer()
+        res = await fetch('/api/settings/database', {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'x-9r-password': password, 'Content-Type': 'application/zip' },
+          body: buffer,
+        })
+      } else {
+        const raw = await file.text()
+        const payload = JSON.parse(raw)
+        res = await fetch('/api/settings/database', {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'x-9r-password': password, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+      }
+      if (!res.ok) {
+        throw new Error(await responseErrorMessage(res, 'Failed to import database'))
+      }
       alert('Database backup imported successfully! Reloading page...')
       window.location.reload()
     } catch (err) {
@@ -264,14 +314,52 @@
     } finally {
       isImportingBackup = false
       pendingImportFile = null
+      dbAuthOpen = false
+      dbPassword = ''
     }
   }
-  async function handleDbAuthConfirm() {
-    const { mode, password } = dbAuth
-    if (!password) return
-    closeDbAuth()
-    if (mode === 'export') await handleExportDatabase(password)
-    else if (mode === 'import') await handleImportDatabase(password)
+
+  async function loadDbStats() {
+    try {
+      dbStats = await api.getDatabaseStats()
+    } catch {
+      // best-effort
+    }
+  }
+
+  async function handlePrune() {
+    if (!confirm('Prune expired request details according to retention settings?')) return
+    try {
+      isPruning = true
+      const res = await api.pruneDatabase()
+      alert(`Pruned ${res.pruned} record(s).`)
+      await loadDbStats()
+    } catch (err) {
+      alert(`Failed to prune: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      isPruning = false
+    }
+  }
+
+  async function handleVacuum() {
+    if (!confirm('Compact SQLite database (VACUUM)? This will return unallocated pages back to disk.')) return
+    try {
+      isVacuuming = true
+      await api.vacuumDatabase()
+      alert('Database vacuumed successfully!')
+      await loadDbStats()
+    } catch (err) {
+      alert(`Failed to vacuum: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      isVacuuming = false
+    }
+  }
+
+  function formatBytes(bytes?: number): string {
+    if (!bytes || bytes <= 0) return '0 B'
+    const units = ['B', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(1024))
+    return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`
   }
 </script>
 
@@ -349,7 +437,7 @@
           <button
             type="button"
             onclick={handleDownloadBackup}
-            disabled={isDownloadingBackup}
+            disabled={isDownloadingBackup || isImportingBackup}
             class="flex-1 py-2 px-3 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs font-semibold text-text-main transition cursor-pointer flex items-center justify-center gap-1.5"
           >
             <Download class="w-3.5 h-3.5 text-brand-500" />
@@ -367,7 +455,7 @@
           <button
             type="button"
             onclick={() => fileInput?.click()}
-            disabled={isImportingBackup}
+            disabled={isImportingBackup || isDownloadingBackup}
             class="flex-1 py-2 px-3 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs font-semibold text-text-main transition cursor-pointer flex items-center justify-center gap-1.5"
           >
             <Upload class="w-3.5 h-3.5 text-text-muted" />
@@ -377,37 +465,7 @@
       </div>
     </Card>
 
-    <!-- SECTION 2: Language & Region -->
-    <Card padding="md" class="space-y-4">
-      <div class="flex items-center gap-2 pb-2 border-b border-border">
-        <Globe class="w-4 h-4 text-brand-500" />
-        <h2 class="text-sm font-bold text-text-main">Language & Display</h2>
-      </div>
-
-      <div class="space-y-3 text-xs">
-        <div class="space-y-1">
-          <label for="lang-select" class="block font-semibold text-text-main">Dashboard Language</label>
-          <select
-            id="lang-select"
-            bind:value={selectedLanguage}
-            class="w-full px-3 py-2 rounded-lg bg-bg border border-border text-xs text-text-main focus:outline-none focus:border-brand-500"
-          >
-            <option value="en">English (US)</option>
-            <option value="zh-CN">简体中文 (Simplified Chinese)</option>
-            <option value="zh-TW">繁體中文 (Traditional Chinese)</option>
-            <option value="ja">日本語 (Japanese)</option>
-            <option value="ko">한국어 (Korean)</option>
-            <option value="es">Español</option>
-            <option value="de">Deutsch</option>
-          </select>
-          <p class="text-[11px] text-text-subtle">
-            Select the primary interface language for the 9router-go web dashboard.
-          </p>
-        </div>
-      </div>
-    </Card>
-
-    <!-- SECTION 3: Security & Master Password -->
+    <!-- SECTION 2: Security & Master Password -->
     <Card padding="md" class="space-y-4">
       <div class="flex items-center justify-between pb-2 border-b border-border">
         <div class="flex items-center gap-2">
@@ -458,7 +516,7 @@
           {#if showPasswordFields}
             <form onsubmit={handleUpdatePassword} class="space-y-2.5 pt-3">
               {#if passwordErrorMessage}
-                <div class="p-2.5 rounded-lg bg-danger/10 border border-danger/20 text-danger text-[11px]">
+                <div class="p-2.5 rounded-lg bg-danger/10 border border-danger/20 text-red-600 dark:text-red-400 text-[11px]">
                   {passwordErrorMessage}
                 </div>
               {/if}
@@ -517,7 +575,7 @@
       </div>
     </Card>
 
-    <!-- SECTION 4: Single Sign-On (SSO) -->
+    <!-- SECTION 3: Single Sign-On (SSO) -->
     <Card padding="md" class="space-y-4">
       <div class="flex items-center justify-between pb-2 border-b border-border">
         <div class="flex items-center gap-2">
@@ -610,7 +668,7 @@
       </div>
     </Card>
 
-    <!-- SECTION 5: Routing Strategy & Limits -->
+    <!-- SECTION 4: Routing Strategy & Limits -->
     <Card padding="md" class="space-y-4">
       <div class="flex items-center gap-2 pb-2 border-b border-border">
         <Sliders class="w-4 h-4 text-brand-500" />
@@ -659,15 +717,27 @@
             <option value="round-robin">Round Robin (Rotate starting model)</option>
           </select>
         </div>
+
+        <Toggle
+          checked={forceFallback}
+          size="sm"
+          label="Force Fallback (all accounts cooling down)"
+          onChange={(v: boolean) => (forceFallback = v)}
+        />
+        <p class="text-[11px] text-text-subtle">
+          When every account is in cooldown, send the request through the account that
+          frees up first instead of failing. Requests can still be rejected upstream.
+        </p>
+
       </div>
     </Card>
 
-    <!-- SECTION 6: Observability & Tracing -->
+    <!-- SECTION 5: Observability & Storage Retention -->
     <Card padding="md" class="space-y-4">
       <div class="flex items-center justify-between pb-2 border-b border-border">
         <div class="flex items-center gap-2">
           <Zap class="w-4 h-4 text-brand-500" />
-          <h2 class="text-sm font-bold text-text-main">Observability</h2>
+          <h2 class="text-sm font-bold text-text-main">Observability & Storage Retention</h2>
         </div>
         <Toggle
           checked={enableObservability}
@@ -677,39 +747,126 @@
         />
       </div>
 
-      <div class="space-y-2 text-xs">
+      <div class="space-y-4 text-xs">
         <p class="text-text-muted leading-relaxed">
-          Collect real-time telemetry, TTFT (Time to First Token), round-trip latency, and token throughput for all routed LLM requests.
+          Manage real-time request logging, retention limits, and storage compaction for diagnostic tables.
         </p>
-        <div class="p-3 rounded-xl bg-bg border border-border text-[11px] text-text-subtle space-y-1">
-          <div>Telemetry destination: In-memory ring buffer & SQLite <code class="font-mono text-brand-500">requestDetails</code></div>
-          <div>Real-time stream: <code class="font-mono text-info">/api/usage/stream</code> (SSE)</div>
+
+        <!-- Observability Mode & Retention Controls -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="space-y-1">
+            <label class="text-[11px] font-medium text-text-muted">Observability Mode</label>
+            <select
+              bind:value={observabilityMode}
+              class="w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text-main focus:border-brand-500 focus:outline-none"
+            >
+              <option value="full">Full (Record all requests)</option>
+              <option value="errors_only">Errors Only (Diagnostics only)</option>
+              <option value="off">Off (Zero-Trace / Headless)</option>
+            </select>
+          </div>
+
+          <div class="space-y-1">
+            <label class="text-[11px] font-medium text-text-muted">Retention Window</label>
+            <select
+              bind:value={retentionDays}
+              class="w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text-main focus:border-brand-500 focus:outline-none"
+            >
+              <option value={1}>1 Day (STB / Low-Memory)</option>
+              <option value={3}>3 Days</option>
+              <option value={7}>7 Days (Recommended)</option>
+              <option value={14}>14 Days</option>
+              <option value={30}>30 Days</option>
+              <option value={0}>Unlimited</option>
+            </select>
+          </div>
+
+          <div class="space-y-1">
+            <label class="text-[11px] font-medium text-text-muted">Max Request Records</label>
+            <input
+              type="number"
+              bind:value={maxRequestRecords}
+              min="500"
+              step="500"
+              class="w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text-main focus:border-brand-500 focus:outline-none"
+            />
+          </div>
         </div>
+
+        <!-- Database Storage Stats & Actions -->
+        {#if dbStats}
+          <div class="p-3 rounded-xl bg-bg border border-border space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <div>
+                <span class="text-text-muted">Database File Size: </span>
+                <span class="font-mono font-semibold text-text-main">{formatBytes(dbStats.databaseSizeBytes)}</span>
+              </div>
+              <div>
+                <span class="text-text-muted">Request Details: </span>
+                <span class="font-mono font-semibold text-text-main">{dbStats.requestDetailsCount.toLocaleString()} rows</span>
+              </div>
+              {#if dbStats.reclaimableBytes > 0}
+                <div>
+                  <span class="text-text-muted">Reclaimable: </span>
+                  <span class="font-mono font-semibold text-amber-500">{formatBytes(dbStats.reclaimableBytes)}</span>
+                </div>
+              {/if}
+            </div>
+
+            <div class="flex flex-wrap gap-2 pt-1 border-t border-border-subtle/60">
+              <button
+                type="button"
+                onclick={handlePrune}
+                disabled={isPruning}
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs text-text-main font-medium transition cursor-pointer disabled:opacity-50"
+              >
+                <span>{isPruning ? 'Pruning...' : 'Prune Expired Records'}</span>
+              </button>
+              <button
+                type="button"
+                onclick={handleVacuum}
+                disabled={isVacuuming}
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 border border-brand-500/30 text-xs text-brand-500 font-semibold transition cursor-pointer disabled:opacity-50"
+              >
+                <span>{isVacuuming ? 'Compacting...' : 'Compact Database (VACUUM)'}</span>
+              </button>
+            </div>
+          </div>
+        {/if}
       </div>
     </Card>
-  </div>
 
-  <!-- 备份/恢复前的密码确认：服务端要求 x-9r-password 头（上游 parity，profile/page.js:1673-1699）。
-       没有这一步，Download Backup 必然 401 Invalid password（2026-09-26 用户报障）。 -->
-  <Modal isOpen={dbAuth.open} onClose={closeDbAuth} title="Confirm Password" size="sm">
-    <p class="text-text-muted mb-3 text-sm">
-      Enter your current password to {dbAuth.mode === 'export' ? 'export' : 'import'} the database.
-      {#if dbAuth.mode === 'import'}<span class="text-warn"> This will overwrite existing local data.</span>{/if}
-    </p>
-    <Input type="password" bind:value={dbAuth.password} placeholder="Current password" />
-    {#snippet footer()}
-      <button
-        type="button"
-        onclick={closeDbAuth}
-        disabled={isDownloadingBackup || isImportingBackup}
-        class="py-2 px-3 rounded-lg bg-surface-2 hover:bg-surface-3 border border-border text-xs font-semibold text-text-main transition cursor-pointer disabled:opacity-50"
-      >Cancel</button>
-      <button
-        type="button"
-        onclick={handleDbAuthConfirm}
-        disabled={!dbAuth.password || isDownloadingBackup || isImportingBackup}
-        class="py-2 px-3 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold transition cursor-pointer disabled:opacity-50"
-      >Confirm</button>
-    {/snippet}
-  </Modal>
+    <Modal
+      isOpen={dbAuthOpen}
+      onClose={closeDbAuth}
+      title={pendingImportFile ? 'Confirm Import' : 'Confirm Download'}
+      size="sm"
+    >
+      <div class="space-y-3">
+        <p class="text-text-muted">
+          {pendingImportFile
+            ? `Import "${pendingImportFile.name}"? This will overwrite existing server data.`
+            : 'Download a full backup of the dashboard database (.json file)?'}
+        </p>
+        <Input
+          type="password"
+          label="Dashboard password"
+          placeholder="Enter password to authorize"
+          bind:value={dbPassword}
+        />
+      </div>
+      {#snippet footer()}
+        <Button variant="ghost" onclick={closeDbAuth} disabled={isImportingBackup || isDownloadingBackup}>
+          Cancel
+        </Button>
+        <Button
+          variant="primary"
+          onclick={() => (pendingImportFile ? runImportBackup() : runDownloadBackup())}
+          loading={isImportingBackup || isDownloadingBackup}
+        >
+          {pendingImportFile ? 'Import' : 'Download'}
+        </Button>
+      {/snippet}
+    </Modal>
+  </div>
 </div>
