@@ -25,7 +25,9 @@ case "$MODDIR" in
 esac
 DATA_DIR="${DATA_DIR:-/data/adb/9router-go}"
 . "$MODDIR/lib/lifecycle.sh" || exit 1
-LOG="$DATA_DIR/9router.log"
+# 日志路径一律用 log.sh 的唯一声明（LOG_ENGINE_PATH / LOG_DNS_PATH，ADR-0006 C4）——
+# 曾在这里硬编码拼 $DATA_DIR/9router.log：同一个文件两种寻址方式，改轮转/路径时
+# 只有一半调用点会跟上（对照：ops.sh:539 正确用了 $LOG_ENGINE_PATH）
 
 # --- 开机意图：清"用户停止 / 关闭守护"两个标志、武装并启动守护（只有这里能清）---
 life_boot
@@ -35,10 +37,10 @@ life_boot
 life_log "prep: $(life_prep)"
 
 # --- DNS 转发器（内含用户开关与 :53 占用让路）---
-life_ensure_dns >>"$DATA_DIR/dnsfwd.log" 2>&1
+life_ensure_dns >>"$LOG_DNS_PATH" 2>&1
 
 # --- 出厂客户端 key：仅在 apiKeys 表为空（全新安装）时补入（数据动作，留在 ops.sh）---
-"$MODDIR/lib/ops.sh" seed-key >>"$LOG" 2>&1
+"$MODDIR/lib/ops.sh" seed-key >>"$LOG_ENGINE_PATH" 2>&1
 
 # --- 等网络就绪（最多 15s，避免开机时无网络导致首启失败）---
 i=0
@@ -51,7 +53,7 @@ while [ $i -lt 15 ]; do
 done
 
 # --- 拉起引擎（唯一实现；幂等：已在跑则只补 cgroup 逃逸）---
-( LIFE_CALLER=service.sh; export LIFE_CALLER; life_ensure_engine ) >>"$LOG" 2>&1
+( LIFE_CALLER=service.sh; export LIFE_CALLER; life_ensure_engine ) >>"$LOG_ENGINE_PATH" 2>&1
 
 # --- 守护第二次机会 ---
 # life_boot 里那次是在系统最繁忙的时刻（引擎/DNS 都还没起），2026-09-29 真机实测就在那里

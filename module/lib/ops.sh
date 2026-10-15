@@ -119,7 +119,14 @@ cmd_status() {
   # 单行输出（空格分隔 key=value）：兼容 WebUI 的 promise 降级形态
   # （该形态多行输出只剩末行）。值均不含空格。
   # 进程三态（dns/engine/watchdog）由 life_state 提供 —— 判定规则只有那一处。
-  _cnts="$("$SQLITE3" "$DB_FILE" "SELECT (SELECT COUNT(*) FROM apiKeys WHERE key='$FACTORY_KEY') || '|' || (SELECT COUNT(*) FROM apiKeys);" 2>/dev/null | tr -d '[:space:]')"
+  # 读前先确认库文件在：sqlite3 对不存在的路径会**创建 0 字节库**——status 是面板与
+  # action.sh 的高频读路径，每读一次建一个空库 = 读操作写磁盘（B12，2026-10-15 架构评审）。
+  # 缺文件 → _cnts 为空，与"读失败"同样落入下方 err 分支（全新安装本就该是 err）。
+  if [ -f "$DB_FILE" ]; then
+    _cnts="$("$SQLITE3" "$DB_FILE" "SELECT (SELECT COUNT(*) FROM apiKeys WHERE key='$FACTORY_KEY') || '|' || (SELECT COUNT(*) FROM apiKeys);" 2>/dev/null | tr -d '[:space:]')"
+  else
+    _cnts=""
+  fi
   case "$_cnts" in
     # 读失败（引擎写事务锁住 / 表缺失）：显式 err，绝不冒充 0 —— 上层凭 0 会误判
     # 全新安装而自动写库（孤儿扫描同款护栏：读不到 = 不可信）

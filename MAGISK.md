@@ -138,7 +138,7 @@ su -c '/data/adb/modules/ninerouter-go/lib/ops.sh status' # watchdog=up|down|sta
 | `watchdog-hold` | 维护窗口（值=绝对到期时间；换二进制/解压模块期间守护让路） |
 | `watchdog.req` | 运维请求（`restart`/`start`，优先于 hold） |
 | `watchdog-off` | 置此后守护自尽（卸载/显式关闭） |
-| `watchdog-interval` | 守护轮询秒数（可选，默认 5，允许 2–300） |
+| `watchdog-interval` | 守护轮询秒数（可选，默认 60，允许 2–300） |
 | `service-off` | 用户显式停服的意图（WebUI「停止服务」写入；`life_boot`/「启动服务」清除） |
 
 ## 模块 WebUI 功能

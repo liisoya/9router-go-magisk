@@ -52,6 +52,22 @@ else
   no "S3 panel 不是单行（行数 $(run_ops panel | wc -l | tr -d ' ')）"
 fi
 
+echo "== S4 status 是纯读：不得创建 0 字节库（B12，2026-10-15 架构评审）=="
+# sqlite3 对不存在的路径会**创建空库**；status 是面板与 action.sh 的高频读路径，
+# 每读一次建一个空库 = 读操作写磁盘。修法：ops.sh 读前确认库文件在（护栏）。
+# 注：开发机上 sqlite3 是 Android 二进制、跑不起来，所以"旧代码会建库"这一步只能在
+# 真机复现（本机只能验证护栏存在时确实不建、且缺库时 factory_key=err 的语义不变）。
+mkdir -p "$TMPD/db"
+rm -f "$TMPD/db/data.sqlite"
+ST4="$(run_ops status)"
+if [ -e "$TMPD/db/data.sqlite" ]; then
+  no "S4 status 创建了 0 字节库（读路径写磁盘）"
+else
+  ok "S4 status 未创建库文件（纯读）"
+fi
+_fk4="$(printf '%s' "$ST4" | tr ' ' '\n' | sed -n 's/^factory_key=//p' | head -1)"
+[ "$_fk4" = "err" ] && ok "S4b 缺库时 factory_key=err（不冒充 0）" || no "S4b 缺库时 factory_key=$_fk4（应是 err）"
+
 echo "== G 访问器：行首键 / 中间键 / 多键 / 缺键 / 非法键名 =="
 [ "$(run_ops get port)" = "port=$(st_kv port)" ] && ok "G1 行首键 port 取值正确" \
   || no "G1 port 得到「$(run_ops get port)」，期望「port=$(st_kv port)」"
