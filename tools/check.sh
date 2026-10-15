@@ -202,6 +202,14 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/test-export-logs.sh ]; then
       run "EXPORTLOGS 诊断导出脱敏离线自证（ops.sh）" sh tools/test-export-logs.sh
     fi
+    # LOGROTATE：日志轮转必须是 copytruncate（不能 mv 换目录项）——
+    # 起因（2026-10-15 架构评审 C2）：引擎/dnsfwd 的 stdout 是 shell 以 >>（O_APPEND）
+    # 持有的 fd，mv 之后进程继续写已被 unlink 的旧 inode：可见日志永冻在 400 行、
+    # 磁盘无界增长、诊断导出漏掉轮转后的全部引擎日志。测试用真 O_APPEND fd 钉住
+    # "轮转不换 inode、fd 不断流"（旧实现在 R1/R4 两条上红，已实地验证）。
+    if [ -f tools/test-log-rotate.sh ]; then
+      run "LOGROTATE 日志轮转 copytruncate（O_APPEND fd 不断流）" sh tools/test-log-rotate.sh
+    fi
     # WATCHDOG：守护判定核（去抖 / S3 记账 / S4 位保持 / 死因取证）——
     # 起因：2026-10-01 架构走查候选 3，主循环 336 行此前离线零覆盖，
     # A2/A3/S3/S4 四条审查规则的"测试"是真机档 + 注释

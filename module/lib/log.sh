@@ -42,12 +42,23 @@ log_write() {
 }
 log_rotate_one() {
   # 超过上限就只留最后 400 行（保留现场，丢弃历史）
+  #
+  # 必须 copytruncate，不能 mv 换目录项（2026-10-15 架构评审 C2）：引擎与 dnsfwd 的
+  # stdout 是 shell 以 >>（O_APPEND）持有的 fd（lifecycle.sh 的启动重定向）。mv 之后
+  # 进程继续写**已被 unlink 的旧 inode**——可见日志永冻在 400 行不再增长、磁盘无界
+  # 增长（正是本 module 要防的"24/7 吃掉 /data"）、诊断导出（ops.sh export-logs 只读
+  # 可见文件）漏掉轮转后的全部引擎日志。原地截断保留 inode，O_APPEND 的 fd 继续落
+  # 可见文件。代价与 logrotate 的 copytruncate 同款：截断到回填之间的小窗口里并发
+  # 追加可能落在文件中部——可接受，轮转本就丢弃历史。
   _f="$(log_path_of "$1")" || return 1
   _cap="$(log_cap_of "$1")"
   [ -f "$_f" ] || return 0
   _sz="$(wc -c < "$_f" 2>/dev/null | tr -d ' ')"
   case "$_sz" in ''|*[!0-9]*) return 0 ;; esac
   [ "$_sz" -lt "$_cap" ] && return 0
-  tail -n 400 "$_f" > "$_f.tmp" 2>/dev/null && mv "$_f.tmp" "$_f"
+  # 先落 tmp：tail 失败就原样返回，绝不把日志截成空
+  tail -n 400 "$_f" > "$_f.tmp" 2>/dev/null || { rm -f "$_f.tmp" 2>/dev/null; return 1; }
+  # 再原地截断回填（> 截断同一个 inode，O_APPEND 的 fd 不受影响），最后清掉 tmp
+  cat "$_f.tmp" > "$_f" && rm -f "$_f.tmp"
 }
 log_rotate_all() { log_rotate_one engine; log_rotate_one dns; log_rotate_one watchdog; }
