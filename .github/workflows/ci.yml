@@ -29,9 +29,23 @@ jobs:
       # The web suite ran nowhere before this: CI only built the SPA, so a PR
       # breaking client.ts or router.ts still went green. bun:test needs no
       # extra dependency — the runner already has bun and the install above.
+      #
+      # src/ and scripts/ are named explicitly because bare `bun test` also
+      # collected web/e2e, which boots the gateway binary this job builds two
+      # steps later. Those suites died on ENOENT and buried 325 passing tests.
       - name: Test web
         working-directory: web
-        run: bun test
+        run: bun test src scripts
+
+      # tsc -b cannot read .svelte files, so every Svelte script block in this
+      # repo went untyped until svelte-check was added. That hole shipped a
+      # ReferenceError (issue #130) which `bun run build`, oxlint and every
+      # other gate passed: the undefined name is only resolved when the user
+      # clicks. This blocks the fatal class (unresolved identifiers) outright
+      # and ratchets the remaining type debt so it can only shrink.
+      - name: Svelte check (ratchet)
+        working-directory: web
+        run: bun run ratchet:svelte
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -62,6 +76,106 @@ jobs:
             exit 1
           }
           go version -m /tmp/9router-go | grep -- '-pgo='
+
+      # Every gate above is structurally blind to the DOM. `tsc` reads types,
+      # `vite build` bundles, the ratchet counts diagnostics, and `go test`
+      # exercises the HTTP API without rendering a component — so a destructive
+      # action losing its confirmation dialog passes all of them. That is not
+      # hypothetical: collapsing the API-key row controls into a menu (#224)
+      # dropped the confirm() on delete and regenerate, and every gate stayed
+      # green. This job drives the real binary in a real browser.
+      - name: Build binary for E2E
+        run: go build -o 9router-go ./cmd/9router-go/
+
+      - name: Install Chromium
+        working-directory: web
+        run: bunx playwright install --with-deps chromium
+
+      - name: Dashboard E2E
+        working-directory: web
+        run: bun run e2e
+
+  # `internal/service` picks which init system owns the gateway on the running
+  # machine, so it is the one package full of runtime.GOOS branches — and the
+  # one CI structurally could not see, since every job ran ubuntu-latest. Three
+  # of its tests failed on Windows while the Linux runner stayed green
+  # (issue #304): a WorkingDirectory assertion that could not express a native
+  # path, and two that needed symlink privilege. Scoped to this package so the
+  # job stays cheap; the goal is catching OS-conditional regressions, not
+  # running the whole suite twice.
+  windows-service:
+    name: Service tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # web/dist must exist before any Go package compiles: go test builds the
+      # module graph, and web/embed.go has no files to embed without it.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      # `bun install` is not optional: the build script runs `tsc`, which lives
+      # in node_modules, so without it the job failed at "bun: command not
+      # found: tsc" before a single Go test ran.
+      - name: Build Web SPA
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Test service package
+        run: go test -count=1 ./internal/service/
+
+  # The `test` job above runs `go test ./...` without -race, so a data race
+  # could merge green and only surface on a user's machine under load. The
+  # gateway's shared state is exactly the kind that races: the in-memory usage
+  # tracker ring, per-handler sticky account state, SSE pumps, connection
+  # cooldown maps, and the pool-ID cache on Repo.
+  #
+  # -race needs cgo, and it needs the SPA compiled: internal/app imports the
+  # handlers, they import web, and web/embed.go fails to build without
+  # web/dist. This runs as its own job rather than a step in `test` so a race
+  # report names itself in the checks list, and so a flaky assertion and a
+  # real race do not hide behind each other in one log.
+  #
+  # -count=1 defeats the cache so every PR re-runs it. -timeout 10m matches
+  # the integration job: -race is roughly an order of magnitude slower than an
+  # un-raced build, and internal/handlers/chat alone takes ~50s without it.
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # web/dist must exist before any Go package compiles. The SPA is
+      # otherwise untouched by this job.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Build Web SPA
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Test with race detector
+        run: go test -race -count=1 -timeout 10m ./...
 
   # Unit tests exercise handlers with a hand-built router, so they cannot see a
   # regression in the wiring that production actually mounts: a route

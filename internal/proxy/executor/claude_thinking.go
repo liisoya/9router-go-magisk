@@ -2,7 +2,10 @@ package executor
 
 import (
 	json "encoding/json/v2"
+	"slices"
 	"strings"
+
+	"9router/proxy/internal/providers"
 )
 
 // Claude decides whether the thinking *text* comes back at all, not just
@@ -74,4 +77,148 @@ func WantsThinkingSummaries(body []byte) bool {
 	}
 	display, _ := thinking["display"].(string)
 	return display == "summarized"
+}
+
+// claudeLevelBudget is upstream's LEVEL_TO_BUDGET (open-sse/translator/concerns/
+// thinking.js), used for models that take an explicit thinking budget.
+var claudeLevelBudget = map[string]int{
+	"minimal": 512,
+	"low":     1024,
+	"medium":  8192,
+	"high":    24576,
+	"xhigh":   32768,
+	"max":     128000,
+}
+
+// claudeMinThinkingBudget is the smallest budget_tokens Anthropic accepts.
+const claudeMinThinkingBudget = 1024
+
+// openAIReasoningEffort returns the lower-cased effort an OpenAI-shaped body
+// asks for: reasoning_effort (Chat Completions) or reasoning.effort (Responses).
+func openAIReasoningEffort(reqMap map[string]any) string {
+	if effort, ok := reqMap["reasoning_effort"].(string); ok && effort != "" {
+		return strings.ToLower(effort)
+	}
+	if reasoning, ok := reqMap["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok && effort != "" {
+			return strings.ToLower(effort)
+		}
+	}
+	return ""
+}
+
+// claudeThinkingOutputHeadroom is the room left for the visible answer when
+// max_tokens is raised to fit a thinking budget (upstream open-sse/translator/
+// formats/maxTokens.js).
+const claudeThinkingOutputHeadroom = 1024
+
+// applyClaudeThinkingType gives the Claude `thinking` object the `type` the
+// Messages API requires. Without it an OpenAI client that sets reasoning_effort
+// ends up with `thinking: {display: "summarized"}` (see
+// applyClaudeThinkingDisplay) and Anthropic answers
+// `400 thinking.type: Field required`.
+//
+// provider selects the capability table row (minimax-code, opencode-zen and
+// opencode-go reach this code too and declare their own thinking format).
+//
+// Mirrors the claude-adaptive / claude-budget branches of upstream
+// open-sse/translator/concerns/thinkingUnified.js applyThinking. Must run
+// before the OpenAI-only reasoning keys are stripped.
+func applyClaudeThinkingType(reqMap map[string]any, provider, model string) {
+	thinking, _ := reqMap["thinking"].(map[string]any)
+	if thinking != nil {
+		if t, ok := thinking["type"].(string); ok && t != "" {
+			return
+		}
+	}
+
+	effort := openAIReasoningEffort(reqMap)
+	switch effort {
+	case "none", "off", "minimal_off":
+		// An explicit "no reasoning" must not leave a typeless thinking
+		// object behind (it would carry only `display`): same 400.
+		if thinking != nil {
+			reqMap["thinking"] = map[string]any{"type": "disabled"}
+		}
+		return
+	case "":
+		if thinking == nil {
+			return
+		}
+		// Only a display was captured (Responses reasoning.summary without
+		// an effort): the client wants reasoning text, so reasoning is on.
+		effort = "medium"
+	case "auto":
+		effort = "high"
+	}
+	if thinking == nil {
+		thinking = map[string]any{}
+		reqMap["thinking"] = thinking
+	}
+
+	caps := providers.GetCapabilitiesForModel(provider, model)
+	if caps.ThinkingFormat == "claude-adaptive" {
+		thinking["type"] = "adaptive"
+		level := effort
+		switch level {
+		case "minimal":
+			level = "low"
+		case "xhigh":
+			if !slices.Contains(providers.GetThinkingLevels(provider, model), "xhigh") {
+				level = "high"
+			}
+		}
+		outCfg, _ := reqMap["output_config"].(map[string]any)
+		if outCfg == nil {
+			outCfg = map[string]any{}
+			reqMap["output_config"] = outCfg
+		}
+		if _, set := outCfg["effort"]; !set {
+			outCfg["effort"] = level
+		}
+		return
+	}
+
+	budget, ok := claudeLevelBudget[effort]
+	if !ok {
+		budget = claudeLevelBudget["medium"]
+	}
+	if r := caps.ThinkingRange; r != nil {
+		if r.Min > 0 && budget < r.Min {
+			budget = r.Min
+		}
+		if r.Max > 0 && budget > r.Max {
+			budget = r.Max
+		}
+	}
+	if budget < claudeMinThinkingBudget {
+		budget = claudeMinThinkingBudget
+	}
+
+	// budget_tokens must stay strictly below max_tokens. Raise max_tokens to
+	// leave room for the answer (capped at the model's output limit) rather
+	// than crushing the budget; shrink the budget only when it alone already
+	// reaches the ceiling. Mirrors upstream formats/claude.js + maxTokens.js.
+	if maxTokens, ok := reqMap["max_tokens"].(int); ok {
+		if want := budget + claudeThinkingOutputHeadroom; maxTokens < want {
+			if caps.MaxOutput > 0 && want > caps.MaxOutput {
+				want = caps.MaxOutput
+			}
+			if want > maxTokens {
+				maxTokens = want
+				reqMap["max_tokens"] = maxTokens
+			}
+		}
+		if budget >= maxTokens {
+			budget = maxTokens - 1
+		}
+	}
+	if budget < claudeMinThinkingBudget {
+		// No room for the minimum budget: send no thinking at all rather
+		// than a body Anthropic would reject.
+		delete(reqMap, "thinking")
+		return
+	}
+	thinking["type"] = "enabled"
+	thinking["budget_tokens"] = budget
 }

@@ -2,6 +2,8 @@
 
 This document describes the current native Go gateway and its embedded Svelte/Vite dashboard. It is a build and operations guide, not a feature-compatibility checklist. The current release metadata is `v1.9.1`; the repository manifest tracks upstream `v0.5.85`, while the changelog separately lists `v0.5.86` parity items. Do not treat those statements as a complete upstream-parity guarantee.
 
+> **Pengembangan berikutnya**: Lihat [`docs/keirouter-port-plan.md`](keirouter-port-plan.md) untuk rencana port fitur KeiRouter → 9router-go (governance, security, resale).
+
 ## Architecture
 
 The Go process owns the HTTP server, SQLite repository, authentication, proxy handlers, and lifecycle. The dashboard is a Svelte 5 + TypeScript + Vite SPA. During a build, Vite writes optimized static files to `web/dist`; `web/embed.go` embeds `dist/*` into the Go executable. At runtime the browser receives the embedded files and calls the Go HTTP API.
@@ -40,22 +42,28 @@ cd ..
 
 `bun run build` runs the TypeScript project build and Vite production build. It must produce at least `web/dist/index.html` and the referenced assets. The current `web/package.json` does not define a `test` script; do not document `bun run test` as an available build prerequisite. Frontend test automation is tracked in `ROADMAP.md` until the manifest and CI provide a test command.
 
-`web/dist` is generated, not source. Remove or rebuild it when diagnosing stale assets:
+`web/dist` is generated, not source. Remove or rebuild it when diagnosing stale assets. A stale dashboard on a running binary has a third cause worth checking first: the process was started before the rebuild and still has the previous bundle embedded, so restart it before suspecting the build.
 
 ```bash
-rm -rf web/dist
-cd web && bun install --frozen-lockfile && bun run build
+rm -f web/.dist-stamp
+FORCE=1 make web-build
 ```
 
 ## Build the Go binary
 
-The normal path is the repository Makefile. It builds `web/dist` when it is missing, then embeds it and compiles the binary with the version from `VERSION` (or the documented fallback):
+The normal path is the repository Makefile. It rebuilds `web/dist` when the frontend inputs have changed since the last build, then embeds it and compiles the binary with the version from `VERSION` (or the documented fallback):
 
 ```bash
 make build
 ```
 
-`make web-build` is a prerequisite-only target. It runs `bun install --frozen-lockfile` and `bun run build` only when `web/dist/index.html` is missing or `FORCE=1` is set. It is not a substitute for an explicit frontend verification.
+`make web-build` is a prerequisite-only target. It runs `bun install --frozen-lockfile` and `bun run build` when the fingerprint of every frontend build input changes — `web/src`, `web/public`, `package.json`, `bun.lock`, the tsconfigs, `vite.config.ts`, and `web/index.html` — and skips the build when that fingerprint still matches the one recorded in `web/.dist-stamp`. The old guard rebuilt only when `web/dist/index.html` was missing, which skipped every rebuild on a machine that already had a `dist` and embedded a stale SPA until `FORCE=1` was passed. Set `FORCE=1` to rebuild regardless:
+
+```bash
+FORCE=1 make web-build
+```
+
+It is not a substitute for an explicit frontend verification.
 
 For a direct build, complete the frontend step first and then run:
 
@@ -99,8 +107,38 @@ VERSION="$(cat VERSION)" docker build -t 9router-go .
 
 The runtime image contains the Go binary and CA/time-zone support; it does not require a JavaScript runtime. Persistent application data must be mounted outside the container image and passed with `DATA_DIR`.
 
+## Release channels
+
+The channel is derived from the tag and nothing else, so what you tag is what
+you publish:
+
+| Tag | Channel | GitHub Release | Docker tags |
+|---|---|---|---|
+| `v1.10.0` | stable | final | `latest`, `1.10`, `1.10.0` |
+| `v1.10.0-exp.1` | experimental | **Pre-release** | `exp`, `1.10-exp`, `1.10.0-exp.1` |
+
+GitHub excludes prereleases from `releases/latest`, which is the endpoint
+`internal/updater` falls back to, so a stable install is never offered an
+experimental build. `autoApplyAllowed` in `internal/updater/updater.go` is the
+second guard: even a manual check will not swap a running final release for a
+prerelease unattended.
+
+`version.json` is the stable channel's manifest. `scripts/bump-version.sh`
+leaves it alone for an experimental bump, and `release.yml` fails the release if
+the two disagree in either direction — an experimental version in the manifest
+reaches every install, and a stable release without a manifest bump reaches
+nobody.
+
+```bash
+./scripts/bump-version.sh 1.10.0-exp.1   # experimental: VERSION + updater only
+./scripts/bump-version.sh 1.10.0         # stable: also moves version.json
+```
+
 ## Release and CI notes
 
-CI currently builds the frontend, runs `go vet`, runs `go test ./...`, and builds the Go binary. It does not currently run a frontend test command, race detector, coverage gate, or release-time vulnerability scan. The release workflow builds cross-platform binaries and uploads `SHA256SUMS.txt`; its metadata must still be checked against `VERSION`, `version.json`, the tag, and changelog claims before publication.
+CI runs the frontend build, `bun test`, the `svelte-check` ratchet, `go vet`,
+`go test ./...`, the race detector, the `integration`-tagged suite, and a
+verify-only Docker build. It does not currently run a coverage gate or a
+release-time vulnerability scan.
 
 For a release candidate, reproduce the relevant checks in a clean environment, record toolchain versions and the exact frontend build, and verify the embedded dashboard with a running binary. Do not report a successful frontend build as proof that a Go build, migration, auth boundary, or release artifact succeeded.

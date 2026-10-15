@@ -27,6 +27,33 @@ func setupNodeTestDB(t *testing.T) (*db.Repo, func()) {
 		cleanup()
 		t.Fatalf("failed to create providerNodes: %v", err)
 	}
+
+	// The node rename moves usage and request history with it, so the fixture
+	// needs the two tables the production schema always has.
+	for _, query := range []string{
+		`CREATE TABLE IF NOT EXISTS usageHistory (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp TEXT NOT NULL,
+			provider TEXT,
+			model TEXT,
+			connectionId TEXT,
+			status TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS requestDetails (
+			id TEXT PRIMARY KEY,
+			timestamp TEXT NOT NULL,
+			provider TEXT,
+			model TEXT,
+			connectionId TEXT,
+			status TEXT,
+			data TEXT NOT NULL
+		);`,
+	} {
+		if _, err := repo.RawDB().Exec(query); err != nil {
+			cleanup()
+			t.Fatalf("failed to create history table: %v", err)
+		}
+	}
 	return repo, cleanup
 }
 

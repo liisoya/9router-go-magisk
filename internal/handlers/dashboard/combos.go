@@ -63,17 +63,19 @@ func (h *DashboardHandler) HandleCreateCombo(w http.ResponseWriter, r *http.Requ
 		req.Strategy = "fallback"
 	}
 
+	modelIDs, ok := normalizeComboModelIDs(req.Models)
+	if !ok {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "models must contain valid model IDs")
+		return
+	}
 	modelsJSON := "[]"
-	if req.Models != nil {
-		switch m := req.Models.(type) {
-		case string:
-			modelsJSON = m
-		default:
-			b, err := json.Marshal(m)
-			if err == nil {
-				modelsJSON = string(b)
-			}
+	if len(modelIDs) > 0 {
+		encoded, err := json.Marshal(modelIDs)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
 		}
+		modelsJSON = string(encoded)
 	}
 	// A combo name is addressed bare, so it must not be shadowed by a model
 	// alias (consulted first) or read as a custom model id in /v1/models.
@@ -134,16 +136,21 @@ func (h *DashboardHandler) HandleUpdateCombo(w http.ResponseWriter, r *http.Requ
 		kind = *existing.Kind
 	}
 	modelsJSON := existing.Models
+	// An absent models field leaves the stored set alone; a present one is
+	// normalized the same way a create is, so an update cannot write the
+	// object rows a create refuses.
 	if req.Models != nil {
-		switch m := req.Models.(type) {
-		case string:
-			modelsJSON = m
-		default:
-			b, err := json.Marshal(m)
-			if err == nil {
-				modelsJSON = string(b)
-			}
+		modelIDs, ok := normalizeComboModelIDs(req.Models)
+		if !ok {
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, "models must contain valid model IDs")
+			return
 		}
+		encoded, err := json.Marshal(modelIDs)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		modelsJSON = string(encoded)
 	}
 	strategy := req.Strategy
 	if strategy == "" {
@@ -282,6 +289,81 @@ func comboModels(v any) ([]string, error) {
 		}
 		return arr, nil
 	}
+}
+
+// normalizeComboModelIDs turns the models field of a combo write into plain
+// model id strings, or reports false when an entry carries no id at all.
+//
+// The dashboard's own client only ever sends strings, but the same endpoint is
+// called by the legacy TUI, which sends the model objects it holds in memory:
+// {fullModel} or {provider, model}. Persisted verbatim those objects are stored
+// as objects in a column the reader (comboModels) only unmarshals as []string,
+// so the row comes back unreadable and takes the whole Combos view down with
+// it. Coercion happens at the API boundary instead of on read, because a row
+// already carrying objects cannot be told apart from a well-formed one — and
+// upstream does not migrate those either.
+//
+// A JSON array string is accepted as well: the client type is
+// `models: string | string[]`, and that string form is what the column holds.
+func normalizeComboModelIDs(v any) ([]string, bool) {
+	if v == nil {
+		return nil, true
+	}
+	if s, ok := v.(string); ok {
+		if strings.TrimSpace(s) == "" {
+			return nil, false
+		}
+		var decoded any
+		if err := json.Unmarshal([]byte(s), &decoded); err != nil {
+			return nil, false
+		}
+		return normalizeComboModelIDs(decoded)
+	}
+	entries, ok := v.([]any)
+	if !ok {
+		// A typed slice (a Go caller, or a round-tripped value) is not what
+		// json.Unmarshal produces, but the shapes are the same.
+		if typed, ok := v.([]string); ok {
+			entries = make([]any, len(typed))
+			for i, id := range typed {
+				entries[i] = id
+			}
+		} else {
+			return nil, false
+		}
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		id, ok := comboModelID(entry)
+		if !ok {
+			return nil, false
+		}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
+// comboModelID coerces one entry of a combo model list. A string is the id
+// itself; an object is one of the two legacy shapes, fullModel winning over
+// provider+model because the TUI writes both and fullModel is the resolved one.
+func comboModelID(entry any) (string, bool) {
+	switch e := entry.(type) {
+	case string:
+		if strings.TrimSpace(e) == "" {
+			return "", false
+		}
+		return e, true
+	case map[string]any:
+		if full, ok := e["fullModel"].(string); ok && strings.TrimSpace(full) != "" {
+			return full, true
+		}
+		provider, pok := e["provider"].(string)
+		model, mok := e["model"].(string)
+		if pok && mok && strings.TrimSpace(provider) != "" && strings.TrimSpace(model) != "" {
+			return provider + "/" + model, true
+		}
+	}
+	return "", false
 }
 
 // HandleDeleteCombo handles DELETE /api/combos/{id}.

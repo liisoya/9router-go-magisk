@@ -2,6 +2,7 @@ package shared
 
 import (
 	"net/http"
+	"time"
 
 	"9router/proxy/internal/proxy"
 )
@@ -52,12 +53,38 @@ type UsageLogInfo struct {
 	ConnName     string
 	ConnEmail    string
 	APIKey       string
+	APIKeyName   string
 	Endpoint     string
+	Protocol     string
+	RequestedModel string
+	ComboName    string
+	CacheSource  string
+	StartedAt    time.Time
 	// Egress is the proxy pool or relay a request left the host through, empty
 	// for a direct one. Without it the log cannot answer "did this turn use the
 	// proxy?", which is the first question asked whenever a provider's rate limit
 	// or block list is tied to an IP.
 	Egress string
+
+	// RTK token compression metrics
+	OriginalInputTokens int
+	SavedTokens         int
+	SavedPercent        int
+	CompressionDurationMs int
+}
+
+// AccountLabel returns a human-readable account identifier (email, name, or connection ID).
+func (u *UsageLogInfo) AccountLabel() string {
+	if u.ConnEmail != "" {
+		return u.ConnEmail
+	}
+	if u.ConnName != "" {
+		return u.ConnName
+	}
+	if u.ConnectionID != "" {
+		return u.ConnectionID
+	}
+	return "Default"
 }
 
 // ConnIdentityKV returns the log key/value pairs naming the account behind a

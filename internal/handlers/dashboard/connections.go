@@ -5,7 +5,6 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -140,7 +139,8 @@ const (
 var usageSupportedProviders = []string{
 	"antigravity", "claude", "codebuddy-cn", "codebuddy-intl", "codex",
 	"commandcode", "deepseek", "gemini-cli", "github", "glm", "glm-cn",
-	"grok-cli", "groq", "kimi", "kiro", "minimax", "minimax-cn", "ollama",
+	"grok-cli", "groq", "kimi", "kiro", "minimax", "minimax-cn", "minimax-code",
+	"minimax-code-global", "ollama",
 	"opencode-go", "opencode-zen", "qoder", "qoder-cn", "trae",
 	"vercel-ai-gateway", "xiaomi-mimo", "zed",
 }
@@ -192,11 +192,13 @@ func sortProviderConnections(conns []*models.ProviderConnection, sortMode string
 		if c.Priority != nil {
 			return *c.Priority
 		}
-		return math.MaxInt
+		return 0
 	}
 	sort.SliceStable(conns, func(i, j int) bool {
 		a, b := conns[i], conns[j]
-		if sortMode == "provider" {
+
+		// 1. Always group by Provider first so accounts of the same provider stay contiguous
+		if a.Provider != b.Provider {
 			oa, oka := order[a.Provider]
 			if !oka {
 				oa = len(order)
@@ -210,10 +212,22 @@ func sortProviderConnections(conns []*models.ProviderConnection, sortMode string
 			}
 			return a.Provider < b.Provider
 		}
+
+		// 2. Within the same provider, sort by priority
 		if pa, pb := priorityOf(a), priorityOf(b); pa != pb {
 			return pa < pb
 		}
-		return a.Provider < b.Provider
+
+		// 3. Tie-breaker by name ascending
+		nameA := ""
+		if a.Name != nil {
+			nameA = *a.Name
+		}
+		nameB := ""
+		if b.Name != nil {
+			nameB = *b.Name
+		}
+		return nameA < nameB
 	})
 }
 
@@ -234,9 +248,33 @@ func maskConnectionName(name string) string {
 	return name
 }
 
+// maskConnectionSecret renders a stored credential as a non-reversible hint for
+// the edit-connection form (issue #154): enough to confirm *which* key is on
+// file, never enough to replay it. Same shape as maskClientKey, which the
+// dashboard already uses for client API keys.
+func maskConnectionSecret(secret string) string {
+	if len(secret) <= 12 {
+		return "***"
+	}
+	return secret[:6] + "…" + secret[len(secret)-4:]
+}
+
+// connectionSecretHint returns the credential a connection actually
+// authenticates with, in the precedence the runtime uses: the OAuth access
+// token first (falling back to the mirrored apiKey), then the plain apiKey.
+func connectionSecretHint(data map[string]any) string {
+	for _, field := range []string{"accessToken", "apiKey"} {
+		if v, ok := data[field].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // sanitizeProviderConnection mirrors upstream sanitize(): only safe fields,
 // secrets in data JSON never leave the server.
 func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
+
 	safe := map[string]any{
 		"id": c.ID, "provider": c.Provider, "authType": c.AuthType,
 		"isActive": c.IsActive, "createdAt": c.CreatedAt, "updatedAt": c.UpdatedAt,
@@ -256,6 +294,15 @@ func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
 	var data map[string]any
 	if err := json.Unmarshal([]byte(c.Data), &data); err != nil || data == nil {
 		return safe
+	}
+
+	// Issue #154: the edit-connection form needs to show which credential is on
+	// file so a blank field can mean "keep the current one". accessToken wins
+	// where present, because that is the credential an OAuth connection
+	// actually sends and usage_credentials.go falls back only the other way.
+	// Only the mask leaves the server — the raw secret stays dropped.
+	if secret := connectionSecretHint(data); secret != "" {
+		safe["apiKeyMasked"] = maskConnectionSecret(secret)
 	}
 	for _, f := range []string{
 		"displayName", "defaultModel", "testStatus", "lastError", "lastErrorAt",
@@ -278,6 +325,12 @@ func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
 						safe[f] = string(b)
 					} else {
 						safe[f] = fmt.Sprintf("%v", v)
+					}
+					if mdl, ok := m["model"].(string); ok && mdl != "" {
+						safe["lastErrorModel"] = mdl
+					}
+					if src, ok := m["source"].(string); ok && src != "" {
+						safe["lastErrorSource"] = src
 					}
 				} else if s, isStr := v.(string); isStr {
 					safe[f] = s
@@ -302,7 +355,7 @@ func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
 			"connectionProxyEnabled", "connectionProxyUrl", "connectionNoProxy",
 			"githubLogin", "githubName", "githubEmail", "githubUserId",
 			"username", "firstName", "lastName", "authMethod", "authKind",
-			"profileArn",
+			"profileArn", "accessKeyId", "profile",
 		} {
 			if v, ok := psd[f]; ok && v != nil {
 				out[f] = v
@@ -532,6 +585,14 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	_, hasPSD := rawBody["providerSpecificData"]
 	_, hasAssignedModel := rawBody["assignedModel"]
 	_, hasProxyPool := rawBody["proxyPoolId"]
+	// Issue #154: rotating the credential from the edit modal. Blank (or
+	// whitespace-only) means "keep the stored key" — the modal shows it as a
+	// mask and sends nothing when the user did not type one.
+	newAPIKey := ""
+	if s, ok := rawBody["apiKey"].(string); ok {
+		newAPIKey = strings.TrimSpace(s)
+	}
+	hasAPIKey := newAPIKey != ""
 	a, hasIsActive := rawBody["isActive"].(bool)
 
 	// Upstream normalizeProxyPoolUpdate: null/""/"__none__" unbinds, anything
@@ -562,7 +623,7 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	}
 
 	// Fast path: if only updating active status
-	if hasIsActive && !hasName && !hasPriority && !hasData && !hasPSD && !hasAssignedModel && !hasProxyPool {
+	if hasIsActive && !hasName && !hasPriority && !hasData && !hasPSD && !hasAssignedModel && !hasProxyPool && !hasAPIKey {
 		if err := h.Repo.SetConnectionStatus(id, a); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -591,7 +652,7 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	}
 
 	dataStr := existing.Data
-	if hasData || hasPSD || hasAssignedModel || hasProxyPool {
+	if hasData || hasPSD || hasAssignedModel || hasProxyPool || hasAPIKey {
 		dataMap := make(map[string]any)
 		if existing.Data != "" {
 			_ = json.Unmarshal([]byte(existing.Data), &dataMap)
@@ -625,6 +686,15 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 					dataMap[k] = v
 				}
 			}
+		}
+
+		// Issue #154: credential rotation. Only the key itself is replaced —
+		// testStatus/lastError stay whatever the last probe decided. The modal
+		// clears them explicitly once it has validated the new key against the
+		// provider, which is the only evidence that justifies marking the row
+		// active again (upstream EditConnectionModal sends testStatus).
+		if hasAPIKey {
+			dataMap["apiKey"] = newAPIKey
 		}
 
 		if hasPSD {
@@ -771,6 +841,15 @@ func (h *DashboardHandler) HandleGetConnectionModels(w http.ResponseWriter, r *h
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing connection id")
 		return
 	}
+	h.writeConnectionModels(w, r, id)
+}
+
+// writeConnectionModels is HandleGetConnectionModels with the connection id
+// already resolved. The split exists because model sync (POST
+// /api/models/sync) needs the same discovery for a connection it selected
+// itself, and a second copy of this provider-by-provider chain would be free
+// to drift from the one the dashboard imports models with (#179).
+func (h *DashboardHandler) writeConnectionModels(w http.ResponseWriter, r *http.Request, id string) {
 	conn, err := h.Repo.GetProviderConnectionByID(id)
 	if err != nil || conn == nil {
 		handlerutil.WriteJSONError(w, http.StatusNotFound, "connection not found")
@@ -1013,6 +1092,9 @@ func (h *DashboardHandler) HandleGetConnectionModels(w http.ResponseWriter, r *h
 			return
 		}
 		headers := map[string]string{"Authorization": "Bearer " + token}
+		for k, v := range providers.ModelsListHeaders(conn.Provider) {
+			headers[k] = v
+		}
 		status, body, err := validateProbeDo(r.Context(), http.MethodGet, listURL, headers, nil)
 		if err != nil {
 			handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to fetch models: "+err.Error())

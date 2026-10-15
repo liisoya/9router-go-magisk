@@ -152,14 +152,26 @@ func (h *ChatHandler) StoreAntigravityProjectID(connectionID, pid string) {
 }
 
 func (h *ChatHandler) storeAntigravityProjectID(connectionID, pid string) {
-	if connectionID == "" || pid == "" {
+	if connectionID == "" || pid == "" || h.Repo == nil || h.Repo.RawDB() == nil {
 		return
 	}
 	go func() {
+		if h.Repo == nil || h.Repo.RawDB() == nil {
+			return
+		}
 		if _, err := h.Repo.RawDB().Exec("UPDATE providerConnections SET data = json_set(data, '$.projectId', ?) WHERE id = ?", pid, connectionID); err != nil {
 			log.Warn("gemini", "update projectId failed", "conn", connectionID, "error", err)
 		}
 	}()
+}
+
+type oauthTokenResult struct {
+	token     string
+	projectID string
+	// passthrough marks a result carrying no new token — the connection was
+	// healthy or unreadable. A waiter sharing the leader's flight must keep
+	// its own token rather than adopting the leader's.
+	passthrough bool
 }
 
 // RefreshOAuthTokenIfExpired checks and refreshes OAuth token for any provider with refreshToken.
@@ -171,57 +183,127 @@ func (h *ChatHandler) refreshOAuthTokenIfExpired(connectionID, currentToken stri
 	if connectionID == "" {
 		return currentToken, "", nil
 	}
-	db := h.Repo.RawDB()
-	row := db.QueryRow("SELECT provider, data FROM providerConnections WHERE id = ?", connectionID)
-	var provider string
-	var rawData string
-	if err := row.Scan(&provider, &rawData); err != nil {
+	if h.Repo == nil || h.Repo.RawDB() == nil {
 		return currentToken, "", nil
 	}
 
-	var connMap map[string]any
-	if err := json.Unmarshal([]byte(rawData), &connMap); err != nil {
-		return currentToken, "", nil
-	}
-
-	oauthData := providers.ParseOAuthConnection(connMap)
-	projectID := ""
-	if oauthData != nil {
-		projectID = oauthData.ProjectID
-	}
-	if oauthData == nil || oauthData.RefreshToken == "" || !oauthData.IsExpired() {
-		return currentToken, projectID, nil
-	}
-
-	// Try per-provider OAuth refresher first
-	if refresher := oauth.Get(provider); refresher != nil {
-		log.Info("oauth", "token expired, custom refresh", "provider", provider, "project", projectID)
-		var connPSD map[string]any
-		if raw, ok := connMap["providerSpecificData"].(map[string]any); ok {
-			connPSD = raw
+	res, err, _ := h.oauthRefreshFlight.Do(connectionID, func() (any, error) {
+		db := h.Repo.RawDB()
+		row := db.QueryRow("SELECT provider, data FROM providerConnections WHERE id = ?", connectionID)
+		var provider string
+		var rawData string
+		if err := row.Scan(&provider, &rawData); err != nil {
+			return oauthTokenResult{token: currentToken, passthrough: true}, nil
 		}
-		result, err := refresher(context.Background(), &oauth.Params{
-			Client:               h.Client,
-			Provider:             provider,
-			RefreshToken:         oauthData.RefreshToken,
-			AccessToken:          currentToken,
-			ProviderSpecificData: oauth.StringMap(connPSD),
-		})
+
+		var connMap map[string]any
+		if err := json.Unmarshal([]byte(rawData), &connMap); err != nil {
+			return oauthTokenResult{token: currentToken, passthrough: true}, nil
+		}
+
+		oauthData := providers.ParseOAuthConnection(connMap)
+		projectID := ""
+		if oauthData != nil {
+			projectID = oauthData.ProjectID
+		}
+// The token is usable, so there is nothing to refresh. Hand back exactly
+		// the credential the caller passed in, untouched: the stored accessToken
+		// is not interchangeable with it, and the request path picks the right
+		// one deliberately.
+		//
+		// for iflow the connection stores an HMAC platform key in apiKey and the
+		// OAuth access token alongside it, and the request is signed with apiKey
+		// (proxy/executor/providers.go) — substituting here would sign every
+		// healthy connection with the wrong secret.
+		//
+		// Same for Kiro: upstream (open-sse/executors/kiro.js buildHeaders) uses
+		// the apiKey for `authMethod: "api_key"` connections even when an
+		// accessToken is present, and sending the other one answers 403.
+		if oauthData == nil || oauthData.RefreshToken == "" || !oauthData.IsExpired() {
+			return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: true}, nil
+		}
+
+		// Try per-provider OAuth refresher first
+		if refresher := oauth.Get(provider); refresher != nil {
+			log.Info("oauth", "token expired, custom refresh", "provider", provider, "project", projectID)
+			var connPSD map[string]any
+			if raw, ok := connMap["providerSpecificData"].(map[string]any); ok {
+				connPSD = raw
+			}
+			result, err := refresher(context.Background(), &oauth.Params{
+				Client:               h.Client,
+				Provider:             provider,
+				RefreshToken:         oauthData.RefreshToken,
+				AccessToken:          currentToken,
+				ProviderSpecificData: oauth.StringMap(connPSD),
+			})
+			if err != nil {
+				h.parkRejectedOAuthAccount(connectionID, err)
+return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: true},
+					fmt.Errorf("OAuth refresh for %s: %w", provider, err)
+			}
+			if result == nil {
+				// A refresher that reports success but hands back nothing is a
+				// broken provider, not a reason to crash the gateway. The forced
+				// path already guards this shape; without it BuildConnectionUpdate
+				// dereferences nil, and singleflight re-panics that on every waiter.
+				log.Error("oauth", "custom refresh returned no result", "provider", provider, "connection", connectionID)
+				return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: true},
+					fmt.Errorf("OAuth refresh for %s: refresher returned no token", provider)
+			}
+			update := oauth.BuildConnectionUpdate(result)
+			var existing map[string]any
+			if err := json.Unmarshal([]byte(rawData), &existing); err != nil {
+				log.Error("oauth", "unmarshal connection data failed", "conn", connectionID, "error", err)
+				existing = make(map[string]any)
+			}
+			prevAccess, _ := existing["accessToken"].(string)
+			oauth.SyncMirroredAPIKey(existing, provider, prevAccess, result.AccessToken)
+			for k, v := range update {
+				existing[k] = v
+			}
+			if result.ProjectID != "" {
+				existing["projectId"] = result.ProjectID
+			}
+			mergedJSON, err := json.Marshal(existing)
+			if err != nil {
+				log.Error("oauth", "marshal connection data failed", "conn", connectionID, "error", err)
+			} else {
+				db.Exec("UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?",
+					string(mergedJSON), time.Now().UTC().Format(time.RFC3339), connectionID)
+			}
+			newPID := projectID
+			if result.ProjectID != "" {
+				newPID = result.ProjectID
+			}
+			log.Info("oauth", "token refreshed", "provider", provider, "project", newPID)
+			h.clearOAuthAccountPark(connectionID)
+			return oauthTokenResult{token: result.AccessToken, projectID: newPID}, nil
+		}
+
+		// Fall back to standard OAuth2
+		cfg, ok := providers.KnownOAuthConfigs[provider]
+		if !ok {
+			return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: true}, nil
+		}
+
+		log.Info("oauth", "token expired, standard refresh", "provider", provider, "project", projectID)
+		tokenResp, err := providers.RefreshToken(cfg, oauthData.RefreshToken)
 		if err != nil {
 			h.parkRejectedOAuthAccount(connectionID, err)
-			return currentToken, projectID, fmt.Errorf("OAuth refresh for %s: %w", provider, err)
+			return oauthTokenResult{token: currentToken, projectID: projectID, passthrough: true}, fmt.Errorf("OAuth refresh for %s: %w", provider, err)
 		}
-		update := oauth.BuildConnectionUpdate(result)
+
+		update := tokenResp.BuildConnectionUpdate()
 		var existing map[string]any
 		if err := json.Unmarshal([]byte(rawData), &existing); err != nil {
 			log.Error("oauth", "unmarshal connection data failed", "conn", connectionID, "error", err)
 			existing = make(map[string]any)
 		}
+		prevAccess, _ := existing["accessToken"].(string)
+		oauth.SyncMirroredAPIKey(existing, provider, prevAccess, tokenResp.AccessToken)
 		for k, v := range update {
 			existing[k] = v
-		}
-		if result.ProjectID != "" {
-			existing["projectId"] = result.ProjectID
 		}
 		mergedJSON, err := json.Marshal(existing)
 		if err != nil {
@@ -230,49 +312,32 @@ func (h *ChatHandler) refreshOAuthTokenIfExpired(connectionID, currentToken stri
 			db.Exec("UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?",
 				string(mergedJSON), time.Now().UTC().Format(time.RFC3339), connectionID)
 		}
-		newPID := projectID
-		if result.ProjectID != "" {
-			newPID = result.ProjectID
-		}
-		log.Info("oauth", "token refreshed", "provider", provider, "project", newPID)
+
 		h.clearOAuthAccountPark(connectionID)
-		return result.AccessToken, newPID, nil
-	}
 
-	// Fall back to standard OAuth2
-	cfg, ok := providers.KnownOAuthConfigs[provider]
+		log.Info("oauth", "token refreshed", "provider", provider, "project", projectID)
+		return oauthTokenResult{token: tokenResp.AccessToken, projectID: projectID}, nil
+	})
+
+// A shared flight must not hand one caller's token to another: when the
+	// leader found the connection healthy, it returned its own token as a
+	// pass-through, and that value belongs to the leader alone.
+	if err != nil {
+		r, _ := res.(oauthTokenResult)
+		token := currentToken
+		if !r.passthrough {
+			token = r.token
+		}
+		return token, r.projectID, err
+	}
+	r, ok := res.(oauthTokenResult)
 	if !ok {
-		return currentToken, projectID, nil
+		return currentToken, "", nil
 	}
-
-	log.Info("oauth", "token expired, standard refresh", "provider", provider, "project", projectID)
-	tokenResp, err := providers.RefreshToken(cfg, oauthData.RefreshToken)
-	if err != nil {
-		h.parkRejectedOAuthAccount(connectionID, err)
-		return currentToken, projectID, fmt.Errorf("OAuth refresh for %s: %w", provider, err)
+	if r.passthrough {
+		return currentToken, r.projectID, nil
 	}
-
-	update := tokenResp.BuildConnectionUpdate()
-	var existing map[string]any
-	if err := json.Unmarshal([]byte(rawData), &existing); err != nil {
-		log.Error("oauth", "unmarshal connection data failed", "conn", connectionID, "error", err)
-		existing = make(map[string]any)
-	}
-	for k, v := range update {
-		existing[k] = v
-	}
-	mergedJSON, err := json.Marshal(existing)
-	if err != nil {
-		log.Error("oauth", "marshal connection data failed", "conn", connectionID, "error", err)
-	} else {
-		db.Exec("UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?",
-			string(mergedJSON), time.Now().UTC().Format(time.RFC3339), connectionID)
-	}
-
-	h.clearOAuthAccountPark(connectionID)
-
-	log.Info("oauth", "token refreshed", "provider", provider, "project", projectID)
-	return tokenResp.AccessToken, projectID, nil
+	return r.token, r.projectID, nil
 }
 
 // forceRefreshOAuthToken unconditionally refreshes the OAuth token for a connection ID.
@@ -280,115 +345,132 @@ func (h *ChatHandler) forceRefreshOAuthToken(connectionID string) (string, strin
 	if connectionID == "" {
 		return "", "", nil
 	}
-
-	db := h.Repo.RawDB()
-	row := db.QueryRow("SELECT provider, data FROM providerConnections WHERE id = ?", connectionID)
-	var provider string
-	var rawData string
-	if err := row.Scan(&provider, &rawData); err != nil {
-		return "", "", err
+	if h.Repo == nil || h.Repo.RawDB() == nil {
+		return "", "", fmt.Errorf("no database repository available")
 	}
 
-	var connMap map[string]any
-	if err := json.Unmarshal([]byte(rawData), &connMap); err != nil {
-		return "", "", err
-	}
-
-	oauthData := providers.ParseOAuthConnection(connMap)
-	if oauthData == nil || oauthData.RefreshToken == "" {
-		return "", "", fmt.Errorf("no refresh token available")
-	}
-
-	// Try per-provider OAuth refresher first
-	if refresher := oauth.Get(provider); refresher != nil {
-		log.Info("oauth", "force refresh", "provider", provider)
-		var forcePSD map[string]any
-		if raw, ok := connMap["providerSpecificData"].(map[string]any); ok {
-			forcePSD = raw
+	// The "\x00" prefix cannot occur in a connection id, so a forced refresh
+	// can never collide with the lazy flight of a connection named "force:<id>".
+	res, err, _ := h.oauthRefreshFlight.Do("\x00force:"+connectionID, func() (any, error) {
+		db := h.Repo.RawDB()
+		row := db.QueryRow("SELECT provider, data FROM providerConnections WHERE id = ?", connectionID)
+		var provider string
+		var rawData string
+		if err := row.Scan(&provider, &rawData); err != nil {
+			return oauthTokenResult{}, err
 		}
-		result, err := refresher(context.Background(), &oauth.Params{
-			Client:               h.Client,
-			Provider:             provider,
-			RefreshToken:         oauthData.RefreshToken,
-			ProviderSpecificData: oauth.StringMap(forcePSD),
-		})
-		if err == nil && result != nil {
-			var existing map[string]any
-			if err := json.Unmarshal([]byte(rawData), &existing); err != nil {
-				log.Error("oauth", "unmarshal conn data failed", "conn", connectionID, "error", err)
-				existing = make(map[string]any)
+
+		var connMap map[string]any
+		if err := json.Unmarshal([]byte(rawData), &connMap); err != nil {
+			return oauthTokenResult{}, err
+		}
+
+		oauthData := providers.ParseOAuthConnection(connMap)
+		if oauthData == nil || oauthData.RefreshToken == "" {
+			return oauthTokenResult{}, fmt.Errorf("no refresh token available")
+		}
+
+		// Try per-provider OAuth refresher first
+		if refresher := oauth.Get(provider); refresher != nil {
+			log.Info("oauth", "force refresh", "provider", provider)
+			var forcePSD map[string]any
+			if raw, ok := connMap["providerSpecificData"].(map[string]any); ok {
+				forcePSD = raw
 			}
-			existing["accessToken"] = result.AccessToken
-			if result.RefreshToken != "" {
-				existing["refreshToken"] = result.RefreshToken
+			result, err := refresher(context.Background(), &oauth.Params{
+				Client:               h.Client,
+				Provider:             provider,
+				RefreshToken:         oauthData.RefreshToken,
+				ProviderSpecificData: oauth.StringMap(forcePSD),
+			})
+			if err == nil && result != nil {
+				var existing map[string]any
+				if err := json.Unmarshal([]byte(rawData), &existing); err != nil {
+					log.Error("oauth", "unmarshal conn data failed", "conn", connectionID, "error", err)
+					existing = make(map[string]any)
+				}
+				prevAccess, _ := existing["accessToken"].(string)
+				oauth.SyncMirroredAPIKey(existing, provider, prevAccess, result.AccessToken)
+				existing["accessToken"] = result.AccessToken
+				if result.RefreshToken != "" {
+					existing["refreshToken"] = result.RefreshToken
+				}
+				if result.ProjectID != "" {
+					existing["projectId"] = result.ProjectID
+				}
+				existing["expiresAt"] = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second).Format(time.RFC3339)
+				mergedJSON, err := json.Marshal(existing)
+				if err != nil {
+					log.Error("oauth", "marshal conn data failed", "conn", connectionID, "error", err)
+				} else {
+					db.Exec("UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?",
+						string(mergedJSON), time.Now().UTC().Format(time.RFC3339), connectionID)
+				}
+				newPID := oauthData.ProjectID
+				if result.ProjectID != "" {
+					newPID = result.ProjectID
+				}
+				h.clearOAuthAccountPark(connectionID)
+				return oauthTokenResult{token: result.AccessToken, projectID: newPID}, nil
 			}
-			if result.ProjectID != "" {
-				existing["projectId"] = result.ProjectID
-			}
-			existing["expiresAt"] = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second).Format(time.RFC3339)
-			mergedJSON, err := json.Marshal(existing)
 			if err != nil {
-				log.Error("oauth", "marshal conn data failed", "conn", connectionID, "error", err)
-			} else {
-				db.Exec("UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?",
-					string(mergedJSON), time.Now().UTC().Format(time.RFC3339), connectionID)
+				if h.parkRejectedOAuthAccount(connectionID, err) {
+					return oauthTokenResult{}, fmt.Errorf("OAuth refresh for %s: %w", provider, err)
+				}
+				log.Warn("oauth", "custom refresh failed, trying standard", "provider", provider, "conn", connectionID, "error", err)
 			}
-			newPID := oauthData.ProjectID
-			if result.ProjectID != "" {
-				newPID = result.ProjectID
-			}
-			h.clearOAuthAccountPark(connectionID)
-			return result.AccessToken, newPID, nil
 		}
-		// A grant the provider rejected is rejected on the standard endpoint
-		// too, so park the account and report instead of spending a second
-		// call on it. Any other failure still falls through: the standard
-		// endpoint stays a real second chance for a provider quirk.
+
+		// Fall back to standard OAuth2
+		cfg, ok := providers.KnownOAuthConfigs[provider]
+		if !ok {
+			return oauthTokenResult{}, fmt.Errorf("no OAuth config for %s", provider)
+		}
+
+		log.Info("oauth", "force refresh (standard)", "provider", provider)
+		tokenResp, err := providers.RefreshToken(cfg, oauthData.RefreshToken)
 		if err != nil {
-			if h.parkRejectedOAuthAccount(connectionID, err) {
-				return "", "", fmt.Errorf("OAuth refresh for %s: %w", provider, err)
-			}
-			log.Warn("oauth", "custom refresh failed, trying standard", "provider", provider, "conn", connectionID, "error", err)
+			h.parkRejectedOAuthAccount(connectionID, err)
+			return oauthTokenResult{}, fmt.Errorf("OAuth refresh for %s: %w", provider, err)
 		}
-	}
 
-	// Fall back to standard OAuth2
-	cfg, ok := providers.KnownOAuthConfigs[provider]
+		update := tokenResp.BuildConnectionUpdate()
+		var existing map[string]any
+		if err := json.Unmarshal([]byte(rawData), &existing); err != nil {
+			log.Error("oauth", "unmarshal conn data failed", "conn", connectionID, "error", err)
+			existing = make(map[string]any)
+		}
+		prevAccess, _ := existing["accessToken"].(string)
+		oauth.SyncMirroredAPIKey(existing, provider, prevAccess, tokenResp.AccessToken)
+		for k, v := range update {
+			existing[k] = v
+		}
+		mergedJSON, err := json.Marshal(existing)
+		if err != nil {
+			log.Error("oauth", "marshal conn data failed", "conn", connectionID, "error", err)
+		} else {
+			db.Exec("UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?",
+				string(mergedJSON), time.Now().UTC().Format(time.RFC3339), connectionID)
+		}
+
+		h.clearOAuthAccountPark(connectionID)
+
+		pid := ""
+		if v, ok := existing["projectId"].(string); ok {
+			pid = v
+		}
+		log.Info("oauth", "token refreshed", "provider", provider, "project", pid)
+		return oauthTokenResult{token: tokenResp.AccessToken, projectID: pid}, nil
+	})
+
+	if err != nil {
+		return "", "", err
+	}
+	r, ok := res.(oauthTokenResult)
 	if !ok {
-		return "", "", fmt.Errorf("no OAuth config for %s", provider)
+		return "", "", nil
 	}
-
-	log.Info("oauth", "force refresh (standard)", "provider", provider)
-	tokenResp, err := providers.RefreshToken(cfg, oauthData.RefreshToken)
-	if err != nil {
-		h.parkRejectedOAuthAccount(connectionID, err)
-		return "", "", fmt.Errorf("OAuth refresh for %s: %w", provider, err)
-	}
-
-	update := tokenResp.BuildConnectionUpdate()
-	var existing map[string]any
-	if err := json.Unmarshal([]byte(rawData), &existing); err != nil {
-		log.Error("oauth", "unmarshal conn data failed", "conn", connectionID, "error", err)
-		existing = make(map[string]any)
-	}
-	for k, v := range update {
-		existing[k] = v
-	}
-	mergedJSON, err := json.Marshal(existing)
-	if err != nil {
-		log.Error("oauth", "marshal conn data failed", "conn", connectionID, "error", err)
-	} else {
-		db.Exec("UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?",
-			string(mergedJSON), time.Now().UTC().Format(time.RFC3339), connectionID)
-	}
-
-	h.clearOAuthAccountPark(connectionID)
-
-	pid := ""
-	if v, ok := existing["projectId"].(string); ok {
-		pid = v
-	}
-	return tokenResp.AccessToken, pid, nil
+	return r.token, r.projectID, nil
 }
 
 // handleGeminiStream processes Gemini stream SSE chunks and translates to OpenAI format.
@@ -481,6 +563,9 @@ func (h *ChatHandler) handleGeminiStream(ctx context.Context, w http.ResponseWri
 		}
 	})
 	if bridge != nil {
+		// The upstream is fully drained, so the completion watchdog has nothing
+		// left to give up on and must not fire into hw after this returns.
+		bridge.StopCompletionWatchdog()
 		bridge.Close()
 	}
 	if !translateResponse && bridge == nil {

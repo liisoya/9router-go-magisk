@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"io"
 	"net/http"
-
-	"9router/proxy/internal/constants"
 )
 
 // FallbackTransport intercepts outbound HTTP requests and automatically retries
 // via a direct connection (Proxy: nil) if the environment proxy or local sandbox proxy
 // refuses the connection (CONNECT tunnel failed, 403 Forbidden, blocked-by-allowlist).
-var defaultDirectTransport = constants.DefaultHTTPTransportConfig.NewTransport()
+var defaultDirectTransport = NewSafeTransport()
 
 type FallbackTransport struct {
 	Base   http.RoundTripper

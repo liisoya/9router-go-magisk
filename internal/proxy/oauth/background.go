@@ -206,6 +206,8 @@ func refreshBackgroundConnection(ctx context.Context, repo *db.Repo, c Connectio
 			ProjectID:    result.ProjectID,
 		}
 	}
+	prevAccess, _ := existing["accessToken"].(string)
+	SyncMirroredAPIKey(existing, c.Provider, prevAccess, refreshed.AccessToken)
 	for k, v := range BuildConnectionUpdate(refreshed) {
 		existing[k] = v
 	}

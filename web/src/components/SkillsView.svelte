@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { copyToClipboard } from '../lib/clipboard'
+
   interface Skill {
     id: string
     name: string
@@ -88,14 +90,12 @@
   }
 
   async function handleCopy(key: string, text: string) {
-    try {
-      await navigator.clipboard.writeText(text)
+    const ok = await copyToClipboard(text)
+    if (ok) {
       copiedMap[key] = true
       setTimeout(() => {
         copiedMap[key] = false
       }, 2000)
-    } catch {
-      // Fallback
     }
   }
 

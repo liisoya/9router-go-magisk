@@ -4,6 +4,7 @@ import (
 	json "encoding/json/v2"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/translator"
@@ -217,6 +218,43 @@ func TestExtractRequestMessages(t *testing.T) {
 		}
 	})
 
+	// A byte cut through a multi-byte rune used to hand json/v2 an invalid
+	// string, which failed the whole request-detail marshal — the row, the
+	// daily aggregate and the recent-requests entry all silently vanished
+	// for any request whose text happened to straddle the limit.
+	t.Run("rune straddling the byte limit stays marshalable", func(t *testing.T) {
+		for _, tt := range []struct {
+			name string
+			body string
+		}{
+			{"3-byte CJK", strings.Repeat("日", 200)},
+			{"2-byte latin-1 supplement", strings.Repeat("é", 300)},
+			{"4-byte emoji", strings.Repeat("🙂", 150)},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				body := buildRequestBody([]translator.OpenAIMessage{
+					{Role: "user", Content: tt.body},
+				})
+				msgs := extractRequestMessages(body)
+				if len(msgs) != 1 {
+					t.Fatalf("expected 1 message, got %d", len(msgs))
+				}
+				got := msgs[0]["content"]
+				if !utf8.ValidString(got) {
+					t.Errorf("truncated content is not valid UTF-8: %q", got)
+				}
+				if !strings.HasSuffix(got, "...") {
+					t.Errorf("truncated content lost its marker: %q", got)
+				}
+				// The stored messages must survive a real marshal of the
+				// payload, which is what failed in production.
+				if _, err := json.Marshal(map[string]any{"messages": msgs}); err != nil {
+					t.Errorf("marshal request detail payload: %v", err)
+				}
+			})
+		}
+	})
+
 	t.Run("exceeds max logged messages", func(t *testing.T) {
 		msgs := make([]translator.OpenAIMessage, constants.MaxLoggedMessages+5)
 		for i := range msgs {
@@ -259,6 +297,59 @@ func TestExtractRequestMessages(t *testing.T) {
 	})
 }
 
+func TestTruncateDetailText(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     string
+		max    int
+		suffix string
+		want   string
+	}{
+		{"under limit is untouched", "hello", 500, "...", "hello"},
+		{"exactly at limit is untouched", "abcde", 5, "...", "abcde"},
+		{"ascii truncates at max", strings.Repeat("a", 600), 500, "...", strings.Repeat("a", 500) + "..."},
+		// The regression: a byte cut through a 3-byte rune leaves 2 dangling
+		// bytes that json/v2 refuses to marshal.
+		{"3-byte rune straddling the cut", strings.Repeat("日", 200), 500, "...", strings.Repeat("日", 166) + "..."},
+		{"2-byte rune straddling the cut", strings.Repeat("é", 300), 500, "...", strings.Repeat("é", 250) + "..."},
+		{"4-byte rune straddling the cut", strings.Repeat("🙂", 150), 500, "...", strings.Repeat("🙂", 125) + "..."},
+		// Under the limit, so no cut happens: the bad bytes were already in
+		// the value and still have to be scrubbed or the marshal fails. No
+		// truncation marker — nothing was truncated.
+		{"invalid bytes below the limit", "ok\xe2\x82", 500, "...", "ok"},
+		{"invalid bytes inside the cut window", "ok\xe2\x82xx", 4, "...", "ok..."},
+		{"valid multibyte below the limit is preserved", "héllo🙂", 500, "...", "héllo🙂"},
+		// Invalid bytes past the cut are discarded with the rest of the tail.
+		{"invalid bytes above the cut", strings.Repeat("a", 520) + "\xe2\x82", 500, "...", strings.Repeat("a", 500) + "..."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateDetailText(tt.in, tt.max, tt.suffix)
+			if got != tt.want {
+				t.Errorf("truncateDetailText() = %q, want %q", got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("result is not valid UTF-8: %q", got)
+			}
+			if _, err := json.Marshal(map[string]string{"content": got}); err != nil {
+				t.Errorf("marshal result: %v", err)
+			}
+		})
+	}
+}
+
+// The detail rows are written once per request; the helper must not turn that
+// into an allocation on the common all-valid path.
+func BenchmarkTruncateDetailTextValid(b *testing.B) {
+	content := strings.Repeat("héllo🙂 mixed text, ", 200)
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := truncateDetailText(content, constants.MaxMessageContentLen, "..."); !utf8.ValidString(got) {
+			b.Fatalf("invalid UTF-8: %q", got)
+		}
+	}
+}
+
 func buildRequestBody(msgs []translator.OpenAIMessage) []byte {
 	req := translator.OpenAIRequest{
 		Model:    "test-model",
@@ -266,4 +357,14 @@ func buildRequestBody(msgs []translator.OpenAIMessage) []byte {
 	}
 	b, _ := json.Marshal(req)
 	return b
+}
+
+func BenchmarkTruncateDetailTextNoCut(b *testing.B) {
+	content := strings.Repeat("héllo🙂 mixed text, ", 20) // under MaxMessageContentLen
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := truncateDetailText(content, constants.MaxMessageContentLen, "..."); !utf8.ValidString(got) {
+			b.Fatalf("invalid UTF-8: %q", got)
+		}
+	}
 }

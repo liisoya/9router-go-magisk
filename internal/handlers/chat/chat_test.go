@@ -17,7 +17,7 @@ import (
 	"os"
 )
 
-func setupChatTestDB(t *testing.T) (*sql.DB, func()) {
+func setupChatTestDB(t testing.TB) (*sql.DB, func()) {
 	t.Helper()
 	tmpFile, err := os.CreateTemp("", "test_chat_*.sqlite")
 	if err != nil {

@@ -4,7 +4,7 @@ This document describes the current Go implementation. Source code is authoritat
 
 ## Version and compatibility status
 
-- Current Go release: **v1.9.7**, declared consistently by `VERSION`, `version.json`, and `internal/updater.CurrentVersion`.
+- Current Go release: **v1.9.9**, declared consistently by `VERSION`, `version.json`, and `internal/updater.CurrentVersion`.
 - Declared upstream baseline: [`decolua/9router` v0.5.85](https://github.com/decolua/9router). The local checked-out upstream has `package.json` version `0.5.85` and a v0.5.85 changelog; published upstream npm/Docker `latest` is v0.5.86.
 - Go v1.9.0 records selected upstream v0.5.86 parity work and explicitly deferred items in `CHANGELOG.md`. Those entries do not change the v0.5.85 manifest baseline or imply complete v0.5.86 parity.
 - Upstream remains the compatibility reference. Its Next.js app and shared SSE core are historical sources for API, database, auth, and routing behavior. They are **not** the current Go runtime or dashboard.
@@ -252,6 +252,14 @@ On startup, the server starts:
 - a six-hour background update checker when auto-update is enabled;
 - model catalog synchronization to `model-catalog.json` beside the database; and
 - a live console-log ring used by `/translator/console-logs/stream`.
+
+The console-log ring stores `log.ConsoleEntry` — `{time, level, line}` — rather
+than bare strings, and `/api/translator/console-logs` plus its SSE stream emit
+that shape as-is. `level` is the severity the logger reported at emit time, so
+the dashboard never has to infer one from the rendered message, and `time` is
+the arrival clock because the text log format prints no timestamp of its own.
+The wire shape diverges deliberately from upstream Next, which shipped bare
+strings and no level at all; the Svelte dashboard is the only consumer.
 
 The in-memory usage tracker publishes active requests over SSE and seeds recent history from `usageHistory` once per process. SQLite usage history remains the durable source. Daily usage aggregation is process-local merge plus full-row upsert; concurrent independent writers can still overwrite one another's daily aggregate.
 

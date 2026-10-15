@@ -23,7 +23,63 @@ type ProviderConfig struct {
 	SystemoneURL  string            // override /systemone endpoint (System One structured evaluation)
 	FetchURL      string            // override /web/fetch endpoint (Jina, Firecrawl, etc.)
 	FetchMethod   string            // HTTP method for fetch: GET or POST (default POST)
-	UsageURL       string            // override /usage endpoint (quota tracker)
+	UsageURL      string            // override /usage endpoint (quota tracker)
+
+	// UpstreamIsAnthropic marks an entry whose upstream speaks Anthropic Messages while
+	// the client may speak OpenAI, on a host that is not api.anthropic.com. The existing
+	// detection keys off that host, so a gateway like Bedrock needs its own flag for the
+	// response to be translated rather than passed through.
+	UpstreamIsAnthropic bool
+
+	// LocalByDesign marks a provider whose upstream endpoint is intended to run on the
+	// local host or loopback network (e.g. ollama-local on localhost:11434).
+	LocalByDesign bool
+}
+
+// Bedrock protocol constants. Region is substituted per request by the executor, so the
+// BaseURL below documents the shape rather than being dialed directly.
+const (
+	BedrockService          = "bedrock"
+	BedrockAnthropicVersion = "bedrock-2023-05-31"
+	BedrockStreamPath       = "invoke-with-response-stream"
+	BedrockInvokePath       = "invoke"
+	// BedrockChunkEvent is the only event type InvokeModelWithResponseStream defines
+	// today; each chunk payload is {"bytes": "<base64 of one Anthropic event>"}.
+	BedrockChunkEvent = "chunk"
+	// BedrockTerminalEvent is how Anthropic closes a well-formed Bedrock stream.
+	// Tracking it is what lets us tell a finished answer from an upstream that hung up
+	// cleanly halfway through one.
+	BedrockTerminalEvent = "message_stop"
+
+	// BedrockProbePath is ListFoundationModels on the control-plane host, used by the
+	// dashboard's validate and Test paths.
+	BedrockProbePath         = "foundation-models"
+	BedrockErrorTypeHeader   = "x-amzn-errortype"
+	BedrockAccessDeniedError = "AccessDeniedException"
+)
+
+// BedrockModelFamily reports whether a Bedrock model id belongs to the family this
+// provider entry serves, and what to tell the user when it does not.
+//
+// Bedrock model families use different request and response shapes, so each gets its own
+// provider entry. Rejecting the wrong family here beats letting it sail through and fail
+// mid-stream, after the call has already been billed.
+func BedrockModelFamily(providerID, model string) (ok bool, hint string) {
+	// Inference-profile ids look like "us.anthropic.claude-…" or "global.xai.grok-…";
+	// the family is whatever follows the region prefix, or is the whole id when bare.
+	family := model
+	if idx := strings.IndexAny(model, "./"); idx >= 0 {
+		family = model[idx+1:]
+	}
+	switch providerID {
+	case "bedrock":
+		return strings.HasPrefix(family, "anthropic."),
+			`an Anthropic model, e.g. "us.anthropic.claude-sonnet-5"`
+	case "bedrock-xai":
+		return strings.HasPrefix(family, "xai."), `an xAI model, e.g. "us.xai.grok-4.6"`
+	default:
+		return true, ""
+	}
 }
 
 // IsGeminiNative returns true if provider uses Gemini-native format.
@@ -33,6 +89,42 @@ func (p *ProviderConfig) IsGeminiNative() bool { return p.Format == "gemini-nati
 // OpenAI-compatible endpoint whose tool schema validation is as strict as the
 // native one (e.g. the "gemini" provider at /v1beta/openai/chat/completions).
 func (p *ProviderConfig) IsGeminiOpenAICompat() bool { return p.Format == "gemini-openai" }
+
+// WithStaticHeader returns cfg with one static header set, copying the config
+// and the header map so a shared catalog entry is never mutated. A header the
+// config already carries is replaced in the copy.
+func WithStaticHeader(cfg *ProviderConfig, name, value string) *ProviderConfig {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	cloned.StaticHeaders = make(map[string]string, len(cfg.StaticHeaders)+1)
+	for k, v := range cfg.StaticHeaders {
+		cloned.StaticHeaders[k] = v
+	}
+	cloned.StaticHeaders[name] = value
+	return &cloned
+}
+
+// WithoutStaticHeader returns cfg with one static header removed, copying both
+// the config and the map. It answers cfg unchanged when the header is absent,
+// so the common path allocates nothing.
+func WithoutStaticHeader(cfg *ProviderConfig, name string) *ProviderConfig {
+	if cfg == nil {
+		return nil
+	}
+	if _, present := cfg.StaticHeaders[name]; !present {
+		return cfg
+	}
+	cloned := *cfg
+	cloned.StaticHeaders = make(map[string]string, len(cfg.StaticHeaders)-1)
+	for k, v := range cfg.StaticHeaders {
+		if k != name {
+			cloned.StaticHeaders[k] = v
+		}
+	}
+	return &cloned
+}
 
 // modelsListURL is the OpenAI-compatible /v1/models endpoint of providers whose
 // catalogue is fetched live for the dashboard's "Suggested free models" import.
@@ -44,6 +136,29 @@ var modelsListURL = map[string]string{
 	"atria":       "https://api.atria-asi.ai/v1/models",
 	"agnes":       "https://apihub.agnes-ai.com/v1/models",
 	"bai":         "https://api.b.ai/v1/models",
+	// Meta's Model API refuses /v1/models without the protocol version header,
+	// so the live-catalog fetch carries it on top of the bearer token
+	// (upstream PROVIDER_MODELS_CONFIG.muse).
+	"muse": "https://api.meta.ai/v1/models",
+	// SumoPod exposes the standard OpenAI /v1/models catalogue (auth required,
+	// same contract as tokenharbor/dahl).
+	"sumopod": "https://ai.sumopod.com/v1/models",
+}
+
+// modelsListHeaders carries the extra headers one live-catalogue endpoint
+// needs beyond the connection's bearer token. Upstream keys the same values
+// off PROVIDER_MODELS_CONFIG per provider (src/app/api/providers/[id]/models/
+// route.js), which sets headers per entry — the flat Go map only has room for
+// the ones that actually differ.
+var modelsListHeaders = map[string]map[string]string{
+	"muse": {"x-api-version": "1.0.0", "Content-Type": "application/json"},
+}
+
+// ModelsListHeaders returns the extra headers the live catalogue endpoint of a
+// provider requires, or nil when it needs none. The map is shared by every
+// request, so a caller must not mutate it.
+func ModelsListHeaders(provider string) map[string]string {
+	return modelsListHeaders[strings.ToLower(provider)]
 }
 
 // ModelsListURL returns the live catalogue endpoint for a provider, or "" when
@@ -115,6 +230,29 @@ func WithHeader(headers map[string]string, key, value string) map[string]string 
 	return res
 }
 
+// MergeHeaderOverrides returns a copy of headers with the operator's
+// per-provider overrides applied on top. It is the Go shape of upstream's
+// `Object.assign(headers, providerOverrides.headers)`
+// (decolua/9router v0.5.95, open-sse/executors/base.js:132) — an override
+// wins over what the registry set, which is the whole point: the operator is
+// correcting a header the gateway sends, not adding a second opinion.
+//
+// The registry's header map is shared by every request, so this copies rather
+// than mutating, for the same reason WithHeader copies.
+func MergeHeaderOverrides(headers, overrides map[string]string) map[string]string {
+	if len(overrides) == 0 {
+		return headers
+	}
+	res := make(map[string]string, len(headers)+len(overrides))
+	for k, v := range headers {
+		res[k] = v
+	}
+	for k, v := range overrides {
+		res[k] = v
+	}
+	return res
+}
+
 // KnownProviders maps provider IDs to their upstream configuration.
 var KnownProviders = map[string]ProviderConfig{
 	"openai": {
@@ -126,6 +264,30 @@ var KnownProviders = map[string]ProviderConfig{
 		BaseURL:    "https://apihub.agnes-ai.com/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+	},
+	// Muse — Meta's Model API. Dual auth upstream (Muse Code subscription
+	// device-code key and a dev.meta.ai pay-as-you-go key); both ride the same
+	// bearer transport, and only an account-issued (OAuth) key needs the
+	// protocol version header. Every Muse Spark model declares
+	// targetFormat "openai-responses" (see museModelFormats), so /v1/responses
+	// is the transport the executor dials for this provider.
+	"muse": {
+		BaseURL:    "https://api.meta.ai/v1/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+		Format:     "openai-responses",
+		StaticHeaders: map[string]string{
+			"x-api-version": "1.0.0",
+		},
+	},
+	// v1m System One — a calibrated decision engine, not a chat model. Its
+	// two registry models carry kind "systemone", so the only endpoint it
+	// answers is /v1/systemone. BaseURL is empty because the port has no
+	// chat lane for this provider; an empty base never resolves a connection.
+	"v1m": {
+		AuthHeader:   "Authorization",
+		AuthScheme:   "bearer",
+		SystemoneURL: "https://v1m.ir/v1/systemone",
 	},
 	"anthropic": {
 		BaseURL:    "https://api.anthropic.com/v1/messages",
@@ -149,6 +311,14 @@ var KnownProviders = map[string]ProviderConfig{
 	},
 	"deepseek": {
 		BaseURL:    "https://api.deepseek.com/chat/completions",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
+	// SumoPod — Indonesian AI gateway (ai.sumopod.com), OpenAI-compatible
+	// chat completions with 60+ models across Claude, Gemini, GPT, DeepSeek,
+	// Qwen, GLM, Kimi, MiniMax, Seed, Grok, Hy and Mimo.
+	"sumopod": {
+		BaseURL:    "https://ai.sumopod.com/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
@@ -190,13 +360,13 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 	},
 	"opencode": {
-		BaseURL:       "https://opencode.ai/zen/v1/chat/completions",
+		BaseURL:       "https://opencode.ai/inference/v1/chat/completions",
 		AuthHeader:    "Authorization",
 		AuthScheme:    "bearer",
 		DefaultAPIKey: "public",
 		NoAuth:        true,
 		SystemoneURL:  "https://opencode.ai/zen/v1/systemone",
-		StaticHeaders: map[string]string{"x-opencode-client": "desktop", "User-Agent": "opencode/1.18.31"},
+		StaticHeaders: map[string]string{"x-opencode-client": "desktop", "User-Agent": "opencode/latest/2.0.29/cli"},
 	},
 	// Pay-as-you-go lane (upstream open-sse/providers/registry/opencode-zen.js):
 	// a key is required, and the same key answers /chat/completions, /messages
@@ -264,8 +434,18 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	// Ollama Cloud, not a self-hosted daemon. This entry used to carry
+	// http://localhost:11434, which sent every ollama.com API-key connection to
+	// a loopback port that only exists on a machine running `ollama serve`
+	// (#192). Upstream keeps the two apart as well: registry ollama.js dials
+	// ollama.com and only ollama-local.js points at 11434.
+	//
+	// ollama.com serves the OpenAI-compatible lane at /v1, verified live: an
+	// unknown path 404s, /v1/models answers 200, and a bad key draws a 401 with
+	// an OpenAI-shaped error body. That is the lane ForwardOpenAI already speaks,
+	// so the fix needs no native-translator port.
 	"ollama": {
-		BaseURL:     "http://localhost:11434/v1/chat/completions",
+		BaseURL:     "https://ollama.com/v1/chat/completions",
 		AuthHeader:  "Authorization",
 		AuthScheme:  "bearer",
 		FetchURL:    "https://ollama.com/api/web_fetch",
@@ -492,14 +672,50 @@ var KnownProviders = map[string]ProviderConfig{
 		},
 	},
 	"ollama-local": {
-		BaseURL:    "http://localhost:11434/v1/chat/completions",
-		AuthHeader: "Authorization",
-		AuthScheme: "bearer",
+		BaseURL:       "http://localhost:11434/v1/chat/completions",
+		AuthHeader:    "Authorization",
+		AuthScheme:    "bearer",
+		LocalByDesign: true,
 	},
 	"minimax-cn": {
 		BaseURL:    "https://api.minimaxi.com/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
+	},
+	// MiniMax Code (mcode) — the coding-subscription credits lane, served as a
+	// provider. Anthropic Messages on MiniMax's agent gateway, signed in with
+	// MiniMax Code's own OAuth device flow (PKCE S256, client mcode-public) but
+	// with tokens of our own: ~/.minimax is never touched, so a sign-in here
+	// neither signs the CLI out nor collides with another account.
+	//
+	// Global is the same protocol on different hosts, and sign-ins are per
+	// site — an account on agent.minimax.cn says nothing about
+	// agent.minimax.io. The two are never aliased onto each other
+	// (AGENTS.md §3.A). Port of upstream decolua/9router registry
+	// minimax-code.js / minimax-code-global.js.
+	"minimax-code": {
+		BaseURL:    "https://agent.minimax.cn/mavis/api/v1/llm/v1/messages",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+		Format:     "claude",
+		StaticHeaders: map[string]string{
+			"User-Agent":       "MiniMaxAgent",
+			"X-Mavis-Agent-Id": "main",
+			// MiniMax requires the anthropic-version header on its Messages
+			// endpoint; the bearer carries the real credential.
+			"anthropic-version": "2023-06-01",
+		},
+	},
+	"minimax-code-global": {
+		BaseURL:    "https://agent.minimax.io/mavis/api/v1/llm/v1/messages",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+		Format:     "claude",
+		StaticHeaders: map[string]string{
+			"User-Agent":        "MiniMaxAgent",
+			"X-Mavis-Agent-Id":  "main",
+			"anthropic-version": "2023-06-01",
+		},
 	},
 	"kimi-coding": {
 		BaseURL:    "https://api.kimi.com/coding/v1/chat/completions",
@@ -526,7 +742,10 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 		StaticHeaders: map[string]string{
 			"originator": "codex_cli_rs",
-			"User-Agent": "codex_cli_rs/0.154.0",
+			"User-Agent": CodexCLIUserAgent,
+			// Upstream sends `version` next to the User-Agent; the codex
+			// backend gates newer models on the pair.
+			"version": CodexCLIVersionHeader,
 		},
 	},
 	"grok-cli": {
@@ -539,12 +758,32 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	"bedrock": {
+		// The executor substitutes the region per request and signs each request with
+		// SigV4, so AuthHeader/AuthScheme are absent by design: there is no static
+		// bearer token to configure.
+		BaseURL: "https://bedrock-runtime.{region}.amazonaws.com",
+		// Anthropic models on Bedrock take the Anthropic Messages body verbatim, so the
+		// existing claude translators are reused rather than a Bedrock-specific pair.
+		Format:              "claude",
+		UpstreamIsAnthropic: true,
+	},
+	"bedrock-xai": {
+		// Same credential story, but no Format: Grok on Bedrock speaks OpenAI Chat
+		// Completions, so the standard openai wire applies and the response needs no
+		// translation.
+		BaseURL: "https://bedrock-runtime.{region}.amazonaws.com",
+	},
 	"elevenlabs": {
 		BaseURL:    "https://api.elevenlabs.io",
 		AuthHeader: "xi-api-key",
 		AuthScheme: "raw",
 		TTSURL:     "https://api.elevenlabs.io/v1/text-to-speech",
-		VoicesURL:  "https://api.elevenlabs.io/v1/voices",
+		// Scribe STT is a multipart endpoint with its own auth header and its own
+		// render formats, so it cannot ride the OpenAI-compatible transcriptions
+		// lane the rest of the media handlers use.
+		STTURL:    "https://api.elevenlabs.io/v1/speech-to-text",
+		VoicesURL: "https://api.elevenlabs.io/v1/voices",
 	},
 	"deepgram": {
 		BaseURL:    "https://api.deepgram.com",
@@ -663,6 +902,16 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 		TTSURL:     "https://api.play.ht/api/v2/tts/stream",
+	},
+	// TinyFish — one x-api-key credential behind two separate hosts (search
+	// and fetch), which is why BaseURL is a non-endpoint root here: appending
+	// /v1/search to it would hit a host that does not serve search.
+	"tinyfish": {
+		BaseURL:     "https://api.tinyfish.ai",
+		AuthHeader:  "x-api-key",
+		AuthScheme:  "raw",
+		FetchURL:    "https://api.fetch.tinyfish.ai",
+		FetchMethod: "POST",
 	},
 	"runwayml": {
 		BaseURL:    "https://api.dev.runwayml.com/v1",
@@ -901,9 +1150,19 @@ var KnownProviders = map[string]ProviderConfig{
 // RetryableStatusCodes are HTTP status codes that trigger account fallback.
 var RetryableStatusCodes = map[int]bool{
 	http.StatusUnauthorized:       true, // 401
+	http.StatusPaymentRequired:    true, // 402 (insufficient funds on paid models)
 	http.StatusForbidden:          true, // 403 (Gemini/antigravity daily-quota errors can come as 403)
 	http.StatusTooManyRequests:    true, // 429
 	http.StatusBadGateway:         true, // 502
 	http.StatusServiceUnavailable: true, // 503
 	http.StatusGatewayTimeout:     true, // 504
+}
+
+// IsLocalByDesign reports whether a provider's official upstream is intended
+// to run locally on loopback (e.g. ollama-local on localhost:11434).
+func IsLocalByDesign(provider string) bool {
+	if cfg, ok := KnownProviders[provider]; ok {
+		return cfg.LocalByDesign
+	}
+	return false
 }

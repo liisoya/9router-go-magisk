@@ -3,14 +3,14 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
-	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/translator"
 )
 
@@ -32,15 +32,19 @@ const (
 	zenResponsesPath = "/responses"
 )
 
-// zenBaseURL resolves the /zen/v1 prefix of the request's base URL: the registry
+// zenBaseURL resolves the API prefix of the request's base URL: the registry
 // default, a connection override, or a relay host with the path carried in
-// x-relay-path.
-func zenBaseURL(cfg *providers.ProviderConfig) string {
+// x-relay-path. Free-tier models answer behind the keyless v2 inference gate
+// (keyed /zen/v1 requests for them 403), so the prefix follows the model.
+func zenBaseURL(cfg *providers.ProviderConfig, cleanModel string) string {
 	if cfg == nil {
 		return ""
 	}
 	if _, isRelay := cfg.StaticHeaders["x-relay-target"]; isRelay {
 		return strings.TrimRight(cfg.BaseURL, "/")
+	}
+	if isOpencodeFreeModel(cleanModel) {
+		return opencodeInferenceBase(cfg.BaseURL)
 	}
 	base := strings.TrimRight(cfg.BaseURL, "/")
 	base = strings.TrimSuffix(base, "/chat/completions")
@@ -156,7 +160,7 @@ func stripOpenCodePrefix(model string, prefixes ...string) string {
 	for _, p := range prefixes {
 		clean = strings.TrimPrefix(clean, p+"/")
 	}
-	for _, p := range []string{"opencode-go/", "opencode/", "oc/", "antigravity/", "ag/"} {
+	for _, p := range []string{"opencode-go/", "opencode/", "oc/"} {
 		clean = strings.TrimPrefix(clean, p)
 	}
 	if parenIdx := strings.IndexByte(clean, '('); parenIdx != -1 {
@@ -172,16 +176,25 @@ func stripOpenCodePrefix(model string, prefixes ...string) string {
 // A relay header set (x-relay-target / x-relay-path) is carried over verbatim:
 // BuildEdgeRelayHeaders stamps those when an edge pool fronts a provider, and
 // the relay answers 400 "Missing x-relay-target header" without them.
-func zenHeaders(cfg *providers.ProviderConfig, session string, stream bool) map[string]string {
+func zenHeaders(cfg *providers.ProviderConfig, session string, stream bool, free bool) map[string]string {
 	headers := proxy.BuildOpenCodeHeaders(nil, session, stream)
-	// Upstream sends the desktop client id; BuildOpenCodeHeaders defaults to cli.
-	headers["x-opencode-client"] = "desktop"
+	if !free {
+		// The keyed lane keeps the v1 identity: upstream leaves opencode-zen
+		// on opencode/1.18.31 + desktop while only the keyless free executor
+		// moves to v2. Free-tier models keep the v2 cli identity above, which
+		// is what the inference gate expects alongside Bearer public.
+		headers["x-opencode-client"] = "desktop"
+		headers["User-Agent"] = proxy.DefaultOpenCodeV1UA
+	}
 	for k, v := range cfg.StaticHeaders {
 		switch strings.ToLower(k) {
 		case "x-relay-target", "x-relay-path", "x-opencode-project":
 			headers[k] = v
 		case "x-opencode-client":
-			if v != "" {
+			// Paid lane only: a connection may override the desktop default.
+			// Free-tier models always travel as the cli identity the gate
+			// expects, never as the connection's desktop default.
+			if !free && v != "" {
 				headers[k] = v
 			}
 		}
@@ -194,13 +207,19 @@ func zenHeaders(cfg *providers.ProviderConfig, session string, stream bool) map[
 // (BuildEdgeRelayHeaders), so the path it carries is whatever lane that base
 // URL named — /chat/completions for a default connection. Rewriting it keeps
 // the relay pointed at the endpoint the model actually lives on.
-func zenRelayPath(cfg *providers.ProviderConfig, lanePath string) string {
+func zenRelayPath(cfg *providers.ProviderConfig, cleanModel, lanePath string) string {
+	prefix := "/zen/v1"
+	if isOpencodeFreeModel(cleanModel) {
+		// Free-tier models live behind the v2 inference gate, so their lane
+		// carries the /inference/v1 prefix instead of /zen/v1.
+		prefix = "/inference/v1"
+	}
 	if cfg != nil {
 		if target := cfg.StaticHeaders["x-relay-target"]; target != "" {
 			// An absolute origin is only a host; the lane decides the path. A
 			// relative one already carries the origin's path.
 			if strings.Contains(target, "://") {
-				return "/zen/v1" + lanePath
+				return prefix + lanePath
 			}
 			if i := strings.IndexByte(target, '/'); i >= 0 {
 				return target[i:]
@@ -208,7 +227,7 @@ func zenRelayPath(cfg *providers.ProviderConfig, lanePath string) string {
 			return "/"
 		}
 	}
-	return "/zen/v1" + lanePath
+	return prefix + lanePath
 }
 
 func zenAuthHeaders(apiKey string) map[string]string {
@@ -229,16 +248,33 @@ func forwardZenChat(w http.ResponseWriter, req *Request, cleanModel, sourceForma
 		body = converted
 	}
 	body = InjectReasoningContent(body, "opencode-zen")
-	body, toolNameMap := translator.ConcealFingerprintTools(body)
-	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
-	w = NewToolNameRestoringWriter(w, toolNameMap)
+	// Keyed /zen/v1 requests for free-tier ids 403 ("free tier can only be
+	// used from within OpenCode"), so those travel exactly like free-executor
+	// requests: v2 fingerprint, inference endpoint, public credentials.
+	free := isOpencodeFreeModel(cleanModel)
+	var zenToolNameMap map[string]string
+	if free {
+		body, zenToolNameMap = translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+	} else {
+		body, zenToolNameMap = translator.ConcealFingerprintTools(body)
+	}
+	req.Ctx = translator.WithToolNameMap(req.Ctx, zenToolNameMap)
+	w = NewToolNameRestoringWriter(w, zenToolNameMap)
 
 	// Upstream rejects stream:false on the free-tier gate even for a keyed lane.
 	body = withJSONFields(body, map[string]any{"stream": true, "model": cleanModel})
 
 	cfg := *req.Config
-	cfg.BaseURL = zenBaseURL(&cfg) + "/chat/completions"
-	cfg.StaticHeaders = zenHeaders(&cfg, req.SessionID, true)
+	if isRelayConfig(&cfg) {
+		// The relay stamps the destination in its headers, so the lane
+		// decision belongs in x-relay-path, not in the URL we dial.
+		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
+		cfg.StaticHeaders["x-relay-path"] = zenRelayPath(req.Config, cleanModel, "/chat/completions")
+		cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
+	} else {
+		cfg.BaseURL = zenBaseURL(&cfg, cleanModel) + "/chat/completions"
+	}
+	cfg.StaticHeaders = zenHeaders(&cfg, req.SessionID, true, free)
 
 	resp, err := proxy.ForwardOpenAI(reqCtx(req), req.Client, &cfg, req.APIKey, body, true)
 	if err != nil {
@@ -280,9 +316,15 @@ func forwardZenResponses(w http.ResponseWriter, req *Request, cleanModel, source
 	if err != nil {
 		return fmt.Errorf("normalize opencode-zen responses body: %w", err)
 	}
-	// The free-tier gate fingerprints the lowercase tool quartet; capitalised
-	// variants from Claude Code CLI are renamed here and restored on the way out.
-	body, toolNameMap := translator.ConcealFingerprintTools(body)
+	// Same free-tier rule as the chat lane above: v2 fingerprint and public
+	// credentials behind the inference gate, quartet cloaking otherwise.
+	free := isOpencodeFreeModel(cleanModel)
+	var toolNameMap map[string]string
+	if free {
+		body, toolNameMap = translator.ConcealOpenCodeV2FingerprintTools(body, true, isOpenCodeAutoToolChoiceModel(cleanModel))
+	} else {
+		body, toolNameMap = translator.ConcealFingerprintTools(body)
+	}
 	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
 	w = NewToolNameRestoringWriter(w, toolNameMap)
 	if sourceFormat == providers.FormatOpenAIResponses {
@@ -294,13 +336,13 @@ func forwardZenResponses(w http.ResponseWriter, req *Request, cleanModel, source
 		// The relay stamps the destination in its headers, so the lane
 		// decision belongs in x-relay-path, not in the URL we dial.
 		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
-		cfg.StaticHeaders["x-relay-path"] = zenRelayPath(req.Config, zenResponsesPath)
+		cfg.StaticHeaders["x-relay-path"] = zenRelayPath(req.Config, cleanModel, zenResponsesPath)
 		cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/") + zenResponsesPath
 	} else {
-		cfg.BaseURL = zenBaseURL(&cfg) + zenResponsesPath
+		cfg.BaseURL = zenBaseURL(&cfg, cleanModel) + zenResponsesPath
 	}
 	// zenHeaders reads from the copy so the relay headers just set survive.
-	cfg.StaticHeaders = zenHeaders(&cfg, req.SessionID, req.IsStream)
+	cfg.StaticHeaders = zenHeaders(&cfg, req.SessionID, req.IsStream, free)
 
 	ctx := reqCtx(req)
 	resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, body, req.IsStream)
@@ -333,17 +375,24 @@ func forwardZenMessages(w http.ResponseWriter, req *Request, cleanModel string, 
 		if err != nil {
 			return fmt.Errorf("ForwardOpencodeZen messages lane conversion: %w", err)
 		}
-		body = EnsureClaudeMessages(converted, cleanModel)
+		body = EnsureClaudeMessagesFor(converted, "opencode-zen", cleanModel)
 	default:
-		body = EnsureClaudeMessages(body, cleanModel)
+		body = EnsureClaudeMessagesFor(body, "opencode-zen", cleanModel)
 	}
 	body, toolNameMap := translator.ConcealFingerprintTools(body)
 	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
 	w = NewToolNameRestoringWriter(w, toolNameMap)
 
+	free := isOpencodeFreeModel(cleanModel)
 	headers := zenAuthHeaders(req.APIKey)
+	if free {
+		// No free-tier id routes to this lane today, but if one ever does,
+		// the inference gate expects public credentials, not a user key.
+		delete(headers, "x-api-key")
+		headers["Authorization"] = "Bearer public"
+	}
 	headers["anthropic-version"] = "2023-06-01"
-	for k, v := range zenHeaders(req.Config, req.SessionID, req.IsStream) {
+	for k, v := range zenHeaders(req.Config, req.SessionID, req.IsStream, free) {
 		switch strings.ToLower(k) {
 		case "authorization", "x-api-key", "content-type", "accept":
 			continue
@@ -354,9 +403,9 @@ func forwardZenMessages(w http.ResponseWriter, req *Request, cleanModel string, 
 
 	// An edge relay carries the destination in headers, so the lane belongs in
 	// x-relay-path rather than in the URL the gateway dials.
-	messagesURL := zenBaseURL(req.Config) + zenMessagesPath
+	messagesURL := zenBaseURL(req.Config, cleanModel) + zenMessagesPath
 	if isRelayConfig(req.Config) {
-		headers["x-relay-path"] = zenRelayPath(req.Config, zenMessagesPath)
+		headers["x-relay-path"] = zenRelayPath(req.Config, cleanModel, zenMessagesPath)
 		messagesURL = strings.TrimRight(req.Config.BaseURL, "/") + zenMessagesPath
 	}
 
@@ -394,14 +443,7 @@ func normalizeZenResponsesBody(body []byte, cleanModel string) ([]byte, error) {
 	delete(m, "max_tokens")
 	delete(m, "max_completion_tokens")
 
-	if effort, ok := m["reasoning_effort"].(string); ok {
-		m["reasoning"] = map[string]any{"effort": effort, "summary": "auto"}
-		delete(m, "reasoning_effort")
-	} else if rMap, ok := m["reasoning"].(map[string]any); ok {
-		if rMap["summary"] == nil {
-			rMap["summary"] = "auto"
-		}
-	}
+	applyZenResponsesReasoning(m)
 
 	if inList, ok := m["input"].([]any); ok {
 		clean := make([]any, 0, len(inList))
@@ -432,7 +474,46 @@ func normalizeZenResponsesBody(body []byte, cleanModel string) ([]byte, error) {
 
 	m["stream"] = true
 	m["store"] = false
-	return json.Marshal(m)
+	// Deterministic marshaling keeps the serialized request prefix stable
+	// across the turns of a session, which prefix-caching upstreams
+	// (deepseek) require.
+	return marshalStable(m)
+}
+
+// applyZenResponsesReasoning folds a Chat-shaped reasoning_effort into the
+// Responses wire format, which nests effort under reasoning:{effort,summary}
+// and rejects a top-level reasoning_effort outright (strict upstreams answer
+// "unknown parameter `reasoning_effort`"). An explicit "none" has no nested
+// equivalent and is expressed upstream by removing reasoning entirely — sending
+// effort "none" instead asks a model to think at the lowest level rather than
+// to not think, which is a different (and billable) request. Parity with the
+// openai-responses branch of applyFormat in
+// open-sse/translator/concerns/thinkingUnified.js.
+func applyZenResponsesReasoning(m map[string]any) {
+	effort, ok := m["reasoning_effort"].(string)
+	if !ok {
+		if existing, isMap := m["reasoning"].(map[string]any); isMap && existing["summary"] == nil {
+			existing["summary"] = "auto"
+		}
+		return
+	}
+	delete(m, "reasoning_effort")
+	if strings.EqualFold(strings.TrimSpace(effort), "none") {
+		delete(m, "reasoning")
+		return
+	}
+	if effort == "" {
+		return
+	}
+	reasoning, isMap := m["reasoning"].(map[string]any)
+	if !isMap {
+		reasoning = map[string]any{}
+	}
+	reasoning["effort"] = effort
+	if reasoning["summary"] == nil {
+		reasoning["summary"] = "auto"
+	}
+	m["reasoning"] = reasoning
 }
 
 // withJSONFields merges top-level fields into a JSON object body, leaving it
@@ -448,7 +529,7 @@ func withJSONFields(body []byte, fields map[string]any) []byte {
 		}
 		m[k] = v
 	}
-	out, err := json.Marshal(m)
+	out, err := marshalStable(m)
 	if err != nil {
 		return body
 	}

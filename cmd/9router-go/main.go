@@ -40,6 +40,11 @@ func main() {
 				Usage: "enable Ponytail lazy dev code style (env: PONYTAIL_ENABLED)",
 			},
 			&cli.BoolFlag{
+				Name:  "adhd",
+				Value: os.Getenv("ADHD_ENABLED") == "true",
+				Usage: "enable I have ADHD action-first output style (env: ADHD_ENABLED)",
+			},
+			&cli.BoolFlag{
 				Name:  "auto-update",
 				Value: os.Getenv("AUTO_UPDATE") == "true",
 				Usage: "automatically download and install updates if available (env: AUTO_UPDATE)",
@@ -145,6 +150,45 @@ func main() {
 				},
 				Action: logsDetached,
 			},
+			{
+				Name:  "service",
+				Usage: "Manage the gateway service: boot autostart plus start/stop/restart",
+				Subcommands: []*cli.Command{
+					{
+						Name:  "install",
+						Usage: "Install autostart (systemd user unit, launchd agent, OpenRC/runit service, cron @reboot, or scheduled task)",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "backend", Usage: "force a backend: systemd, launchd, openrc, runit, cron"},
+						},
+						Action: serviceInstall,
+					},
+					{
+						Name:   "uninstall",
+						Usage:  "Remove the autostart entry",
+						Action: serviceUninstall,
+					},
+					{
+						Name:   "start",
+						Usage:  "Start the supervised service now (falls back to background daemon)",
+						Action: serviceStart,
+					},
+					{
+						Name:   "stop",
+						Usage:  "Stop the supervised service now, stays enabled for boot",
+						Action: serviceStop,
+					},
+					{
+						Name:   "restart",
+						Usage:  "Restart the supervised service now",
+						Action: serviceRestart,
+					},
+					{
+						Name:   "status",
+						Usage:  "Show the autostart entry in effect",
+						Action: serviceStatus,
+					},
+				},
+			},
 		},
 		Action: foregroundOrBackground,
 	}
@@ -156,11 +200,26 @@ func main() {
 // foregroundOrBackground is the flag-free entry point: with --background (or
 // -d, or the `start` sub-command) it detaches and returns, otherwise it runs
 // the server in this terminal exactly as before.
+//
+// Any positional argument reaching here matched no command, so it is a typo
+// or a stale name — never boot the server on it. Booting on unknown input is
+// what trapped users behind `bind: address already in use`: typing a
+// renamed command while the supervised unit already held the port started a
+// second gateway instead of running the intended subcommand.
 func foregroundOrBackground(cCtx *cli.Context) error {
+	if args := cCtx.Args(); args.Len() > 0 {
+		return unknownCommandError(args.Slice())
+	}
 	if cCtx.Bool(daemon.BackgroundName) {
 		return startDetached(cCtx)
 	}
 	return runServer(cCtx)
+}
+
+// unknownCommandError turns a missed command dispatch into guidance instead
+// of a boot.
+func unknownCommandError(args []string) error {
+	return fmt.Errorf("unknown command %q — see '9router-go help'", args[0])
 }
 
 func runServer(cCtx *cli.Context) error {

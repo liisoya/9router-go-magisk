@@ -49,18 +49,26 @@ func TestHandlePKCEExchange_variants(t *testing.T) {
 		w.Write([]byte(`{"access_token":"ca","refresh_token":"cr","expires_in":3600,"scope":"s"}`))
 	}))
 	defer claudeMock.Close()
-	// Codex: form exchange body.
+	// Codex: form exchange body. The mock returns an id_token carrying the
+	// account claims the real endpoint provides; without them the login now
+	// fails fast (see validateCodexConnectionData).
+	idToken := makeIDToken(t, map[string]any{
+		"email": "dev@example.com",
+		codexAuthClaimKey: map[string]any{
+			"chatgpt_account_id": "acct-1",
+		},
+	})
 	codexMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
 			t.Errorf("codex: want form, got %s", ct)
 		}
-		w.Write([]byte(`{"access_token":"xa","refresh_token":"xr","expires_in":3600}`))
+		w.Write([]byte(`{"access_token":"xa","refresh_token":"xr","expires_in":3600,"id_token":"` + idToken + `"}`))
 	}))
 	defer codexMock.Close()
 
 	oldClaude, oldCodex := pkceProviders["claude"], pkceProviders["codex"]
 	pkceProviders["claude"] = &pkceConfig{providers: []string{"claude"}, clientID: "cid", tokenURL: claudeMock.URL, scope: "s", exchangeJSON: true, includeState: true, connPrefix: "claude-", display: "Claude"}
-	pkceProviders["codex"] = &pkceConfig{providers: []string{"codex"}, clientID: "cid", tokenURL: codexMock.URL, scope: "s", connPrefix: "cx-", display: "Codex"}
+	pkceProviders["codex"] = &pkceConfig{providers: []string{"codex"}, clientID: "cid", tokenURL: codexMock.URL, scope: "s", connPrefix: "cx-", display: "Codex", emailFromIDTok: true}
 	defer func() { pkceProviders["claude"], pkceProviders["codex"] = oldClaude, oldCodex }()
 
 	handler := NewOAuthHandler(nil)

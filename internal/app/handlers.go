@@ -25,7 +25,11 @@ var HandlersModule = fx.Module("handlers",
 // ProvideTokenSaverConfig initializes TokenSaverConfig from CLI flags and database settings.
 func ProvideTokenSaverConfig(repo *db.Repo, params CLIParams) *handlers.TokenSaverConfig {
 	ts := handlers.NewTokenSaverConfig(params.RTK, params.Caveman, params.Ponytail)
+	if params.ADHDSet {
+		ts.SetADHD(params.ADHD)
+	}
 	if settings, err := repo.GetSettings(); err == nil && settings != nil {
+		ts.UpdateFromSettings(settings)
 		rtk := settings.RTKEnabled
 		if params.RTKSet {
 			rtk = params.RTK
@@ -38,13 +42,18 @@ func ProvideTokenSaverConfig(repo *db.Repo, params CLIParams) *handlers.TokenSav
 		if params.PonytailSet {
 			ponytail = params.Ponytail
 		}
+		adhd := settings.ADHDEnabled
+		if params.ADHDSet {
+			adhd = params.ADHD
+		}
 		ts.SetAll(rtk, caveman, ponytail)
 		ts.SetCaveman(caveman, settings.CavemanLevel)
 		ts.SetPonytail(ponytail, settings.PonytailLevel)
+		ts.SetADHD(adhd, settings.ADHDLevel)
 	}
 	ts.SetInjectionGuard(!params.NoInjectionGuard)
-	log.Printf("[config] token savers — rtk=%v caveman=%v (%s) ponytail=%v (%s)",
-		ts.RTKEnabled(), ts.CavemanEnabled(), ts.CavemanLevel(), ts.PonytailEnabled(), ts.PonytailLevel())
+	log.Printf("[config] token savers — rtk=%v caveman=%v (%s) ponytail=%v (%s) adhd=%v (%s)",
+		ts.RTKEnabled(), ts.CavemanEnabled(), ts.CavemanLevel(), ts.PonytailEnabled(), ts.PonytailLevel(), ts.ADHDEnabled(), ts.ADHDLevel())
 	return ts
 }
 

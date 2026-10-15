@@ -7,14 +7,28 @@
   import Input from '../lib/ui/Input.svelte'
   import Modal from '../lib/ui/Modal.svelte'
   import Toggle from '../lib/ui/Toggle.svelte'
+  import Menu from '../lib/ui/Menu.svelte'
+  import MenuItem from '../lib/ui/MenuItem.svelte'
+  import CountedSelect from '../lib/ui/CountedSelect.svelte'
   import { api, getAuthHeaders, type ProxyPool } from '../api/client'
   import { notifications } from '../lib/notifications'
   import { parseProxyLine } from '../lib/proxy-import'
+  import {
+    filterProxyPools,
+    getLatencyBadge,
+    getStatusVariant,
+    hasMeasuredLatency,
+    isFailedStatus,
+    poolStatusCounts,
+    sortProxyPools,
+    type PoolSortOption,
+    type PoolStatusFilter
+  } from './proxypools/helpers'
 
-  function getStatusVariant(status: string | null | undefined): 'success' | 'error' | 'default' {
-    if (status === 'active') return 'success'
-    if (status === 'error') return 'error'
-    return 'default'
+  interface BulkOutcome {
+    ok: number
+    blocked: number
+    failed: number
   }
 
   function formatDateTime(value: string | null | undefined): string {
@@ -45,10 +59,14 @@
   let proxyPools = $state<ProxyPool[]>([])
   let loading = $state(true)
   let showFormModal = $state(false)
-  let showBatchImportModal = $state(false)
+  // Which half of the add dialog is showing. Adding one pool by hand and adding
+  // a pasted list were two separate modals opened by two separate buttons; they
+  // are one task, so they became one dialog with two tabs (issue #224).
+  let formTab = $state<'single' | 'bulk'>('single')
   let showVercelModal = $state(false)
   let showCloudflareModal = $state(false)
   let showDenoModal = $state(false)
+  let showNetlifyModal = $state(false)
   let showRelayMenu = $state(false)
   let editingPool = $state<ProxyPool | null>(null)
   let formData = $state<PoolForm>(normalizeFormData())
@@ -56,6 +74,7 @@
   let vercelForm = $state({ vercelToken: '', projectName: 'vercel-relay' })
   let cloudflareForm = $state({ accountId: '', apiToken: '', projectName: 'cloudflare-relay' })
   let denoForm = $state({ denoToken: '', orgDomain: '', projectName: '' })
+  let netlifyForm = $state({ netlifyToken: '', projectName: 'netlify-relay' })
   let saving = $state(false)
   let importing = $state(false)
   let deploying = $state(false)
@@ -118,8 +137,30 @@
     }
   })
 
-  let activeCount = $derived(proxyPools.filter((p) => p.isActive === true).length)
-  let allSelected = $derived(proxyPools.length > 0 && selectedIds.length === proxyPools.length)
+  let statusFilter = $state<PoolStatusFilter>('all')
+  let sortOption = $state<PoolSortOption>('default')
+
+  let counts = $derived(poolStatusCounts(proxyPools))
+  let activeCount = $derived(counts.active)
+  let failedCount = $derived(counts.failed)
+
+  let filteredPools = $derived(filterProxyPools(proxyPools, statusFilter))
+  let displayedPools = $derived(sortProxyPools(filteredPools, sortOption))
+
+  // The status filter is a dropdown rather than four pills with the count in
+  // brackets: beside the sort picker and the two bulk-cleanup buttons that row
+  // was the widest fixed thing left on the page, and it wrapped to three lines
+  // on a phone (issue #261).
+  let statusOptions = $derived([
+    { value: 'all', label: 'All', count: proxyPools.length },
+    { value: 'active', label: 'Active', count: counts.active },
+    { value: 'passed', label: 'Passed', count: counts.passed },
+    { value: 'failed', label: 'Failed', count: counts.failed }
+  ] satisfies { value: PoolStatusFilter; label: string; count: number }[])
+
+  let allSelected = $derived(
+    displayedPools.length > 0 && displayedPools.every((p) => selectedIds.includes(p.id))
+  )
 
   function toggleSelect(id: string) {
     selectedIds = selectedIds.includes(id)
@@ -128,7 +169,13 @@
   }
 
   function toggleSelectAll() {
-    selectedIds = allSelected ? [] : proxyPools.map((p) => p.id)
+    if (allSelected) {
+      const displayedIdSet = new Set(displayedPools.map((p) => p.id))
+      selectedIds = selectedIds.filter((id) => !displayedIdSet.has(id))
+    } else {
+      const set = new Set([...selectedIds, ...displayedPools.map((p) => p.id)])
+      selectedIds = Array.from(set)
+    }
   }
 
   function clearSelection() {
@@ -140,30 +187,28 @@
     formData = normalizeFormData()
   }
 
-  function openCreateModal() {
+  function openCreateModal(tab: 'single' | 'bulk' = 'single') {
     resetForm()
+    batchImportText = ''
+    formTab = tab
     showFormModal = true
   }
 
   function openEditModal(pool: ProxyPool) {
     editingPool = pool
     formData = normalizeFormData(pool)
+    formTab = 'single'
     showFormModal = true
   }
 
   function closeFormModal() {
+    // A save or a bulk import already running writes rows, so dismissing the
+    // dialog mid-flight would leave the operator with no view of what landed.
+    if (saving || importing) return
     showFormModal = false
     resetForm()
-  }
-
-  function openBatchImportModal() {
     batchImportText = ''
-    showBatchImportModal = true
-  }
-
-  function closeBatchImportModal() {
-    if (importing) return
-    showBatchImportModal = false
+    formTab = 'single'
   }
 
   function openVercelModal() {
@@ -194,6 +239,16 @@
   function closeDenoModal() {
     if (deploying) return
     showDenoModal = false
+  }
+
+  function openNetlifyModal() {
+    netlifyForm = { netlifyToken: '', projectName: 'netlify-relay' }
+    showNetlifyModal = true
+  }
+
+  function closeNetlifyModal() {
+    if (deploying) return
+    showNetlifyModal = false
   }
 
   async function handleSave() {
@@ -259,6 +314,16 @@
     testingId = poolId
     try {
       const data = await api.testProxyPool(poolId)
+      proxyPools = proxyPools.map((p) =>
+        p.id === poolId
+          ? {
+              ...p,
+              testStatus: data.status || (data.success ? 'passed' : 'failed'),
+              latency: typeof data.latency === 'number' ? data.latency : p.latency,
+              lastTestedAt: new Date().toISOString(),
+            }
+          : p
+      )
       await fetchProxyPools()
       if (data.success) {
         notifications.success('Proxy test passed')
@@ -319,27 +384,10 @@
         confirmState = null
         bulkBusy = true
         try {
-          let ok = 0
-          let blocked = 0
-          let failed = 0
-          for (const id of selectedIds) {
-            try {
-              const res = await fetch(`/api/proxy-pools/${encodeURIComponent(id)}`, {
-                method: 'DELETE',
-                headers: getAuthHeaders(),
-              })
-              if (res.ok) ok += 1
-              else if (res.status === 409) blocked += 1
-              else failed += 1
-            } catch {
-              failed += 1
-            }
-          }
+          const outcome = await deletePools(selectedIds)
           await fetchProxyPools()
           clearSelection()
-          notifications.success(
-            `Deleted ${ok}${blocked ? `, ${blocked} bound` : ''}${failed ? `, ${failed} failed` : ''}`
-          )
+          reportBulk(outcome, 'Deleted')
         } finally {
           bulkBusy = false
         }
@@ -347,9 +395,56 @@
     }
   }
 
-  async function handleHealthCheck() {
+  // The raw fetch is deliberate here: the gateway answers 409 while a pool is
+  // still bound, and the caller has to tell that apart from a real failure
+  // instead of collapsing both into one thrown Error.
+  async function deletePools(ids: string[]): Promise<BulkOutcome> {
+    const outcome: BulkOutcome = { ok: 0, blocked: 0, failed: 0 }
+    for (const id of ids) {
+      try {
+        const res = await fetch(`/api/proxy-pools/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          headers: getAuthHeaders(),
+        })
+        if (res.ok) outcome.ok += 1
+        else if (res.status === 409) outcome.blocked += 1
+        else outcome.failed += 1
+      } catch {
+        outcome.failed += 1
+      }
+    }
+    return outcome
+  }
+
+  async function disablePools(ids: string[]): Promise<BulkOutcome> {
+    const outcome: BulkOutcome = { ok: 0, blocked: 0, failed: 0 }
+    for (const id of ids) {
+      try {
+        await api.updateProxyPool(id, { isActive: false })
+        outcome.ok += 1
+      } catch {
+        outcome.failed += 1
+      }
+    }
+    return outcome
+  }
+
+  // A bulk action must never claim more than the server confirmed: a pool left
+  // active keeps carrying live traffic, and the user needs to see that.
+  function reportBulk(outcome: BulkOutcome, verb: string) {
+    const parts = [`${verb} ${outcome.ok}`]
+    if (outcome.blocked > 0) parts.push(`${outcome.blocked} bound to active connections`)
+    if (outcome.failed > 0) parts.push(`${outcome.failed} failed`)
+    const summary = parts.join(', ')
+    if (outcome.blocked === 0 && outcome.failed === 0) notifications.success(summary)
+    else notifications.warning(summary)
+  }
+
+  async function handleHealthCheck(forceAll = false) {
     const targets =
-      selectedIds.length > 0 ? proxyPools.filter((p) => selectedIds.includes(p.id)) : proxyPools
+      !forceAll && selectedIds.length > 0
+        ? proxyPools.filter((p) => selectedIds.includes(p.id))
+        : proxyPools
     if (targets.length === 0) return
     healthChecking = true
     healthProgress = { current: 0, total: targets.length }
@@ -365,10 +460,33 @@
         if (!pool) break
         try {
           const data = await api.testProxyPool(pool.id)
-          if (data.success) alive += 1
-          else deadIds.push(pool.id)
+          if (data.success) {
+            alive += 1
+          } else {
+            deadIds.push(pool.id)
+          }
+          proxyPools = proxyPools.map((p) =>
+            p.id === pool.id
+              ? {
+                  ...p,
+                  testStatus: data.status || (data.success ? 'passed' : 'failed'),
+                  latency: typeof data.latency === 'number' ? data.latency : p.latency,
+                  lastTestedAt: new Date().toISOString(),
+                }
+              : p
+          )
         } catch {
           deadIds.push(pool.id)
+          proxyPools = proxyPools.map((p) =>
+            p.id === pool.id
+              ? {
+                  ...p,
+                  testStatus: 'failed',
+                  latency: 0,
+                  lastTestedAt: new Date().toISOString(),
+                }
+              : p
+          )
         } finally {
           done += 1
           healthProgress = { current: done, total: targets.length }
@@ -387,18 +505,15 @@
       const dead = deadIds.length
       confirmState = {
         title: 'Disable Dead Proxies',
-        message: `Alive: ${alive}, Dead: ${dead}.\n\nDisable ${dead} dead proxies?`,
+        message: `Alive: ${alive}, Dead: ${dead}.\n\nDisable ${dead} dead ${dead === 1 ? 'proxy' : 'proxies'}?`,
+        confirmText: 'Disable Dead',
         onConfirm: async () => {
           confirmState = null
           bulkBusy = true
           try {
-            for (const id of deadIds) {
-              try {
-                await api.updateProxyPool(id, { isActive: false })
-              } catch {}
-            }
+            const outcome = await disablePools(deadIds)
             await fetchProxyPools()
-            notifications.success(`Disabled ${dead} dead proxies`)
+            reportBulk(outcome, 'Disabled')
           } finally {
             bulkBusy = false
           }
@@ -406,6 +521,46 @@
       }
     } else {
       notifications.success(`Health check done. Alive: ${alive}, Dead: ${deadIds.length}`)
+    }
+  }
+
+  async function handleDisableFailed() {
+    const failed = proxyPools.filter((p) => isFailedStatus(p) && p.isActive !== false)
+    if (failed.length === 0) {
+      notifications.info('No active failed proxies found')
+      return
+    }
+    bulkBusy = true
+    try {
+      const outcome = await disablePools(failed.map((p) => p.id))
+      await fetchProxyPools()
+      reportBulk(outcome, 'Disabled')
+    } finally {
+      bulkBusy = false
+    }
+  }
+
+  function handleDeleteFailed() {
+    const failed = proxyPools.filter(isFailedStatus)
+    if (failed.length === 0) {
+      notifications.info('No failed proxies to delete')
+      return
+    }
+    confirmState = {
+      title: 'Delete Failed Proxies',
+      message: `Are you sure you want to delete ${failed.length} failed proxy pool${failed.length === 1 ? '' : 's'}? This action cannot be undone.`,
+      confirmText: 'Delete Failed',
+      onConfirm: async () => {
+        confirmState = null
+        bulkBusy = true
+        try {
+          const outcome = await deletePools(failed.map((p) => p.id))
+          await fetchProxyPools()
+          reportBulk(outcome, 'Deleted')
+        } finally {
+          bulkBusy = false
+        }
+      },
     }
   }
 
@@ -468,7 +623,12 @@
       }
 
       await fetchProxyPools()
-      showBatchImportModal = false
+      // The import ran to completion, so the dialog can close now. closeFormModal
+      // refuses while `importing` is still true, which is why this clears the
+      // draft directly instead of going through it.
+      showFormModal = false
+      batchImportText = ''
+      formTab = 'single'
       notifications.success(
         `Batch import completed: Created ${created}, Skipped ${skipped}, Failed ${failed}`
       )
@@ -538,7 +698,69 @@
       deploying = false
     }
   }
+
+  async function handleNetlifyDeploy() {
+    if (!netlifyForm.netlifyToken.trim()) return
+    deploying = true
+    try {
+      const data = await api.deployNetlifyRelay({
+        netlifyToken: netlifyForm.netlifyToken.trim(),
+        projectName: netlifyForm.projectName.trim() || undefined,
+      })
+      await fetchProxyPools()
+      closeNetlifyModal()
+      notifications.success(`Deployed: ${data.deployUrl || data.proxyUrl || ''}`)
+    } catch (err) {
+      console.log('Error deploying Netlify relay:', err)
+      notifications.error(err instanceof Error ? err.message : 'Deploy failed')
+    } finally {
+      deploying = false
+    }
+  }
 </script>
+
+<!-- The one-pool form is shared by the Single tab and the edit dialog, so the
+     fields live in one snippet rather than being written twice. -->
+{#snippet singleFields()}
+  <Input label="Name" bind:value={formData.name} placeholder="Office Proxy" />
+  <Input label="Proxy URL" bind:value={formData.proxyUrl} placeholder="http://127.0.0.1:7897" />
+  <Input
+    label="No Proxy"
+    bind:value={formData.noProxy}
+    placeholder="localhost,127.0.0.1,.internal"
+    hint="Comma-separated hosts/domains to bypass proxy"
+  />
+
+  <div
+    class="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between"
+  >
+    <div>
+      <p class="font-medium text-sm">Active</p>
+      <p class="text-xs text-text-muted">Inactive pools are ignored by runtime resolution.</p>
+    </div>
+    <Toggle
+      checked={formData.isActive === true}
+      onChange={() => (formData.isActive = !formData.isActive)}
+      disabled={saving}
+    />
+  </div>
+
+  <div
+    class="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between"
+  >
+    <div>
+      <p class="font-medium text-sm">Strict Proxy</p>
+      <p class="text-xs text-text-muted">
+        Fail request if proxy is unreachable instead of falling back to direct.
+      </p>
+    </div>
+    <Toggle
+      checked={formData.strictProxy === true}
+      onChange={() => (formData.strictProxy = !formData.strictProxy)}
+      disabled={saving}
+    />
+  </div>
+{/snippet}
 
 {#if loading}
   <div class="mx-auto flex w-full max-w-5xl flex-col gap-4 px-1 sm:gap-6 sm:px-0">
@@ -552,7 +774,12 @@
         <h1 class="text-xl font-semibold sm:text-2xl">Proxy Pools</h1>
       </div>
 
-      <div class="grid grid-cols-1 gap-2 sm:flex sm:items-center">
+      <!-- Test All, Batch Import and Add Proxy Pool moved into one menu: the
+           header held four controls and wrapped on a phone (issue #261). The
+           relay deployer keeps its own trigger — it is a separate task with
+           its own submenu, not one more verb in this list. -->
+      <div class="flex flex-wrap items-center gap-2">
+
         <div class="relative" bind:this={relayMenuRef}>
           <Button
             size="sm"
@@ -603,24 +830,92 @@
                 <span class="material-symbols-outlined text-[20px] text-green-500">terminal</span>
                 Deno Relay
               </button>
+              <button
+                type="button"
+                onclick={() => {
+                  openNetlifyModal()
+                  showRelayMenu = false
+                }}
+                class="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-text-main transition-colors hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+              >
+                <span class="material-symbols-outlined text-[20px] text-teal-500">deployed_code</span>
+                Netlify Relay
+              </button>
             </div>
           {/if}
         </div>
 
-        <Button size="sm" variant="secondary" onclick={openBatchImportModal}>
-          <span class="material-symbols-outlined text-[18px]">upload</span>
-          Batch Import
-        </Button>
-        <Button size="sm" onclick={openCreateModal}>
-          <span class="material-symbols-outlined text-[18px]">add</span>
-          Add Proxy Pool
-        </Button>
+        <Menu label="Proxy pool actions" triggerIcon="menu" minWidth="15rem">
+          <MenuItem
+            label={healthChecking
+              ? `Testing ${healthProgress.current}/${healthProgress.total}`
+              : 'Test All'}
+            icon={healthChecking ? 'progress_activity' : 'speed'}
+            disabled={healthChecking || proxyPools.length === 0}
+            onSelect={() => handleHealthCheck(true)}
+          />
+
+          <div class="my-1 border-t border-border-subtle" role="separator"></div>
+
+          <MenuItem label="Add Proxy Pool" icon="add" onSelect={() => openCreateModal('single')} />
+          <MenuItem label="Batch Import" icon="upload" onSelect={() => openCreateModal('bulk')} />
+        </Menu>
       </div>
     </div>
 
     <Card>
-      <div class="mb-4 flex flex-wrap items-center gap-2">
-        {#if proxyPools.length > 0}
+      <!-- Filter & Sort Controls & Quick Cleanup -->
+      <div class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div class="flex items-center gap-1.5">
+          <span class="text-xs text-text-muted shrink-0">Filter:</span>
+          <CountedSelect
+            value={statusFilter}
+            options={statusOptions}
+            ariaLabel="Filter proxy pools by status"
+            onChange={(next) => (statusFilter = next as PoolStatusFilter)}
+          />
+        </div>
+
+        <!-- Sort & Quick Cleanup -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <div class="flex items-center gap-1.5">
+            <span class="text-xs text-text-muted shrink-0">Sort:</span>
+            <select
+              bind:value={sortOption}
+              class="h-8 rounded-lg border border-border-subtle bg-surface-2 px-2 text-xs text-text-main outline-none transition-colors hover:bg-surface-3 cursor-pointer"
+              aria-label="Sort proxy pools"
+            >
+              <option value="default">Default</option>
+              <option value="fastest">Fastest (Latency asc)</option>
+              <option value="recently_tested">Recently Tested</option>
+              <option value="name">Name (A-Z)</option>
+            </select>
+          </div>
+
+          <Button
+            size="sm"
+            variant="secondary"
+            onclick={handleDisableFailed}
+            disabled={failedCount === 0 || bulkBusy || healthChecking}
+          >
+            <span class="material-symbols-outlined text-[16px]">pause_circle</span>
+            Disable Failed
+          </Button>
+
+          <Button
+            size="sm"
+            variant="danger"
+            onclick={handleDeleteFailed}
+            disabled={failedCount === 0 || bulkBusy || healthChecking}
+          >
+            <span class="material-symbols-outlined text-[16px]">delete_sweep</span>
+            Delete Failed
+          </Button>
+        </div>
+      </div>
+
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.06] pb-3 dark:border-white/[0.06]">
+        {#if displayedPools.length > 0}
           <label class="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer">
             <input
               type="checkbox"
@@ -630,9 +925,16 @@
             />
             {allSelected ? 'Unselect all' : 'Select all'}
           </label>
+        {:else}
+          <div></div>
         {/if}
-        <Badge>Total: {proxyPools.length}</Badge>
-        <Badge variant="success">Active: {activeCount}</Badge>
+        <div class="flex items-center gap-2">
+          <Badge>Total: {proxyPools.length}</Badge>
+          <Badge variant="success">Active: {activeCount}</Badge>
+          {#if failedCount > 0}
+            <Badge variant="error">Failed: {failedCount}</Badge>
+          {/if}
+        </div>
       </div>
 
       {#if selectedIds.length > 0 || healthChecking}
@@ -646,7 +948,7 @@
           <div class="ml-auto flex flex-wrap items-center gap-2">
             <Button
               size="sm"
-              onclick={handleHealthCheck}
+              onclick={() => handleHealthCheck(false)}
               disabled={healthChecking || bulkBusy || proxyPools.length === 0}
             >
               <span
@@ -680,7 +982,7 @@
               </Button>
               <Button
                 size="sm"
-                variant="secondary"
+                variant="danger"
                 onclick={bulkDelete}
                 disabled={bulkBusy || healthChecking}
               >
@@ -701,14 +1003,25 @@
           <p class="text-sm text-text-muted mb-4">
             Create a proxy pool entry, then assign it to connections.
           </p>
-          <Button onclick={openCreateModal}>
+          <Button onclick={() => openCreateModal('single')}>
             <span class="material-symbols-outlined text-[18px]">add</span>
             Add Proxy Pool
           </Button>
         </div>
+      {:else if displayedPools.length === 0}
+        <div class="text-center py-10">
+          <p class="text-text-main font-medium mb-1">No proxy pools match current filter</p>
+          <p class="text-sm text-text-muted mb-4">
+            Try selecting a different filter option or reset filters.
+          </p>
+          <Button variant="secondary" onclick={() => (statusFilter = 'all')}>
+            Reset Filter
+          </Button>
+        </div>
       {:else}
         <div class="flex flex-col divide-y divide-black/[0.04] dark:divide-white/[0.05]">
-          {#each proxyPools as pool (pool.id)}
+          {#each displayedPools as pool (pool.id)}
+            {@const latencyBadge = hasMeasuredLatency(pool) ? getLatencyBadge(pool.latency) : null}
             <div class="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div class="flex items-start gap-3 min-w-0 flex-1">
                 <input
@@ -725,6 +1038,11 @@
                     <Badge variant={getStatusVariant(pool.testStatus)} size="sm" dot>
                       {pool.testStatus || 'unknown'}
                     </Badge>
+                    {#if latencyBadge}
+                      <Badge variant={latencyBadge.variant} size="sm">
+                        {latencyBadge.text}
+                      </Badge>
+                    {/if}
                     <Badge variant={pool.isActive ? 'success' : 'default'} size="sm">
                       {pool.isActive ? 'active' : 'inactive'}
                     </Badge>
@@ -733,6 +1051,12 @@
                     {/if}
                     {#if pool.type === 'cloudflare'}
                       <Badge size="sm">cloudflare relay</Badge>
+                    {/if}
+                    {#if pool.type === 'deno'}
+                      <Badge size="sm">deno relay</Badge>
+                    {/if}
+                    {#if pool.type === 'netlify'}
+                      <Badge size="sm">netlify relay</Badge>
                     {/if}
                     <Badge size="sm">
                       {pool.boundConnectionCount || 0} bound
@@ -792,37 +1116,6 @@
         </div>
       {/if}
     </Card>
-
-    <Modal
-      isOpen={showBatchImportModal}
-      title="Batch Import Proxies"
-      onClose={closeBatchImportModal}
-    >
-      <div class="flex flex-col gap-4">
-        <div>
-          <label class="text-sm font-medium text-text-main mb-1 block">
-            Paste Proxy List (One per line)
-          </label>
-          <textarea
-            bind:value={batchImportText}
-            placeholder={'http://user:pass@127.0.0.1:7897\n127.0.0.1:7897:user:pass'}
-            class="w-full min-h-[180px] py-2 px-3 text-sm text-text-main bg-surface-2 border border-transparent rounded-[10px] focus:ring-1 focus:ring-primary/30 focus:border-primary/50 focus:outline-none transition-all font-mono"
-          ></textarea>
-          <p class="text-xs text-text-muted mt-1">
-            Supported formats: protocol://user:pass@host:port, host:port:user:pass
-          </p>
-        </div>
-
-        <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <Button fullWidth onclick={handleBatchImport} disabled={!batchImportText.trim() || importing}>
-            {importing ? 'Importing...' : 'Import'}
-          </Button>
-          <Button fullWidth variant="ghost" onclick={closeBatchImportModal} disabled={importing}>
-            Cancel
-          </Button>
-        </div>
-      </div>
-    </Modal>
 
     <Modal isOpen={showVercelModal} title="Deploy Vercel Relay" onClose={closeVercelModal}>
       <div class="flex flex-col gap-4">
@@ -1030,62 +1323,150 @@
     </Modal>
 
     <Modal
-      isOpen={showFormModal}
-      title={editingPool ? 'Edit Proxy Pool' : 'Add Proxy Pool'}
-      onClose={closeFormModal}
+      isOpen={showNetlifyModal}
+      title="Deploy Netlify Relay"
+      onClose={closeNetlifyModal}
     >
       <div class="flex flex-col gap-4">
-        <Input label="Name" bind:value={formData.name} placeholder="Office Proxy" />
-        <Input label="Proxy URL" bind:value={formData.proxyUrl} placeholder="http://127.0.0.1:7897" />
+        <div
+          class="rounded-lg bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 p-3 flex flex-col gap-1.5"
+        >
+          <p class="text-sm text-text-main font-medium">What is Netlify Relay?</p>
+          <p class="text-xs text-text-muted">
+            Deploys a serverless relay function to Netlify's global edge network. All AI provider
+            requests are forwarded through Netlify's edge, masking your real IP.
+          </p>
+          <ul class="text-xs text-text-muted list-disc pl-4 space-y-0.5">
+            <li>
+              Runs on Netlify Functions with a streaming response and a 30-second execution limit
+            </li>
+            <li>Free tier: 125,000 function invocations and 100GB bandwidth per month</li>
+            <li>Relay URL format: https://your-site.netlify.app/.netlify/functions/relay</li>
+            <li>Deploy multiple relays on different accounts for more IP diversity</li>
+          </ul>
+          <div
+            class="mt-2 pt-2 border-t border-black/10 dark:border-white/10 text-xs text-text-muted"
+          >
+            <p class="font-medium text-text-main mb-1">How to generate API token:</p>
+            <ol class="list-decimal pl-4 space-y-0.5">
+              <li>Go to <b>User Settings</b> → <b>Applications</b> → <b>Personal access tokens</b></li>
+              <li>Select <b>New access token</b> and generate a token</li>
+              <li>Copy the token — you won't see it again after leaving the page</li>
+            </ol>
+          </div>
+        </div>
+        <div>
+          <Input
+            label="Netlify API Token"
+            type="password"
+            bind:value={netlifyForm.netlifyToken}
+            placeholder="nfp_xxxxxxxxxxxxxxxx"
+          />
+          <p class="text-xs text-text-muted mt-1">Token is used once for deployment, not stored.</p>
+        </div>
         <Input
-          label="No Proxy"
-          bind:value={formData.noProxy}
-          placeholder="localhost,127.0.0.1,.internal"
-          hint="Comma-separated hosts/domains to bypass proxy"
+          label="Site Name"
+          bind:value={netlifyForm.projectName}
+          placeholder="netlify-relay"
+          hint="Unique site name (lowercase letters, numbers, hyphens). Your relay URL will be https://site-name.netlify.app/.netlify/functions/relay"
         />
-
-        <div
-          class="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between"
-        >
-          <div>
-            <p class="font-medium text-sm">Active</p>
-            <p class="text-xs text-text-muted">Inactive pools are ignored by runtime resolution.</p>
-          </div>
-          <Toggle
-            checked={formData.isActive === true}
-            onChange={() => (formData.isActive = !formData.isActive)}
-            disabled={saving}
-          />
-        </div>
-
-        <div
-          class="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between"
-        >
-          <div>
-            <p class="font-medium text-sm">Strict Proxy</p>
-            <p class="text-xs text-text-muted">
-              Fail request if proxy is unreachable instead of falling back to direct.
-            </p>
-          </div>
-          <Toggle
-            checked={formData.strictProxy === true}
-            onChange={() => (formData.strictProxy = !formData.strictProxy)}
-            disabled={saving}
-          />
-        </div>
-
         <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <Button
             fullWidth
-            onclick={handleSave}
-            disabled={!formData.name.trim() || !formData.proxyUrl.trim() || saving}
+            onclick={handleNetlifyDeploy}
+            disabled={!netlifyForm.netlifyToken.trim() || deploying}
           >
-            {saving ? 'Saving...' : 'Save'}
+            {deploying ? 'Deploying...' : 'Deploy Relay'}
           </Button>
-          <Button fullWidth variant="ghost" onclick={closeFormModal} disabled={saving}>
+          <Button fullWidth variant="ghost" onclick={closeNetlifyModal} disabled={deploying}>
             Cancel
           </Button>
         </div>
+      </div>
+    </Modal>
+
+    <Modal
+      isOpen={showFormModal}
+      title={editingPool ? 'Edit Proxy Pool' : 'Add Proxy Pools'}
+      onClose={closeFormModal}
+    >
+      <div class="flex flex-col gap-4">
+        {#if editingPool}
+          {@render singleFields()}
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <Button
+              fullWidth
+              onclick={handleSave}
+              disabled={!formData.name.trim() || !formData.proxyUrl.trim() || saving}
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </Button>
+            <Button fullWidth variant="ghost" onclick={closeFormModal} disabled={saving}>
+              Cancel
+            </Button>
+          </div>
+        {:else}
+          <!-- Adding one pool by hand and adding a pasted list were two modals
+               behind two buttons (issue #224). They are one task, so they are
+               one dialog with two tabs: the Batch Import button opens this same
+               dialog on the Bulk Add tab rather than a second window. -->
+          <div class="flex gap-1 rounded-lg border border-border/50 bg-surface-2 p-1">
+            {#each [{ value: 'single', label: 'Single' }, { value: 'bulk', label: 'Bulk Add' }] as tab (tab.value)}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={formTab === tab.value}
+                onclick={() => (formTab = tab.value as 'single' | 'bulk')}
+                class="flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors {formTab ===
+                tab.value
+                  ? 'bg-brand-500 text-white shadow-sm'
+                  : 'text-text-muted hover:text-text-main'}"
+              >
+                {tab.label}
+              </button>
+            {/each}
+          </div>
+
+          {#if formTab === 'single'}
+            {@render singleFields()}
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <Button
+                fullWidth
+                onclick={handleSave}
+                disabled={!formData.name.trim() || !formData.proxyUrl.trim() || saving}
+              >
+                {saving ? 'Saving...' : 'Save'}
+              </Button>
+              <Button fullWidth variant="ghost" onclick={closeFormModal} disabled={saving}>
+                Cancel
+              </Button>
+            </div>
+          {:else}
+            <div>
+              <label for="bulk-proxies" class="text-sm font-medium text-text-main mb-1 block">
+                Paste Proxy List (One per line)
+              </label>
+              <textarea
+                id="bulk-proxies"
+                bind:value={batchImportText}
+                placeholder={'http://user:pass@127.0.0.1:7897\n127.0.0.1:7897:user:pass'}
+                class="w-full min-h-[180px] py-2 px-3 text-sm text-text-main bg-surface-2 border border-transparent rounded-[10px] focus:ring-1 focus:ring-primary/30 focus:border-primary/50 focus:outline-none transition-all font-mono"
+              ></textarea>
+              <p class="text-xs text-text-muted mt-1">
+                Supported formats: protocol://user:pass@host:port, host:port:user:pass
+              </p>
+            </div>
+
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <Button fullWidth onclick={handleBatchImport} disabled={!batchImportText.trim() || importing}>
+                {importing ? 'Importing...' : 'Import'}
+              </Button>
+              <Button fullWidth variant="ghost" onclick={closeFormModal} disabled={importing}>
+                Cancel
+              </Button>
+            </div>
+          {/if}
+        {/if}
       </div>
     </Modal>
 

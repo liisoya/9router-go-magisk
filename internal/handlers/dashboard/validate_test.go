@@ -711,3 +711,69 @@ func TestHandleValidateProvider_CustomOpenAINode_InvalidKeyRejection(t *testing.
 		t.Errorf("expected 'Invalid API key', got %v", out["error"])
 	}
 }
+
+// TestHandleValidateProvider_CustomAnthropicNodeProbeModel pins which model the
+// node validation path probes with: the shared current-model constant when the
+// node names none, and the node's own assignedModel when it does. The retired
+// claude-3-haiku-20240307 upstream hardcoded here is a valid answer to reject
+// — a probe naming it fails for a perfectly good key.
+func TestHandleValidateProvider_CustomAnthropicNodeProbeModel(t *testing.T) {
+	const nodeID = "anthropic-compatible-node-probe"
+
+	tests := []struct {
+		name string
+		psd  string
+		want string
+	}{
+		{
+			name: "no assigned model falls back to the shared constant",
+			psd:  "",
+			want: AnthropicValidationModel,
+		},
+		{
+			name: "an assigned model wins over the constant",
+			psd:  `,"providerSpecificData":{"assignedModel":"ac/claude-sonnet-4-6"}`,
+			want: "ac/claude-sonnet-4-6",
+		},
+		{
+			name: "a blank assigned model does not win",
+			psd:  `,"providerSpecificData":{"assignedModel":"   "}`,
+			want: AnthropicValidationModel,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, cleanup := setupTestDB(t)
+			defer cleanup()
+			router := setupTestRouter(repo)
+			if _, err := repo.CreateProviderNode(nodeID, "anthropic-compatible", "AC",
+				`{"baseUrl":"https://ac.example/v1","prefix":"ac"}`); err != nil {
+				t.Fatalf("seed node: %v", err)
+			}
+			calls := staticProbeStub(t, http.StatusOK)
+
+			body := `{"provider":"` + nodeID + `","apiKey":"sk-ant"` + tc.psd + `}`
+			req := httptest.NewRequest(http.MethodPost, "/api/providers/validate", bytes.NewReader([]byte(body)))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+			}
+			if len(*calls) == 0 {
+				t.Fatal("expected a messages probe")
+			}
+			var sent struct {
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal([]byte((*calls)[0].body), &sent); err != nil {
+				t.Fatalf("probe body not JSON: %v", err)
+			}
+			if sent.Model != tc.want {
+				t.Errorf("probe model = %q, want %q", sent.Model, tc.want)
+			}
+		})
+	}
+}

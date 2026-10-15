@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, getStoredAPIKey, type APIKey, type ProviderConnection, type Settings } from '../../api/client'
+  import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
+  import { copyToClipboard } from '../../lib/clipboard'
   import { getModelKind, getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
   import { parseCustomModelsResponse, subscribeCustomModelsChanged } from '../../lib/customModels'
   import type { ProviderCatalogItem } from '../../lib/providers'
   import Badge from '../../lib/ui/Badge.svelte'
-  import { getIconPath } from '../connections/types'
+  import ProviderArtwork from '../providers/ProviderArtwork.svelte'
   import { type MediaKind, MEDIA_KIND_INFO } from './mediaTypes'
   import NoAuthProxyCard from './NoAuthProxyCard.svelte'
   import TtsExampleCard from './TtsExampleCard.svelte'
@@ -186,17 +188,23 @@
 
   function handleOpenEditConn(conn: ProviderConnection) {
     editingConn = conn
-    editConnName = conn.displayName || conn.name || ''
+    editConnName = formatEmailLabel(conn.displayName || conn.name, $emailPrivacy) || ''
     isEditingActive = conn.isActive === 1
   }
 
   async function handleSaveEditedConn() {
     if (!editingConn) return
     try {
-      await api.updateConnection(editingConn.id, {
-        name: editConnName.trim(),
+      const payload: { name?: string; isActive?: number } = {
         isActive: isEditingActive ? 1 : 0
-      })
+      }
+      const trimmed = editConnName.trim()
+      const original = (editingConn.displayName || editingConn.name || '').trim()
+      const masked = formatEmailLabel(original, $emailPrivacy).trim()
+      if (trimmed !== original && trimmed !== masked) {
+        payload.name = trimmed || undefined
+      }
+      await api.updateConnection(editingConn.id, payload)
       editingConn = null
       onRefresh()
     } catch (err) {
@@ -238,7 +246,7 @@
   let sttResponseFormat = $state('json')
   let copiedModelId = $state<string | null>(null)
   let testingModelId = $state<string | null>(null)
-  let modelTestResults = $state<Record<string, { ok: boolean; error?: string; latency?: number }>>({})
+  let modelTestResults = $state<Record<string, { ok: boolean; error?: string; note?: string; latency?: number }>>({})
 
   $effect(() => {
     if (mediaModels.length > 0 && !selectedModelId) {
@@ -257,7 +265,7 @@
 
   function handleCopyModel(id: string) {
     const full = resolveQualifiedModel(id)
-    navigator.clipboard.writeText(full)
+    copyToClipboard(full)
     copiedModelId = id
     setTimeout(() => { copiedModelId = null }, 2000)
   }
@@ -267,8 +275,16 @@
     testingModelId = modelId
     const start = performance.now()
     try {
-      const res = await api.testModel(full)
-      modelTestResults[modelId] = { ok: res.ok, error: res.error, latency: Math.round(performance.now() - start) }
+      // The kind picks the endpoint the probe travels on, exactly like the Run
+      // button below it — probing a System One model through chat completions
+      // is what made this button fail while the button beside it worked.
+      const res = await api.testModel(full, kind)
+      modelTestResults[modelId] = {
+        ok: res.ok,
+        error: res.error,
+        note: res.note,
+        latency: res.latencyMs ?? Math.round(performance.now() - start),
+      }
     } catch (err) {
       modelTestResults[modelId] = { ok: false, error: err instanceof Error ? err.message : 'Error', latency: Math.round(performance.now() - start) }
     } finally {
@@ -466,7 +482,7 @@
   })
 
   function copyCurl() {
-    navigator.clipboard.writeText(exampleCurl)
+    copyToClipboard(exampleCurl)
     copiedCurl = true
     setTimeout(() => { copiedCurl = false }, 2000)
   }
@@ -590,7 +606,6 @@
     }
   }
 
-  let icon = $derived(getIconPath(provider.id))
 </script>
 
 <div class="flex flex-col gap-8 animate-fade-in max-w-7xl mx-auto">
@@ -609,13 +624,10 @@
         class="size-12 rounded-lg flex items-center justify-center shrink-0 border border-border/40 overflow-hidden"
         style="background-color: {provider.color ? provider.color + '15' : '#88888815'}"
       >
-        <img
-          src={icon}
+        <ProviderArtwork
+          id={provider.id}
           alt={provider.name}
-          width="48"
-          height="48"
-          class="object-contain size-8 rounded"
-          onerror={(e) => { (e.currentTarget as HTMLElement).style.display = 'none' }}
+          class="object-contain size-8 rounded text-sm leading-none font-semibold"
         />
       </div>
       <div class="min-w-0 flex-1">
@@ -632,6 +644,21 @@
               Get API Key
             </a>
           {/if}
+          <!-- Media tabs never mount the Providers view, so without a toggle
+               here the masking applied elsewhere is unreachable from the
+               seven tabs that mount this component. -->
+          <button
+            type="button"
+            onclick={() => emailPrivacy.toggle()}
+            aria-pressed={$emailPrivacy}
+            class="ml-auto flex h-8 shrink-0 items-center gap-1 rounded-lg border px-2 text-xs transition-colors cursor-pointer {$emailPrivacy
+              ? 'border-brand-500/40 bg-brand-500/10 text-brand-500 font-medium'
+              : 'border-border-subtle bg-surface text-text-muted hover:text-text-main hover:bg-surface-2'}"
+            title={$emailPrivacy ? 'Show full email' : 'Mask / hide email'}
+          >
+            <span class="material-symbols-outlined text-[16px]">{$emailPrivacy ? 'visibility_off' : 'visibility'}</span>
+            <span class="hidden sm:inline">{$emailPrivacy ? 'Email Masked' : 'Mask Email'}</span>
+          </button>
         </div>
         <div class="flex items-center gap-1.5 mt-1 flex-wrap">
           {#each provider.serviceKinds || [] as sk}
@@ -735,7 +762,7 @@
                   </button>
                 </div>
                 <span class="material-symbols-outlined text-base text-text-muted shrink-0">key</span>
-                <span class="text-sm font-medium text-text-main truncate">{conn.displayName || conn.name || conn.email || conn.id}</span>
+                <span class="text-sm font-medium text-text-main truncate">{formatEmailLabel(conn.displayName || conn.name || conn.email || conn.id, $emailPrivacy)}</span>
                 <button
                   type="button"
                   onclick={() => handleToggleConnActive(conn)}
@@ -791,19 +818,38 @@
       {:else}
         <div class="flex flex-wrap gap-3">
           {#each mediaModels as m (m.id)}
-            <div class="group px-3 py-2 rounded-lg border border-border hover:bg-sidebar/50 flex items-center gap-2">
-              <span class="material-symbols-outlined text-base text-text-muted">smart_toy</span>
+            {@const verdict = modelTestResults[m.id]}
+            <div
+              class="group px-3 py-2 rounded-lg border flex items-center gap-2 hover:bg-sidebar/50
+                {verdict?.ok ? 'border-green-500/40' : verdict ? 'border-red-500/40' : 'border-border'}"
+            >
+              <span
+                class="material-symbols-outlined text-base text-text-muted"
+                style="color: {verdict?.ok ? '#22c55e' : verdict ? '#ef4444' : 'inherit'}"
+              >
+                {verdict?.ok ? 'check_circle' : verdict ? 'cancel' : 'smart_toy'}
+              </span>
               <div class="flex flex-col gap-1 min-w-0">
                 <code class="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{m.id}</code>
                 <span class="text-[9px] text-text-muted/70 italic pl-1">{m.name || m.id}</span>
+                {#if verdict}
+                  <span
+                    class="text-[9px] pl-1 max-w-[220px] truncate {verdict.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500'}"
+                    title={verdict.error || verdict.note || ''}
+                  >
+                    {verdict.ok
+                      ? `${verdict.latency ?? 0} ms${verdict.note ? ` · ${verdict.note}` : ''}`
+                      : verdict.error || 'Test failed'}
+                  </span>
+                {/if}
               </div>
               <div class="flex items-center gap-1 ml-2">
                 <button
                   type="button"
                   onclick={() => handleTestModel(m.id)}
                   disabled={testingModelId === m.id}
-                  class="p-1 hover:bg-surface-2 rounded text-text-muted hover:text-primary transition-colors cursor-pointer"
-                  title="Test Model"
+                  class="p-1 hover:bg-surface-2 rounded text-text-muted hover:text-primary transition-colors cursor-pointer disabled:cursor-not-allowed"
+                  title={verdict?.error || (verdict?.ok ? `Test passed in ${verdict.latency ?? 0} ms` : 'Test Model')}
                 >
                   <span class="material-symbols-outlined text-sm {testingModelId === m.id ? 'animate-spin' : ''}">science</span>
                 </button>
@@ -930,7 +976,7 @@
           >
             <option value="">Auto (by priority)</option>
             {#each providerConns as conn}
-              <option value={conn.id}>{conn.displayName || conn.name || conn.email || conn.id.slice(0, 8)}</option>
+              <option value={conn.id}>{formatEmailLabel(conn.displayName || conn.name || conn.email || conn.id.slice(0, 8), $emailPrivacy)}</option>
             {/each}
           </select>
         </div>

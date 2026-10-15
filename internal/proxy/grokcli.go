@@ -2,12 +2,13 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/providers"
 )
 
@@ -38,9 +39,9 @@ func streamHeaders(headers map[string]string, isStream bool) {
 // Body transformation (Chat→Responses API) is done by the caller.
 func ForwardGrokCLI(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool) (*http.Response, error) {
 	headers := map[string]string{
-		"User-Agent":               "grok-shell/0.2.99 (linux; x86_64)",
-		"x-grok-client-identifier": "grok-shell",
-		"x-grok-client-version":    "0.2.99",
+		"User-Agent":               providers.GrokCLIUserAgent,
+		"x-grok-client-identifier": providers.GrokCLIClientIdentifier,
+		"x-grok-client-version":    providers.GrokCLIVersion,
 	}
 	setAuth(headers, cfg, apiKey)
 	streamHeaders(headers, isStream)
@@ -53,6 +54,12 @@ func ForwardGrokCLI(ctx context.Context, client *http.Client, cfg *providers.Pro
 	return DoRequest(ctx, client, "POST", targetURL, headers, body)
 }
 
+// codexResponsesLiteHeader tells the Codex backend to serve the body in its
+// Lite shape. It must not ride along on a body carrying hosted search: Lite
+// cannot execute that tool, and upstream drops the header for exactly those
+// requests (7bf931781).
+const codexResponsesLiteHeader = "x-openai-internal-codex-responses-lite"
+
 // ForwardCodex forwards to codex / perplexity-agent using OpenAI Responses API format.
 // Body transformation (Chat→Responses API) is done by the caller.
 //
@@ -60,9 +67,18 @@ func ForwardGrokCLI(ctx context.Context, client *http.Client, cfg *providers.Pro
 // which ChatGPT workspace the request bills against; the codex endpoint
 // rejects a request that omits it, so a connection stored without
 // chatgptAccountId can authorize but never complete a call.
-func ForwardCodex(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool, psd map[string]any) (*http.Response, error) {
+//
+// responsesLite is the caller's answer rather than a decision made here: the
+// executor owns which shape a body ended up in, and the package boundary keeps
+// this one from importing that back.
+func ForwardCodex(ctx context.Context, client *http.Client, cfg *providers.ProviderConfig, apiKey string, body []byte, isStream bool, psd map[string]any, responsesLite bool) (*http.Response, error) {
 	headers := map[string]string{
 		"originator": "codex_cli_rs",
+	}
+	if responsesLite {
+		cfg = providers.WithStaticHeader(cfg, codexResponsesLiteHeader, "true")
+	} else {
+		cfg = providers.WithoutStaticHeader(cfg, codexResponsesLiteHeader)
 	}
 	if accountID, ok := psd["chatgptAccountId"].(string); ok && accountID != "" {
 		headers["chatgpt-account-id"] = accountID
@@ -251,7 +267,7 @@ func normalizeKiroUserMessage(uim map[string]any) {
 
 func cleanKiroBody(body []byte) []byte {
 	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
+	if err := json.Unmarshal(body, &m, handlerutil.UpstreamBody); err != nil {
 		return body
 	}
 	delete(m, "systemPrompt")

@@ -36,6 +36,13 @@ const (
 	codexShutdownTimeout  = 5 * time.Second
 )
 
+// codexSessionTTL bounds how long an abandoned login lingers in the session
+// registry. Terminal sessions are dropped on read, but a login nobody
+// finishes (closed tab, dead browser) would otherwise sit in "pending"
+// forever — and a stale "pending" entry also keeps stopIfIdle from ever
+// retiring the listener.
+const codexSessionTTL = 30 * time.Minute
+
 // codexSession is one in-flight login, keyed by the OAuth state the authorize
 // step minted. It carries the PKCE verifier across the round trip so the
 // loopback server can finish the exchange without the browser.
@@ -76,6 +83,7 @@ func (p *codexProxy) register(state, codeVerifier, redirectURI, name string) {
 	if state == "" || codeVerifier == "" {
 		return
 	}
+	p.sweepStaleSessions()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.sessions[state] = &codexSession{
@@ -84,6 +92,19 @@ func (p *codexProxy) register(state, codeVerifier, redirectURI, name string) {
 		name:         name,
 		status:       "pending",
 		createdAt:    time.Now(),
+	}
+}
+
+// sweepStaleSessions drops sessions older than codexSessionTTL, whether they
+// are abandoned pendings or terminal results nobody ever read.
+func (p *codexProxy) sweepStaleSessions() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cutoff := time.Now().Add(-codexSessionTTL)
+	for state, sess := range p.sessions {
+		if sess.createdAt.Before(cutoff) {
+			delete(p.sessions, state)
+		}
 	}
 }
 
@@ -171,22 +192,30 @@ func (p *codexProxy) start(appPort string, exchangeFn func(context.Context, stri
 	return nil
 }
 
-// stop tears the listener down. A login that is still in flight is left in the
-// session registry: the dashboard may still poll for its result, and the
-// server-side exchange is not tied to the listener's lifetime.
-//
-// Shutdown, not Close: Close also kills connections that are mid-response,
-// which from inside a request handler truncates the very result page the user
-// is looking at. Shutdown stops accepting and lets in-flight requests finish.
+// stop tears the listener down. A login that is still in flight is failed,
+// not left pending: the loopback port is gone and nothing can rebind it
+// mid-flow, so leaving the session "pending" would make the dashboard poll
+// forever. The poller already turns a missing session into "unknown" with a
+// clear message, and a failed session into the error text below.
 func (p *codexProxy) stop() {
 	p.mu.Lock()
 	srv, idle := p.srv, p.idle
 	p.srv, p.listener, p.idle = nil, nil, nil
+	for _, sess := range p.sessions {
+		if sess.status == "pending" {
+			sess.status = "error"
+			sess.errMsg = "The local login listener stopped before the login completed. Close this window and click Login again."
+		}
+	}
 	p.mu.Unlock()
 
 	if idle != nil {
 		idle.Stop()
 	}
+	// Shutdown, not Close: Close also kills connections that are mid-response,
+	// which from inside a request handler truncates the very result page the
+	// user is looking at. Shutdown stops accepting and lets in-flight requests
+	// finish.
 	if srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), codexShutdownTimeout)
 		defer cancel()

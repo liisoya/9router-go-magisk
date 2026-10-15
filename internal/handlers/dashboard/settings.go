@@ -19,6 +19,7 @@ import (
 	"9router/proxy/internal/auth"
 	"9router/proxy/internal/config"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/proxy"
 )
 
 // Dashboard client headers, matching the Next dashboard settings/database route.
@@ -108,6 +109,12 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	if h.TokenSaver != nil {
+		if s, err := h.Repo.GetSettings(); err == nil && s != nil {
+			h.TokenSaver.UpdateFromSettings(s)
+		}
+	}
+
 	updated, err := h.Repo.GetSettingsRaw()
 	if err != nil {
 		handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok"})
@@ -124,6 +131,11 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 // browser link — or any instance reached through a reverse proxy that strips
 // it — was refused with 401 and the export looked permanently blocked (issue #47).
 // The password header stays as the step-up path for a script that already has it.
+//
+// The payload is shipped as pretty-printed JSON with a download filename, the
+// way upstream answers the profile page's export button, so a saved backup is
+// readable without unzipping it (issue #160). Import still accepts both the JSON
+// download and the older .zip archives.
 func (h *DashboardHandler) HandleExportDatabase(w http.ResponseWriter, r *http.Request) {
 	if !h.exportAuthorized(r) {
 		writePlainError(w, http.StatusUnauthorized, "Invalid password")
@@ -135,36 +147,10 @@ func (h *DashboardHandler) HandleExportDatabase(w http.ResponseWriter, r *http.R
 		writePlainError(w, http.StatusInternalServerError, "Failed to export database")
 		return
 	}
-	if r.URL.Query().Get("format") == "zip" || strings.Contains(r.Header.Get("Accept"), "application/zip") {
-		jsonBytes, err := json.Marshal(payload)
-		if err != nil {
-			writePlainError(w, http.StatusInternalServerError, "Failed to encode database backup")
-			return
-		}
-		var buf bytes.Buffer
-		zw := zip.NewWriter(&buf)
-		f, err := zw.Create("9router-backup.json")
-		if err != nil {
-			writePlainError(w, http.StatusInternalServerError, "Failed to create zip archive")
-			return
-		}
-		if _, err := f.Write(jsonBytes); err != nil {
-			writePlainError(w, http.StatusInternalServerError, "Failed to write backup to zip")
-			return
-		}
-		if err := zw.Close(); err != nil {
-			writePlainError(w, http.StatusInternalServerError, "Failed to finalize zip")
-			return
-		}
-		nowStr := time.Now().Format("2006-01-02")
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="9router-backup-%s.zip"`, nowStr))
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-		return
-	}
 
-	handlerutil.WriteJSON(w, http.StatusOK, payload)
+	nowStr := time.Now().Format("2006-01-02")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="9router-backup-%s.json"`, nowStr))
+	handlerutil.WriteJSONIndented(w, http.StatusOK, payload)
 }
 
 // HandleImportDatabase handles POST /api/settings/database (backup restore).
@@ -273,8 +259,10 @@ func (h *DashboardHandler) HandleProxyTest(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	tr := proxy.NewSafeTransport()
+	tr.Proxy = http.ProxyURL(parsed)
 	client := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(parsed)},
+		Transport: tr,
 		Timeout:   timeout,
 	}
 	started := time.Now()
@@ -507,11 +495,34 @@ func (h *DashboardHandler) exportDatabase() (*databaseExport, error) {
 	}
 
 	if out.APIKeys, err = selectRows(db,
-		`SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys`); err != nil {
+		`SELECT id, key, name, machineId, isActive, createdAt,
+		        rateLimitRPM, rateLimitTPM, rateLimitConcurrency, tokenQuota, queueTimeoutMs
+		   FROM apiKeys`); err != nil {
 		return nil, err
+	}
+	// The per-key model allowlist is a separate table, so selecting apiKeys
+	// alone drops it. A restored key would then silently allow every model
+	// again — the one outcome a restriction exists to prevent.
+	access, err := selectRows(db,
+		`SELECT api_key_id, model FROM api_key_model_access ORDER BY api_key_id, model`)
+	if err != nil {
+		return nil, err
+	}
+	allowlists := make(map[string][]string)
+	for _, row := range access {
+		keyID, _ := row["api_key_id"].(string)
+		model, _ := row["model"].(string)
+		if keyID != "" && model != "" {
+			allowlists[keyID] = append(allowlists[keyID], model)
+		}
 	}
 	for _, row := range out.APIKeys {
 		normalizeBool(row, "isActive")
+		if id, _ := row["id"].(string); id != "" {
+			if models := allowlists[id]; len(models) > 0 {
+				row["allowedModels"] = models
+			}
+		}
 	}
 
 	if out.Combos, err = selectRows(db,
@@ -552,6 +563,9 @@ func (h *DashboardHandler) importDatabase(payload map[string]any) error {
 		`DELETE FROM providerNodes`,
 		`DELETE FROM proxyPools`,
 		`DELETE FROM apiKeys`,
+		// Without this the access rows outlive their key and accumulate as
+		// orphans after every import.
+		`DELETE FROM api_key_model_access`,
 		`DELETE FROM combos`,
 		`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`,
 	}
@@ -642,12 +656,39 @@ func (h *DashboardHandler) importDatabase(payload map[string]any) error {
 		if !ok {
 			continue
 		}
+		keyID, _ := k["id"].(string)
+		if keyID == "" {
+			continue
+		}
 		if _, err := tx.Exec(
-			`INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt) VALUES(?, ?, ?, ?, ?, ?)`,
+			`INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt,
+			        rateLimitRPM, rateLimitTPM, rateLimitConcurrency, tokenQuota, queueTimeoutMs)
+			 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			k["id"], k["key"], stringDefault(k["name"], nil), stringDefault(k["machineId"], nil),
 			boolToInt(k["isActive"]), stringDefault(k["createdAt"], nowISO()),
+			// A restored key must come back with the limits it had: a backup
+			// that silently lifted every rate limit and token quota would turn
+			// disaster recovery into an accidental opening of the throttle.
+			// Missing columns coerce to 0 (unlimited), which is the same
+			// meaning an absent column has on the live row.
+			intDefault(k["rateLimitRPM"], 0), intDefault(k["rateLimitTPM"], 0),
+			intDefault(k["rateLimitConcurrency"], 0), intDefault(k["tokenQuota"], 0),
+			intDefault(k["queueTimeoutMs"], 0),
 		); err != nil {
 			return err
+		}
+		models, _ := k["allowedModels"].([]any)
+		for _, raw := range models {
+			model, _ := raw.(string)
+			if model == "" {
+				continue
+			}
+			if _, err := tx.Exec(
+				`INSERT OR REPLACE INTO api_key_model_access(api_key_id, model) VALUES(?, ?)`,
+				keyID, model,
+			); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -884,4 +925,27 @@ func stringDefault(v any, fallback any) any {
 // nowISO returns a UTC RFC3339 timestamp for rows missing one.
 func nowISO() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+// intDefault coerces a backup value to a whole non-negative count, returning
+// fallback for anything else. JSON has one number type (float64), so a
+// hand-edited or older backup can arrive as a float, a string, or nothing at
+// all; an unparseable limit restores as its fallback (0 = unlimited) rather
+// than failing the whole restore over one column.
+func intDefault(v any, fallback int) int {
+	switch t := v.(type) {
+	case float64:
+		if t >= 0 {
+			return int(t)
+		}
+	case int:
+		if t >= 0 {
+			return t
+		}
+	case int64:
+		if t >= 0 {
+			return int(t)
+		}
+	}
+	return fallback
 }

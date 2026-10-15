@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, type SystemVersionInfo } from '../api/client'
   import { marked } from 'marked'
+  import { copyToClipboard } from '../lib/clipboard'
 
   let {
     isOpen = $bindable(false),
@@ -100,9 +101,8 @@
   })
 
   async function copyInstallCmd(): Promise<boolean> {
-    try {
-      await navigator.clipboard.writeText(INSTALL_CMD)
-    } catch {
+    const ok = await copyToClipboard(INSTALL_CMD)
+    if (!ok) {
       return false
     }
     copied = true

@@ -2,6 +2,8 @@
   import { api } from '../api/client'
   import ProviderIcon from './connections/ProviderIcon.svelte'
   import ChangelogModal from './ChangelogModal.svelte'
+  import Menu from '../lib/ui/Menu.svelte'
+  import MenuItem from '../lib/ui/MenuItem.svelte'
   import { type ActiveTab } from '../lib/router'
   import { promptInstall, subscribeInstallPrompt } from '../lib/pwa'
 
@@ -23,11 +25,14 @@
     onLogout?: () => void
   } = $props()
 
+  // The group invite rotates. Everything user-facing points at the redirect
+  // page instead, so a revoked link is repaired by editing site/tg.html alone
+  // and every already-installed dashboard follows the new one.
+  const TELEGRAM_GROUP_URL = 'https://luqman-v1.github.io/9router-go/tg'
+
   // Theme state
   let isDark = $state(true)
   let isDonateOpen = $state(false)
-  let isAppDrawerOpen = $state(false)
-  let isLangMenuOpen = $state(false)
   let isChangelogOpen = $state(false)
   let canInstall = $state(false)
 
@@ -63,7 +68,6 @@
   }
 
   async function handleLogout() {
-    isAppDrawerOpen = false
     try {
       await api.logout()
     } catch {}
@@ -254,144 +258,41 @@
     {/if}
   </div>
 
-  <!-- Right action buttons: Donate, Theme, Language flag, App drawer -->
+  <!-- Right: one menu. Donate, install, theme, changelog and logout were five
+       controls competing for the same strip, and on a phone they wrapped into
+       two rows (issue #224). They now live behind a single trigger, which is
+       why the separate language dropdown and app-drawer dropdown this file
+       used to own are gone. The Language item is gone too: the dashboard ships
+       English only, and the item's handler was an empty function, so clicking
+       it did nothing (issue #240). -->
   <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
-    <!-- 1. Donate button -->
-    <button
-      type="button"
-      onclick={() => (isDonateOpen = true)}
-      class="flex items-center gap-1.5 px-3 h-8 rounded-lg border border-pink-500/30 bg-pink-500/10 text-pink-600 dark:text-pink-400 hover:bg-pink-500/20 transition-colors text-xs sm:text-sm font-medium cursor-pointer"
-      aria-label="Donate"
-    >
-      <span class="material-symbols-outlined text-[18px]">volunteer_activism</span>
-      <span class="hidden sm:inline">Donate</span>
-    </button>
+    <Menu label="Account and display options" triggerIcon="account_circle" minWidth="15rem">
+      <MenuItem label="Donate" icon="volunteer_activism" onSelect={() => (isDonateOpen = true)} />
 
-    <!-- PWA Install Button (visible when install prompt is available) -->
-    {#if canInstall}
-      <button
-        type="button"
-        onclick={promptInstall}
-        class="flex items-center gap-1.5 px-2.5 h-8 rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors text-xs font-medium cursor-pointer"
-        title="Install 9router-go Desktop App"
-        aria-label="Install App"
-      >
-        <span class="material-symbols-outlined text-[18px]">install_desktop</span>
-        <span class="hidden md:inline">Install</span>
-      </button>
-    {/if}
-
-    <!-- 2. Light/Dark theme toggle -->
-    <button
-      type="button"
-      onclick={toggleTheme}
-      class="flex items-center justify-center size-8 rounded-lg text-text-muted hover:text-text-main hover:bg-black/5 dark:hover:bg-white/5 transition-all cursor-pointer"
-      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-      aria-label="Toggle theme"
-    >
-      <span class="material-symbols-outlined text-[20px]">
-        {isDark ? 'light_mode' : 'dark_mode'}
-      </span>
-    </button>
-
-    <!-- 3. Language flag button -->
-    <div class="relative">
-      <button
-        type="button"
-        onclick={() => (isLangMenuOpen = !isLangMenuOpen)}
-        class="flex items-center justify-center size-8 rounded-lg text-text-muted hover:text-text-main hover:bg-black/5 dark:hover:bg-white/5 transition-all cursor-pointer"
-        title="Language"
-        aria-label="Language selection"
-      >
-        <span class="text-base leading-none select-none">🇺🇸</span>
-      </button>
-
-      {#if isLangMenuOpen}
-        <div
-          class="absolute right-0 top-full mt-2 w-36 bg-surface border border-border-subtle rounded-xl shadow-2xl z-50 py-1"
-        >
-          <button
-            type="button"
-            onclick={() => (isLangMenuOpen = false)}
-            class="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-text-main hover:bg-surface-2 transition-colors cursor-pointer"
-          >
-            <span>🇺🇸</span>
-            <span>English</span>
-          </button>
-        </div>
+      {#if canInstall}
+        <MenuItem label="Install App" icon="install_desktop" onSelect={promptInstall} />
       {/if}
-    </div>
 
-    <!-- 4. App drawer launcher icon (grid_view) -->
-    <div class="relative">
-      <button
-        type="button"
-        onclick={() => (isAppDrawerOpen = !isAppDrawerOpen)}
-        class="flex items-center justify-center size-8 rounded-lg text-text-muted hover:text-text-main hover:bg-black/5 dark:hover:bg-white/5 transition-all cursor-pointer"
-        title="Menu"
-        aria-label="App drawer"
-      >
-        <span class="material-symbols-outlined text-[20px]">grid_view</span>
-      </button>
+      <div class="my-1 border-t border-border-subtle" role="separator"></div>
 
-      {#if isAppDrawerOpen}
-        <div
-          class="absolute right-0 top-full mt-2 w-56 bg-surface border border-border-subtle rounded-xl shadow-2xl z-50 py-1 animate-in fade-in zoom-in-95 duration-150"
-        >
-          <button
-            type="button"
-            onclick={() => {
-              isAppDrawerOpen = false
-              toggleTheme()
-            }}
-            class="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-text-main hover:bg-surface-2 transition-colors cursor-pointer"
-          >
-            <span class="material-symbols-outlined text-[20px] text-text-muted">
-              {isDark ? 'light_mode' : 'dark_mode'}
-            </span>
-            <span class="flex-1 text-left">Theme</span>
-          </button>
+      <MenuItem
+        label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+        icon={isDark ? 'light_mode' : 'dark_mode'}
+        onSelect={toggleTheme}
+      />
+      <MenuItem label="Change Log" icon="history" onSelect={() => (isChangelogOpen = true)} />
 
-          <button
-            type="button"
-            onclick={() => {
-              isAppDrawerOpen = false
-              isChangelogOpen = true
-            }}
-            class="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-text-main hover:bg-surface-2 transition-colors cursor-pointer"
-          >
-            <span class="material-symbols-outlined text-[20px] text-text-muted">history</span>
-            <span class="flex-1 text-left">Change Log</span>
-          </button>
-          {#if canInstall}
-            <button
-              type="button"
-              onclick={() => {
-                isAppDrawerOpen = false
-                promptInstall()
-              }}
-              class="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-primary hover:bg-primary/10 transition-colors cursor-pointer"
-            >
-              <span class="material-symbols-outlined text-[20px] text-primary">install_desktop</span>
-              <span class="flex-1 text-left font-medium">Install App</span>
-            </button>
-          {/if}
+      <div class="my-1 border-t border-border-subtle" role="separator"></div>
 
-          <div class="h-px bg-border-subtle my-1"></div>
-
-          <button
-            type="button"
-            onclick={handleLogout}
-            class="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-red-500 hover:bg-red-500/10 transition-colors cursor-pointer"
-          >
-            <span class="material-symbols-outlined text-[20px] text-red-500">logout</span>
-            <span class="flex-1 text-left">Logout</span>
-          </button>
-        </div>
-      {/if}
-    </div>
+      <MenuItem label="Logout" icon="logout" danger onSelect={handleLogout} />
+    </Menu>
   </div>
 </header>
+
+<!-- Escape closes the modal from anywhere on the page. The handler used to sit
+     on the backdrop, which never receives focus, so it never fired; a
+     <svelte:window> binding is the only place it actually runs. -->
+<svelte:window onkeydown={(e) => e.key === 'Escape' && (isDonateOpen = false)} />
 
 <!-- Donate Modal -->
 {#if isDonateOpen}
@@ -399,7 +300,6 @@
     <div
       class="absolute inset-0 bg-black/40 backdrop-blur-sm"
       onclick={() => (isDonateOpen = false)}
-      onkeydown={(e) => e.key === 'Escape' && (isDonateOpen = false)}
       role="button"
       tabindex="-1"
       aria-label="Close background"
@@ -427,12 +327,15 @@
         9router-go is a fast, lightweight and open-source high-throughput AI gateway in Go. If 9router-go saves you time and tokens, consider supporting the project!
       </p>
 
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <!-- Three destinations, stacked rather than tiled: a 2-column grid leaves
+           the third card alone on its own row, and a full-width row per link
+           reads as a list, which is what these are. -->
+      <div class="flex flex-col gap-2.5">
         <a
           href="https://github.com/luqman-v1/9router-go"
           target="_blank"
           rel="noopener noreferrer"
-          class="flex items-center gap-3 p-3.5 rounded-xl border border-border-subtle bg-surface-2 hover:border-brand-500/40 transition-all group"
+          class="flex items-center gap-3 p-3.5 rounded-xl border border-border-subtle bg-surface-2 hover:border-brand-500/40 transition-colors group"
         >
           <div class="size-10 rounded-full flex items-center justify-center bg-brand-500/10 text-brand-500">
             <span class="material-symbols-outlined text-[22px]">star</span>
@@ -449,7 +352,7 @@
           href="https://github.com/luqman-v1/9router-go/releases"
           target="_blank"
           rel="noopener noreferrer"
-          class="flex items-center gap-3 p-3.5 rounded-xl border border-border-subtle bg-surface-2 hover:border-pink-500/40 transition-all group"
+          class="flex items-center gap-3 p-3.5 rounded-xl border border-border-subtle bg-surface-2 hover:border-pink-500/40 transition-colors group"
         >
           <div class="size-10 rounded-full flex items-center justify-center bg-pink-500/10 text-pink-500">
             <span class="material-symbols-outlined text-[22px]">rocket_launch</span>
@@ -459,6 +362,26 @@
               Releases & Updates
             </div>
             <div class="text-xs text-text-muted">Latest releases & changelog</div>
+          </div>
+        </a>
+
+        <!-- Points at the redirect page, not the invite, so a rotated or revoked
+             group link is fixed in site/tg.html without shipping a new binary to
+             everyone already running one. -->
+        <a
+          href={TELEGRAM_GROUP_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="flex items-center gap-3 p-3.5 rounded-xl border border-border-subtle bg-surface-2 hover:border-sky-600/50 dark:hover:border-sky-400/50 transition-colors group"
+        >
+          <div class="size-10 rounded-full flex items-center justify-center bg-sky-500/10 text-sky-600 dark:text-sky-400">
+            <span class="material-symbols-outlined text-[22px]">send</span>
+          </div>
+          <div class="min-w-0">
+            <div class="text-sm font-semibold text-text-main group-hover:text-sky-700 dark:group-hover:text-sky-400 transition-colors">
+              Telegram Group
+            </div>
+            <div class="text-xs text-text-muted">Release notes, questions, provider issues</div>
           </div>
         </a>
       </div>

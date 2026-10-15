@@ -877,9 +877,47 @@ func TestInjectSystemPrompt_NoSystemRoleInsertAtZero(t *testing.T) {
 	}
 }
 
-func TestInjectSystemPrompt_InputKey(t *testing.T) {
+// responsesItem is one decoded entry of an input[] array.
+func responsesItem(t *testing.T, res map[string]any, i int) map[string]any {
+	t.Helper()
+	items, ok := res["input"].([]any)
+	if !ok || len(items) <= i {
+		t.Fatalf("input[%d] missing: %v", i, res["input"])
+	}
+	item, ok := items[i].(map[string]any)
+	if !ok {
+		t.Fatalf("input[%d] is not an object: %v", i, items[i])
+	}
+	return item
+}
+
+// responsesTexts returns the text of every block in an item's content[], which
+// is the only place a Responses message item is allowed to carry text. Reading
+// it any other way is what let a Chat-shaped string through to the wire.
+func responsesTexts(t *testing.T, item map[string]any) []string {
+	t.Helper()
+	blocks, ok := item["content"].([]any)
+	if !ok {
+		t.Fatalf("input item content is %T, want an array of blocks: %v", item["content"], item["content"])
+	}
+	var out []string
+	for _, b := range blocks {
+		bm, ok := b.(map[string]any)
+		if !ok {
+			t.Fatalf("content block is %T, want an object: %v", b, b)
+		}
+		if got, _ := bm["type"].(string); got != "input_text" {
+			t.Errorf("content block type = %q, want input_text", got)
+		}
+		text, _ := bm["text"].(string)
+		out = append(out, text)
+	}
+	return out
+}
+
+func TestInjectSystemPrompt_ResponsesAppendsToDeveloperItem(t *testing.T) {
 	prompt := "system prompt"
-	in := []byte(`{"input":[{"role":"system","content":"original"}]}`)
+	in := []byte(`{"input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"original"}]}]}`)
 	out, ok := InjectSystemPrompt(in, prompt)
 	if !ok {
 		t.Fatal("expected true")
@@ -889,32 +927,67 @@ func TestInjectSystemPrompt_InputKey(t *testing.T) {
 	if _, has := res["messages"]; has {
 		t.Error("unexpected messages key")
 	}
-	content, _ := res["input"].([]any)[0].(map[string]any)["content"].(string)
-	want := "original\n\n" + prompt
-	if content != want {
-		t.Errorf("input content = %q, want %q", content, want)
+	texts := responsesTexts(t, responsesItem(t, res, 0))
+	want := []string{"original", prompt}
+	if len(texts) != len(want) {
+		t.Fatalf("content blocks = %v, want %v", texts, want)
+	}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Errorf("content block %d = %q, want %q", i, texts[i], want[i])
+		}
 	}
 }
 
-func TestInjectSystemPrompt_InputKeyInsertAtZero(t *testing.T) {
-	prompt := "new prompt"
-	in := []byte(`{"input":[{"role":"user","content":"hello"}]}`)
+// A developer turn a client wrote as a plain string is not valid Responses
+// either, but a client does send it — so the prompt must be appended by
+// widening that content into blocks rather than leaving a string in its place.
+func TestInjectSystemPrompt_ResponsesWidensStringContent(t *testing.T) {
+	prompt := "system prompt"
+	in := []byte(`{"input":[{"type":"message","role":"system","content":"original"}]}`)
 	out, ok := InjectSystemPrompt(in, prompt)
 	if !ok {
 		t.Fatal("expected true")
 	}
 	var res map[string]any
 	json.Unmarshal(out, &res)
-	// Should create input array with system message prepended
-	msgs := res["input"].([]any)
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages in input, got %d", len(msgs))
+	texts := responsesTexts(t, responsesItem(t, res, 0))
+	want := []string{"original", prompt}
+	if len(texts) != len(want) {
+		t.Fatalf("content blocks = %v, want %v", texts, want)
 	}
-	if msgs[0].(map[string]any)["role"] != "system" {
-		t.Error("expected first message role to be system")
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Errorf("content block %d = %q, want %q", i, texts[i], want[i])
+		}
 	}
-	if msgs[0].(map[string]any)["content"] != prompt {
-		t.Error("expected first message content to be the prompt")
+}
+
+func TestInjectSystemPrompt_ResponsesInsertsMessageItem(t *testing.T) {
+	prompt := "new prompt"
+	in := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	out, ok := InjectSystemPrompt(in, prompt)
+	if !ok {
+		t.Fatal("expected true")
+	}
+	var res map[string]any
+	json.Unmarshal(out, &res)
+	items := res["input"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items in input, got %d", len(items))
+	}
+	first := responsesItem(t, res, 0)
+	if got, _ := first["type"].(string); got != "message" {
+		// Codex rejects a bare Chat turn here: `400 Unknown parameter:
+		// 'input[0].content'` (#307) — the item has no content block array.
+		t.Errorf("first item type = %q, want message", got)
+	}
+	if got, _ := first["role"].(string); got != "system" {
+		t.Errorf("first item role = %q, want system", got)
+	}
+	texts := responsesTexts(t, first)
+	if len(texts) != 1 || texts[0] != prompt {
+		t.Errorf("first item text = %v, want [%q]", texts, prompt)
 	}
 }
 

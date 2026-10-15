@@ -1,7 +1,9 @@
 package handlerutil
 
 import (
+	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
 	"net/http"
@@ -66,6 +68,40 @@ func WriteJSON(w http.ResponseWriter, status int, data any) {
 	if err := json.MarshalWrite(w, data, deterministicJSON); err != nil {
 		w.Write([]byte(`{"error":{"message":"internal error","type":"invalid_request_error","code":500}}`))
 	}
+}
+
+// WriteJSONIndented writes a JSON response indented with two spaces — the shape
+// the upstream dashboard's backup download produces with JSON.stringify(payload,
+// null, 2). A handler that hands the body to the user as a file uses it so the
+// saved backup stays human-readable.
+func WriteJSONIndented(w http.ResponseWriter, status int, data any) {
+	w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+	w.WriteHeader(status)
+	if err := json.MarshalWrite(w, data, deterministicJSON, jsontext.WithIndent("  ")); err != nil {
+		w.Write([]byte(`{"error":{"message":"internal error","type":"invalid_request_error","code":500}}`))
+	}
+}
+
+func WriteModelsList(w http.ResponseWriter, status int, meta any, modelsJSON []byte) {
+	metaJSON, err := json.Marshal(meta, deterministicJSON)
+	if err != nil {
+		WriteJSONError(w, http.StatusInternalServerError, "failed to encode models")
+		return
+	}
+	trimmed := bytes.TrimRight(metaJSON, " 	\r\n")
+	if !bytes.HasSuffix(trimmed, []byte("}")) {
+		WriteJSONError(w, http.StatusInternalServerError, "failed to encode models")
+		return
+	}
+	w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+	w.WriteHeader(status)
+	trimmed = trimmed[:len(trimmed)-1]
+	_, _ = w.Write(trimmed)
+	_, _ = w.Write([]byte(`,"data":`))
+	_, _ = w.Write(modelsJSON)
+	_, _ = w.Write([]byte(`,"models":`))
+	_, _ = w.Write(modelsJSON)
+	_, _ = w.Write([]byte(`}`))
 }
 
 // UpdateModelInBody returns a copy of body with the "model" field set to modelName.

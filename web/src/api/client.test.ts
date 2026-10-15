@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'bun:test'
-import { api, formatApiError, getAuthHeaders, getStoredAPIKey, isUsableAPIKey, onUnauthorized, responseErrorMessage } from './client'
+import {
+  api,
+  formatApiError,
+  getAuthHeaders,
+  getStoredAPIKey,
+  isUsableAPIKey,
+  normalizeConnection,
+  onUnauthorized,
+  responseErrorMessage,
+  type ProviderConnection,
+} from './client'
 // 键名不在测试里手写：登录态的唯一所有者在 lib/session（候选 8）
 import { API_KEY_STORAGE_KEY, AUTH_FLAG_KEY } from '../lib/session'
 
@@ -236,5 +246,73 @@ describe('dashboard API authentication and errors', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  describe('normalizeConnection providerSpecificData handling', () => {
+    it('preserves providerSpecificData directly from wire when c.data is undefined', () => {
+      const raw = {
+        id: 'conn-1',
+        provider: 'openai',
+        authType: 'apikey',
+        isActive: 1,
+        providerSpecificData: { proxyPoolId: 'pool-test-123' },
+      } as unknown as ProviderConnection
+
+      const normalized = normalizeConnection(raw)
+      expect(normalized.providerSpecificData).toEqual({ proxyPoolId: 'pool-test-123' })
+    })
+
+    it('parses and populates providerSpecificData from legacy c.data JSON string', () => {
+      const raw = {
+        id: 'conn-2',
+        provider: 'openai',
+        authType: 'apikey',
+        isActive: 1,
+        data: JSON.stringify({
+          providerSpecificData: { proxyPoolId: 'pool-legacy-456' },
+        }),
+      } as unknown as ProviderConnection
+
+      const normalized = normalizeConnection(raw)
+      expect(normalized.providerSpecificData).toEqual({ proxyPoolId: 'pool-legacy-456' })
+    })
+
+    it('merges cleanly with wire providerSpecificData taking precedence over parsed data', () => {
+      const raw = {
+        id: 'conn-3',
+        provider: 'openai',
+        authType: 'apikey',
+        isActive: 1,
+        data: JSON.stringify({
+          providerSpecificData: {
+            proxyPoolId: 'pool-legacy-old',
+            customHeader: 'legacy-val',
+          },
+        }),
+        providerSpecificData: {
+          proxyPoolId: 'pool-wire-override',
+          newSetting: true,
+        },
+      } as unknown as ProviderConnection
+
+      const normalized = normalizeConnection(raw)
+      expect(normalized.providerSpecificData).toEqual({
+        proxyPoolId: 'pool-wire-override',
+        customHeader: 'legacy-val',
+        newSetting: true,
+      })
+    })
+
+    it('returns an empty object rather than undefined when no providerSpecificData exists', () => {
+      const raw = {
+        id: 'conn-4',
+        provider: 'openai',
+        authType: 'apikey',
+        isActive: 1,
+      } as unknown as ProviderConnection
+
+      const normalized = normalizeConnection(raw)
+      expect(normalized.providerSpecificData).toEqual({})
+    })
   })
 })

@@ -130,7 +130,7 @@ func logsDetached(cCtx *cli.Context) error {
 // `--name=value` pairs so an explicit false survives the hand-off.
 // Sub-command arguments are dropped: the child only runs the server.
 func forwardArgs(cCtx *cli.Context) []string {
-	names := []string{"rtk", "caveman", "ponytail", "auto-update", "no-injection-guard"}
+	names := []string{"rtk", "caveman", "ponytail", "adhd", "auto-update", "no-injection-guard"}
 	args := make([]string, 0, len(names))
 	for _, name := range names {
 		if !cCtx.IsSet(name) {

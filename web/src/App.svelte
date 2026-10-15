@@ -13,7 +13,6 @@
   } from './api/client'
   import { browserStores, clearAuthed } from './lib/session'
   import AnalyticsView from './components/analytics/AnalyticsView.svelte'
-  import ApiKeysView from './components/ApiKeysView.svelte'
   import CliToolsView from './components/CliToolsView.svelte'
   import CombosView from './components/combos/CombosView.svelte'
   import ConnectionsView from './components/connections/ConnectionsView.svelte'
@@ -28,6 +27,7 @@
   import QuotaTrackerView from './components/QuotaTrackerView.svelte'
   import SkillsView from './components/SkillsView.svelte'
   import SettingsView from './components/SettingsView.svelte'
+  import SecurityPanel from './components/security/SecurityPanel.svelte'
   import Sidebar from './components/Sidebar.svelte'
   import UpdateModal from './components/UpdateModal.svelte'
   import type { SystemVersionInfo } from './api/client'
@@ -231,6 +231,10 @@
     endpoint: { title: 'Endpoint & Key', description: 'API endpoint and key configuration' },
     connections: { title: 'Providers & Endpoints', description: 'Manage your AI provider connections' },
     combos: { title: 'Combo & Routing', description: 'Model combos and failover strategies' },
+    // The two moved tabs are sections of the Usage page, so the TopBar keeps
+    // the Usage title and the section's own header below it names the section.
+    'usage-cache': { title: 'Usage & Analytics', description: 'Monitor your API usage, token consumption, and request logs' },
+    'usage-compression': { title: 'Usage & Analytics', description: 'Monitor your API usage, token consumption, and request logs' },
     analytics: { title: 'Usage & Analytics', description: 'Monitor your API usage, token consumption, and request logs' },
     quota: { title: 'Quota Tracker', description: 'Track and manage your API quota limits' },
     'token-saver': { title: 'Token Saver', description: 'Compress prompts and outputs to save tokens' },
@@ -246,7 +250,6 @@
     'console-log': { title: 'Console Log', description: 'Live server console output' },
     terminal: { title: 'Console Log', description: 'Live server console output' },
     settings: { title: 'Settings', description: 'Manage your preferences and configuration' },
-    keys: { title: 'CLI & Remote Access', description: 'API keys for your CLI tools' },
   }
 
   function handleOpenNewCombo() {
@@ -358,16 +361,16 @@
               />
             {:else if activeTab === 'combos'}
               <CombosView {combos} {connections} {providerNodes} onRefresh={loadData} bind:isCreatingOpen={isCreateComboOpen} />
-            {:else if activeTab === 'analytics'}
-              <AnalyticsView {connections} {providerNodes} />
+            {:else if activeTab === 'analytics' || activeTab === 'usage-cache' || activeTab === 'usage-compression'}
+              <!-- Cache and Compression Analytics are Usage sections (#200);
+                   AnalyticsView renders all four sections under one header. -->
+              <AnalyticsView {connections} {providerNodes} tab={activeTab} onNavigate={(next) => navigate(next)} />
             {:else if activeTab === 'quota'}
               <QuotaTrackerView {connections} />
             {:else if activeTab === 'token-saver'}
               <TokenSaverView {settings} onRefresh={loadData} />
             {:else if activeTab === 'cli-tools'}
               <CliToolsView {apiKeys} onRefresh={loadData} />
-            {:else if activeTab === 'keys'}
-              <ApiKeysView {apiKeys} onRefresh={loadData} />
             {:else if activeTab === 'media-embedding'}
               {#if selectedMedia && selectedMediaCatalogItem}
                 <MediaProviderDetail
@@ -548,6 +551,8 @@
               <TerminalView />
             {:else if activeTab === 'settings'}
               <ProfileSettingsView {settings} onRefresh={loadData} />
+            {:else if activeTab === 'security'}
+              <SecurityPanel />
             {/if}
           {/if}
         </div>

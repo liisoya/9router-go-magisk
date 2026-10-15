@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/models"
 )
 
@@ -40,12 +41,19 @@ func (r *Repo) UpdateProviderConnection(id string, name string, priority *int, i
 // a full-row update writes back the name/isActive/priority they read before the
 // write, which reverts a reorder or a toggle the user just performed.
 func (r *Repo) UpdateConnectionData(id string, data string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := r.db.Exec(
-		`UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?`,
-		data, now, id,
-	)
+	// Seal before the data write so a credential is never briefly readable in
+	// `data` after this call returns. A payload with no whitelisted credential
+	// (a background writer touching only expiresAt) is stored verbatim and the
+	// existing sealed slots are left alone.
+	sealed, err := r.sealOnWrite(id, data)
 	if err != nil {
+		return err
+	}
+	now := nowUTC()
+	if _, err = r.db.Exec(
+		`UPDATE providerConnections SET data = ?, updatedAt = ? WHERE id = ?`,
+		sealed, now, id,
+	); err != nil {
 		return fmt.Errorf("update connection data %s: %w", id, err)
 	}
 	return nil
@@ -210,8 +218,12 @@ func (r *Repo) DeleteCombo(id string) error {
 }
 
 // GetApiKeys retrieves all client API keys ordered by createdAt DESC.
+//
+// The read goes through the shared apiKeyColumns/apiKeyScan pair so a new
+// governance column is added in exactly one place; a hand-copied SELECT here
+// is how a column silently stops being returned to the dashboard.
 func (r *Repo) GetApiKeys() ([]*models.APIKey, error) {
-	rows, err := r.db.Query(`SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys ORDER BY createdAt DESC`)
+	rows, err := r.db.Query(apiKeyColumns + ` FROM apiKeys ORDER BY createdAt DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("get api keys: %w", err)
 	}
@@ -220,9 +232,11 @@ func (r *Repo) GetApiKeys() ([]*models.APIKey, error) {
 	keys := make([]*models.APIKey, 0)
 	for rows.Next() {
 		var k models.APIKey
-		if err := rows.Scan(&k.ID, &k.Key, &k.Name, &k.MachineID, &k.IsActive, &k.CreatedAt); err != nil {
+		dest, apply := apiKeyScan(&k)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("scan api key: %w", err)
 		}
+		apply()
 		keys = append(keys, &k)
 	}
 	if err := rows.Err(); err != nil {
@@ -269,6 +283,110 @@ func (r *Repo) SetApiKeyStatus(id string, isActive bool) error {
 	_, err := r.db.Exec(`UPDATE apiKeys SET isActive = ? WHERE id = ?`, activeInt, id)
 	if err != nil {
 		return fmt.Errorf("set api key status %s: %w", id, err)
+	}
+	return nil
+}
+
+// UpdateApiKeyUsage increments usedCount and sets lastUsedAt.
+func (r *Repo) UpdateApiKeyUsage(keyID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := r.db.Exec(
+		`UPDATE apiKeys SET lastUsedAt = ?, usedCount = usedCount + 1 WHERE id = ?`,
+		now, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("update api key usage %s: %w", keyID, err)
+	}
+	return nil
+}
+
+// SetApiKeyRateLimit updates rate limit columns for an API key.
+func (r *Repo) SetApiKeyRateLimit(keyID string, rpm, tpm, concurrency int) error {
+	_, err := r.db.Exec(
+		`UPDATE apiKeys SET rateLimitRPM = ?, rateLimitTPM = ?, rateLimitConcurrency = ? WHERE id = ?`,
+		rpm, tpm, concurrency, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("set api key rate limit %s: %w", keyID, err)
+	}
+	return nil
+}
+
+// SetApiKeyBudget updates the cumulative token quota and the concurrency-queue
+// timeout for an API key (F-1b).
+//
+// Both are whole non-negative counts where 0 means "unset": a quota of 0 is
+// unlimited and a queue timeout of 0 falls back to the server default, exactly
+// as the dashboard's own columns read them.
+func (r *Repo) SetApiKeyBudget(keyID string, tokenQuota, queueTimeoutMs int) error {
+	_, err := r.db.Exec(
+		`UPDATE apiKeys SET tokenQuota = ?, queueTimeoutMs = ? WHERE id = ?`,
+		tokenQuota, queueTimeoutMs, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("set api key budget %s: %w", keyID, err)
+	}
+	return nil
+}
+
+// GetApiKeyTokenUsage returns the cumulative prompt+completion tokens a key has
+// spent over its whole life, which is what tokenQuota is measured against.
+//
+// Matching is by the raw key's masked form, because that is what this gateway
+// writes into usageHistory (maskAPIKey). The stored value is not uniform across
+// a shared database: rows the upstream Next.js dashboard wrote keep the full
+// key, so both spellings are matched. A missing or empty history is 0 tokens
+// spent, not an error — a fresh key has simply spent nothing.
+func (r *Repo) GetApiKeyTokenUsage(rawKey string) (int, error) {
+	if rawKey == "" {
+		return 0, nil
+	}
+	var used int64
+	err := r.db.QueryRow(
+		`SELECT COALESCE(SUM(COALESCE(promptTokens,0) + COALESCE(completionTokens,0)), 0)
+		   FROM usageHistory WHERE apiKey = ? OR apiKey = ?`,
+		rawKey, handlerutil.MaskAPIKey(rawKey),
+	).Scan(&used)
+	if err != nil {
+		return 0, fmt.Errorf("get api key token usage: %w", err)
+	}
+	return int(used), nil
+}
+
+// SetApiKeyExpiry sets expiresAt for an API key.
+func (r *Repo) SetApiKeyExpiry(keyID, expiresAt string) error {
+	_, err := r.db.Exec(
+		`UPDATE apiKeys SET expiresAt = ? WHERE id = ?`,
+		expiresAt, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("set api key expiry %s: %w", keyID, err)
+	}
+	return nil
+}
+
+// SetApiKeyMetadata sets metadata JSON for an API key.
+func (r *Repo) SetApiKeyMetadata(keyID, metadata string) error {
+	_, err := r.db.Exec(
+		`UPDATE apiKeys SET metadata = ? WHERE id = ?`,
+		metadata, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("set api key metadata %s: %w", keyID, err)
+	}
+	return nil
+}
+
+// SetApiKeyName renames an API key. The name is operator-facing only — it never
+// reaches the wire — so an empty value clears it and the UI falls back to the
+// masked display.
+func (r *Repo) SetApiKeyName(keyID, name string) error {
+	_, err := r.db.Exec(
+		`UPDATE apiKeys SET name = ? WHERE id = ?`,
+		name, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("set api key name %s: %w", keyID, err)
 	}
 	return nil
 }

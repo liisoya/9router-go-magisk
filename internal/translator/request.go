@@ -353,6 +353,10 @@ func convertToolChoice(choiceRaw *jsontext.Value) any {
 			return "auto"
 		case "any":
 			return "required"
+		case "none":
+			// "none" forbids tool calls; folding it into "auto" would hand the
+			// model a permission the client withheld (parity #4577).
+			return "none"
 		case "tool":
 			return map[string]any{
 				"type": "function",
@@ -364,6 +368,17 @@ func convertToolChoice(choiceRaw *jsontext.Value) any {
 	}
 	log.Warn("translator", "convert tool choice failed", "raw", string(*choiceRaw))
 	return "auto"
+}
+
+// claudeDisablesParallelToolUse reports whether a Claude tool_choice object
+// forbids parallel tool calls. The flag is Claude-only, so it never appears on
+// the string form or on a payload without a tool_choice object.
+func claudeDisablesParallelToolUse(choiceRaw jsontext.Value) bool {
+	var choiceObj ClaudeToolChoice
+	if err := json.Unmarshal(choiceRaw, &choiceObj); err != nil {
+		return false
+	}
+	return choiceObj.DisableParallelToolUse
 }
 
 // TranslateClaudeToOpenAI converts a Claude request payload to an OpenAI request payload.
@@ -411,6 +426,7 @@ func TranslateClaudeToOpenAI(claudeBody []byte) ([]byte, error) {
 					Name:        tool.Name,
 					Description: tool.Description,
 					Parameters:  tool.InputSchema,
+					Strict:      tool.Strict,
 				},
 			})
 		}
@@ -419,6 +435,12 @@ func TranslateClaudeToOpenAI(claudeBody []byte) ([]byte, error) {
 
 	if creq.ToolChoice != nil {
 		oreq.ToolChoice = convertToolChoice(creq.ToolChoice)
+	}
+
+	// Claude states the single-tool-call policy inside tool_choice; OpenAI
+	// states it beside it (parity with decolua/9router#4581).
+	if creq.ToolChoice != nil && claudeDisablesParallelToolUse(*creq.ToolChoice) {
+		oreq.ParallelToolCalls = new(false)
 	}
 
 	// Claude thinking config → OpenAI reasoning_effort
@@ -461,10 +483,16 @@ func TranslateClaudeToOpenAI(claudeBody []byte) ([]byte, error) {
 // This sanitizes before forwarding to a Claude/Anthropic upstream:
 //   - drops server_tool_use whose id doesn't match srvtoolu_ pattern
 //   - drops paired tool_result/web_search_tool_result referencing dropped ids
-//   - strips empty text blocks and drops messages that end up empty (Anthropic rejects empty content)
+//   - strips empty text blocks and drops messages that end up with no content
+//     Anthropic accepts (upstream #4316: a container_upload-only turn is content)
+//   - restores a trailing user turn when the cleanup left an assistant tail
+//
+// intentionalPrefill says the client itself ended on an assistant turn (see
+// ClaudeIntentionalPrefill); in that case the assistant tail is a prefill the
+// client asked for and must survive untouched.
 var serverToolUseIDRegex = regexp.MustCompile(`^srvtoolu_[a-zA-Z0-9_]+$`)
 
-func SanitizeClaudePassthrough(body []byte) []byte {
+func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return body
@@ -489,8 +517,8 @@ func SanitizeClaudePassthrough(body []byte) []byte {
 		if !ok {
 			continue
 		}
-		contentRaw, ok := msgMap["content"]
-		if !ok {
+		contentRaw, exists := msgMap["content"]
+		if !exists {
 			continue
 		}
 		blocks, ok := contentRaw.([]any)
@@ -513,12 +541,13 @@ func SanitizeClaudePassthrough(body []byte) []byte {
 					continue
 				}
 			}
-			// Strip empty text blocks (Anthropic 400s on empty text)
-			if bType == "text" {
-				if txt, _ := block["text"].(string); strings.TrimSpace(txt) == "" {
-					changed = true
-					continue
-				}
+			// Strip empty text blocks (Anthropic 400s on empty text). The same
+			// emptiness rule decides whether the whole message survives below,
+			// so both read it from one place — a whitespace-only block must not
+			// slip through one pass and be dropped by the other.
+			if bType == "text" && !isContentfulBlock(block) {
+				changed = true
+				continue
 			}
 			kept = append(kept, bRaw)
 		}
@@ -565,9 +594,15 @@ func SanitizeClaudePassthrough(body []byte) []byte {
 		}
 	}
 
-	// Third pass: drop messages that ended up with empty content (Anthropic rejects empty array)
+// Third pass: drop messages whose content carries nothing Anthropic accepts.
+	// isContentfulContent enumerates the block types that count as content, so
+	// an empty array, a blank string and a whitespace-only text turn all go,
+	// while a turn holding only a container_upload (Files API) stays (upstream
+	// #4316). The trailing user turn is kept even when it is empty — the tail
+	// repair below replaces its content instead of letting an assistant turn
+	// become last.
 	var filtered []any
-	for _, mRaw := range messagesRaw {
+	for i, mRaw := range messagesRaw {
 		msgMap, ok := mRaw.(map[string]any)
 		if !ok {
 			filtered = append(filtered, mRaw)
@@ -578,28 +613,27 @@ func SanitizeClaudePassthrough(body []byte) []byte {
 			filtered = append(filtered, mRaw)
 			continue
 		}
-		switch c := contentRaw.(type) {
-		case string:
-			if strings.TrimSpace(c) == "" {
-				changed = true
-				continue
-			}
-		case []any:
-			if len(c) == 0 {
-				changed = true
-				continue
-			}
+		if !isContentfulContent(contentRaw) && !isTrailingUserTurn(messagesRaw, i) {
+			changed = true
+			continue
 		}
 		filtered = append(filtered, mRaw)
 	}
-	if len(filtered) != len(messagesRaw) {
-		req["messages"] = filtered
+
+// Newer Claude models refuse a body ending on an assistant turn ("does not
+// support assistant message prefill"). A prefill the client wrote itself is
+// its own choice and stays; one that only exists because the cleanup left
+// the last user turn empty is repaired (upstream ensureTrailingUserTurn,
+// open-sse/translator/formats/claude.js:345-349).
+	repaired := EnsureTrailingUserTurn(filtered, intentionalPrefill)
+	if len(repaired) != len(filtered) || !sameTail(repaired, filtered) {
+		filtered = repaired
 		changed = true
 	}
-
 	if !changed {
 		return body
 	}
+	req["messages"] = filtered
 	if out, err := json.Marshal(req); err == nil {
 		return out
 	}
@@ -662,6 +696,10 @@ func normalizeMessageContent(msgMap map[string]any) {
 		msgMap["content"] = []any{c}
 	}
 }
+
+// cacheControlMarkerBudget is how many cache_control markers a Messages
+// request may carry — the upstream API's hard limit.
+const cacheControlMarkerBudget = 4
 
 func countCacheControlBlocks(req map[string]any) int {
 	n := 0
@@ -747,7 +785,7 @@ func capCacheControlBlocks(req map[string]any) {
 		}
 	}
 
-	keep := 4 - len(headMarkers)
+	keep := cacheControlMarkerBudget - len(headMarkers)
 	if keep < 0 {
 		keep = 0
 	}
@@ -760,8 +798,9 @@ func capCacheControlBlocks(req map[string]any) {
 	}
 }
 
-// AnchorClaudeCache ensures prompt-caching breakpoints land on system/tool head anchors
-// and at most 4 cache_control markers are dispatched (parity with #3567 / #8a81085a).
+// AnchorClaudeCache ensures prompt-caching breakpoints land on system/tool head anchors,
+// the tool loop's final tool results, and at most 4 cache_control markers are dispatched
+// (parity with #3567 / #8a81085a / upstream #49c761cd).
 func AnchorClaudeCache(body []byte) []byte {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -812,8 +851,8 @@ func AnchorClaudeCache(body []byte) []byte {
 		}
 	}
 
-	// 4. Budget guard: if already >= 4 markers, cap and return
-	if countCacheControlBlocks(req) >= 4 {
+	// 4. Budget guard: if already >= the marker budget, cap and return
+	if countCacheControlBlocks(req) >= cacheControlMarkerBudget {
 		capCacheControlBlocks(req)
 		if out, err := json.Marshal(req); err == nil {
 			return out
@@ -821,7 +860,11 @@ func AnchorClaudeCache(body []byte) []byte {
 		return body
 	}
 
-	// 5. Ensure total cache_control blocks <= 4
+	// 5. A tool loop's final tool results sit after the head anchors, so they
+	//    get the remaining slot of the budget when one is free.
+	markFinalToolResults(req)
+
+	// 6. Ensure total cache_control blocks <= the marker budget.
 	capCacheControlBlocks(req)
 
 	out, err := json.Marshal(req)

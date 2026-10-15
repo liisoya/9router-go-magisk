@@ -19,8 +19,15 @@
     newResetCreditIdempotencyKey,
   } from '../lib/codexResetCredit'
   import { PROVIDER_CATALOG } from '../lib/providers'
+  import { copyToClipboard } from '../lib/clipboard'
+  import { emailPrivacy, formatEmailLabel } from '../lib/privacy'
   import Toggle from '../lib/ui/Toggle.svelte'
+  import Menu from '../lib/ui/Menu.svelte'
+  import MenuItem from '../lib/ui/MenuItem.svelte'
+  import { maxPanelWidth, placePanel, placementStyle } from '../lib/ui/menuPosition'
+  import { portal } from '../lib/ui/portal'
   import { getIconPath } from './connections/types'
+  import EditConnectionModal, { type ConnectionUpdate } from './connections/EditConnectionModal.svelte'
   import QuotaTable from './quota/QuotaTable.svelte'
   import {
     ACCOUNT_FILTER_OPTIONS,
@@ -86,9 +93,37 @@
   let providerFilter = $state('all')
   let providerOptions = $state<string[]>([])
   let providerMenuOpen = $state(false)
+  // The provider panel is `position: fixed` so it cannot be clipped by the
+  // page's scroll container; measuring it against the trigger keeps it on
+  // screen at phone widths (issue #224).
+  let providerDropdownRoot: HTMLDivElement | null = $state(null)
+  let providerDropdownPanel: HTMLDivElement | null = $state(null)
+  let providerPanelStyle = $state('')
+
+  /** The panel's preferred width, capped against the viewport at placement. */
+  const PROVIDER_PANEL_MIN_WIDTH = '16rem'
+
+  function placeProviderPanel(): void {
+    const trigger = providerDropdownRoot?.querySelector('button')
+    if (!trigger || !providerDropdownPanel) return
+    providerPanelStyle = `${placementStyle(
+      placePanel({
+        align: 'left',
+        rect: trigger.getBoundingClientRect(),
+        panelWidth: providerDropdownPanel.offsetWidth,
+      }),
+    )};max-width:${maxPanelWidth()};min-width:min(${PROVIDER_PANEL_MIN_WIDTH}, ${maxPanelWidth()})`
+  }
+
   let accountFilter = $state('all')
   let quotaSortMode = $state('default')
   let expiringFirst = $state(false)
+
+  // The panel's width is only known once it renders, so placement runs on the
+  // render that opens it rather than on the click.
+  $effect(() => {
+    if (providerMenuOpen && providerDropdownPanel) placeProviderPanel()
+  })
 
   // Pagination
   let page = $state(1)
@@ -109,14 +144,8 @@
     codex: {},
   })
 
-  // Edit modal state
+  // Edit modal state. The modal itself owns its fields and payload (issue #158).
   let editingConnection = $state<ProviderConnection | null>(null)
-  let editName = $state('')
-  let editPriority = $state(1)
-  let isTestingEdit = $state(false)
-  let editTestStatus = $state<'ok' | 'error' | null>(null)
-  let editTestError = $state<string | null>(null)
-  let isSavingEdit = $state(false)
   let copiedArnId = $state<string | null>(null)
 
   // Timers
@@ -297,7 +326,7 @@
     // the double-redeem this was meant to prevent. Every attempt within one
     // open session then shares a key, so a retried or double-submitted confirm
     // cannot spend a second credit.
-    resetCreditIdempotencyKey = newIdempotencyKey()
+    resetCreditIdempotencyKey = newResetCreditIdempotencyKey()
     resetCreditLoading = true
     try {
       const res = await api.listCodexResetCredits(conn.id)
@@ -365,55 +394,22 @@
     }
   }
 
+  // Edit modal. Fields, probe and payload live in EditConnectionModal (issue
+  // #158); this only decides when it opens and who refreshes the list.
   function openEditModal(conn: ProviderConnection) {
     editingConnection = conn
-    editName = conn.name || ''
-    editPriority = conn.priority ?? 1
-    editTestStatus = null
-    editTestError = null
   }
 
-  async function testEditingConnection() {
+  async function saveEditingConnection(payload: ConnectionUpdate) {
     if (!editingConnection) return
-    isTestingEdit = true
-    editTestStatus = null
-    editTestError = null
-    try {
-      const res = await api.testConnection(editingConnection.id)
-      if (res?.valid) {
-        editTestStatus = 'ok'
-      } else {
-        editTestStatus = 'error'
-        editTestError = res?.error || 'Test failed'
-      }
-    } catch (err) {
-      editTestStatus = 'error'
-      editTestError = err instanceof Error ? err.message : 'Test failed'
-    } finally {
-      isTestingEdit = false
-    }
-  }
-
-  async function saveEditingConnection() {
-    if (!editingConnection) return
-    isSavingEdit = true
-    try {
-      await api.updateConnection(editingConnection.id, {
-        name: editName.trim(),
-        priority: editPriority,
-      })
-      editingConnection = null
-      await fetchConnections(page)
-    } catch (err) {
-      console.error('Failed to save connection:', err)
-    } finally {
-      isSavingEdit = false
-    }
+    await api.updateConnection(editingConnection.id, payload)
+    editingConnection = null
+    await fetchConnections(page)
   }
 
   function copyArn(text?: string, id?: string) {
     if (!text || !id) return
-    navigator.clipboard?.writeText(text)
+    copyToClipboard(text)
     copiedArnId = id
     setTimeout(() => {
       if (copiedArnId === id) copiedArnId = null
@@ -742,6 +738,39 @@
       connections = initialConns
     }
 
+  // A filter is not navigation, so the URL is rewritten rather than pushed:
+  // the back button must not walk through every provider the operator clicked
+  // through. 'all' removes the parameter instead of pinning it.
+  $effect(() => {
+    void providerFilter
+    if (!initialLoadDone || typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    if (providerFilter && providerFilter !== 'all') {
+      url.searchParams.set('provider', providerFilter)
+    } else {
+      url.searchParams.delete('provider')
+    }
+    if (url.href !== window.location.href) {
+      window.history.replaceState(window.history.state, '', url)
+    }
+  })
+
+  // An unknown provider yields an empty list and an empty dropdown, so the
+  // deep link is released once the real option list is known.
+  $effect(() => {
+    if (!initialLoadDone || providerFilter === 'all') return
+    if (providerOptions.length === 0) return
+    if (providerOptions.includes(providerFilter)) return
+    providerFilter = 'all'
+  })
+
+    // A ?provider= deep link must survive a reload and be shareable, so the
+    // filter starts from the URL rather than always 'all'. An unknown value is
+    // kept until the option list arrives, then dropped — ignoring it up front
+    // would silently un-filter the page for anyone holding an old bookmark.
+    const deepLinkProvider = new URLSearchParams(window.location.search).get('provider')
+    if (deepLinkProvider) providerFilter = deepLinkProvider
+
     // Hydrate auto-refresh preference
     const stored = window.localStorage.getItem(AUTO_REFRESH_STORAGE_KEY)
     autoRefresh = stored === null ? true : stored === 'true'
@@ -779,19 +808,33 @@
     }
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
-    // Close provider dropdown on outside click
+    // The provider filter closes when a click lands outside either the trigger
+    // or the panel. The panel is `position: fixed` and detached from the
+    // trigger's subtree, so `closest()` on an ancestor id would no longer
+    // cover it (issue #224).
     function handleDocClick(e: MouseEvent): void {
       const target = e.target as HTMLElement | null
-      if (!target?.closest('#provider-dropdown-container')) {
+      if (
+        !providerDropdownRoot?.contains(target) &&
+        !providerDropdownPanel?.contains(target)
+      ) {
         providerMenuOpen = false
       }
     }
     document.addEventListener('click', handleDocClick)
 
+    function repositionProviderPanel(): void {
+      placeProviderPanel()
+    }
+    window.addEventListener('resize', repositionProviderPanel)
+    window.addEventListener('scroll', repositionProviderPanel, true)
+
     return () => {
       stopTimers()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       document.removeEventListener('click', handleDocClick)
+      window.removeEventListener('resize', repositionProviderPanel)
+      window.removeEventListener('scroll', repositionProviderPanel, true)
     }
   })
 
@@ -822,14 +865,24 @@
   function handleAccountFilterChange(): void {
     page = 1
   }
+
+  function selectProviderFilter(next: string): void {
+    if (shouldResetPage(providerFilter, next)) page = 1
+    providerFilter = next
+    providerMenuOpen = false
+  }
 </script>
 
 <div class="space-y-6">
   <!-- Header Controls -->
-  <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-end">
+  <!-- Header Controls: what the operator filters by stays visible, and every
+       verb moves into one menu. Email masking, expiring-first ordering, both
+       bulk toggles, auto-refresh and refresh were six more controls in this
+       row, which is what made it wrap onto a second line (issue #224). -->
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
     <div class="flex flex-wrap items-center gap-1.5">
       <!-- Provider filter dropdown -->
-      <div class="relative" id="provider-dropdown-container">
+      <div class="relative" bind:this={providerDropdownRoot}>
         <button
           type="button"
           onclick={() => (providerMenuOpen = !providerMenuOpen)}
@@ -857,22 +910,18 @@
         </button>
 
         {#if providerMenuOpen}
-          <button
-            type="button"
-            class="fixed inset-0 z-30 cursor-default bg-transparent"
-            aria-label="Close provider filter"
-            onclick={() => (providerMenuOpen = false)}
-          ></button>
           <div
-            class="absolute left-0 top-full z-40 mt-2 w-64 overflow-hidden rounded-2xl border border-border-subtle bg-surface p-1.5 shadow-xl sm:w-72"
+            use:portal
+            bind:this={providerDropdownPanel}
+            role="menu"
+            aria-label="Filter quota providers"
+            tabindex="-1"
+            style={providerPanelStyle}
+            class="fixed z-50 w-max rounded-xl border border-border bg-surface p-1.5 shadow-[var(--shadow-elev)]"
           >
             <button
               type="button"
-              onclick={() => {
-                if (shouldResetPage(providerFilter, 'all')) page = 1
-                providerFilter = 'all'
-                providerMenuOpen = false
-              }}
+              onclick={() => selectProviderFilter('all')}
               class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors {providerFilter ===
               'all'
                 ? 'bg-brand-500/10 text-brand-500'
@@ -889,11 +938,7 @@
               {#each providerOptions as prov (prov)}
                 <button
                   type="button"
-                  onclick={() => {
-                    if (shouldResetPage(providerFilter, prov)) page = 1
-                    providerFilter = prov
-                    providerMenuOpen = false
-                  }}
+                  onclick={() => selectProviderFilter(prov)}
                   class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors {providerFilter ===
                   prov
                     ? 'bg-brand-500/10 text-brand-500'
@@ -943,76 +988,52 @@
         </select>
       {/if}
 
-      <!-- Expiring first -->
-      <button
-        type="button"
-        onclick={() => (expiringFirst = !expiringFirst)}
-        aria-pressed={expiringFirst}
-        class="flex h-8 shrink-0 items-center gap-1 rounded-lg border px-2 text-xs transition-colors {expiringFirst
-          ? 'border-amber-500/40 bg-amber-500/10 text-amber-500'
-          : 'border-border-subtle bg-surface text-text-main hover:bg-surface-2'}"
-        title="Sort accounts by earliest quota reset time"
-      >
-        <span class="material-symbols-outlined text-[14px]">hourglass_top</span>
-        <span class="hidden sm:inline">Expiring first</span>
-      </button>
+      <Menu label="Quota tracker actions" triggerIcon="tune" minWidth="17rem">
+        <MenuItem
+          label={$emailPrivacy ? 'Show full emails' : 'Mask emails'}
+          icon={$emailPrivacy ? 'visibility' : 'visibility_off'}
+          onSelect={() => emailPrivacy.toggle()}
+        />
+        <MenuItem
+          label="Expiring first"
+          icon="hourglass_top"
+          checkbox
+          pressed={expiringFirst}
+          onSelect={() => (expiringFirst = !expiringFirst)}
+        />
 
-      <!-- Bulk: disable depleted -->
-      <button
-        type="button"
-        onclick={handleDisableDepleted}
-        disabled={bulkToggling}
-        class="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-red-500/30 px-2 text-xs text-red-500 transition-colors hover:bg-red-500/10 disabled:opacity-50"
-        title="Disable connections with depleted quota on the current page"
-      >
-        <span class="material-symbols-outlined text-[14px]">block</span>
-        <span class="hidden sm:inline">Turn off Empty</span>
-      </button>
+        <div class="my-1 border-t border-border-subtle" role="separator"></div>
 
-      <!-- Bulk: enable available -->
-      <button
-        type="button"
-        onclick={handleEnableAvailable}
-        disabled={bulkToggling}
-        class="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-emerald-500/30 px-2 text-xs text-emerald-500 transition-colors hover:bg-emerald-500/10 disabled:opacity-50"
-        title="Enable connections that still have quota on the current page"
-      >
-        <span class="material-symbols-outlined text-[14px]">check_circle</span>
-        <span class="hidden sm:inline">Turn on Available</span>
-      </button>
+        <MenuItem
+          label="Disable depleted accounts"
+          icon="block"
+          disabled={bulkToggling}
+          onSelect={handleDisableDepleted}
+        />
+        <MenuItem
+          label="Enable accounts with quota"
+          icon="check_circle"
+          disabled={bulkToggling}
+          onSelect={handleEnableAvailable}
+        />
 
-      <!-- Auto-refresh toggle -->
-      <button
-        type="button"
-        onclick={() => (autoRefresh = !autoRefresh)}
-        class="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-border-subtle bg-surface px-2 text-xs transition-colors hover:bg-surface-2"
-        title={autoRefresh ? 'Disable auto-refresh' : 'Enable auto-refresh'}
-      >
-        <span
-          class="material-symbols-outlined text-[14px] {autoRefresh
-            ? 'text-brand-500'
-            : 'text-text-muted'}"
-        >
-          {autoRefresh ? 'toggle_on' : 'toggle_off'}
-        </span>
-        <span class="hidden text-text-main sm:inline">Auto-refresh</span>
-        {#if autoRefresh}
-          <span class="text-[10px] tabular-nums text-text-muted">({countdown}s)</span>
-        {/if}
-      </button>
+        <div class="my-1 border-t border-border-subtle" role="separator"></div>
 
-      <!-- Refresh all -->
-      <button
-        type="button"
-        onclick={() => refreshAll(true)}
-        disabled={refreshingAll}
-        class="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-border-subtle bg-surface px-2 text-xs text-text-main transition-colors hover:bg-surface-2 disabled:opacity-50"
-        title="Refresh all"
-      >
-        <span class="material-symbols-outlined text-[14px] {refreshingAll ? 'animate-spin' : ''}">
-          refresh
-        </span>
-      </button>
+        <MenuItem
+          label="Auto-refresh"
+          icon="sync"
+          checkbox
+          pressed={autoRefresh}
+          note={autoRefresh ? `${countdown}s` : ''}
+          onSelect={() => (autoRefresh = !autoRefresh)}
+        />
+        <MenuItem
+          label="Refresh all"
+          icon="refresh"
+          disabled={refreshingAll}
+          onSelect={() => refreshAll(true)}
+        />
+      </Menu>
     </div>
   </div>
 
@@ -1086,10 +1107,10 @@
                     {providerLabel(conn.provider)}
                   </h3>
                   {#if getConnectionLabel(conn)}
-                    <p class="truncate text-xs text-text-muted">{getConnectionLabel(conn)}</p>
+                    <p class="truncate text-xs text-text-muted">{formatEmailLabel(getConnectionLabel(conn), $emailPrivacy)}</p>
                   {/if}
                   {#if getConnectionSecondaryLabel(conn)}
-                    <p class="truncate text-[11px] text-text-muted/80">{getConnectionSecondaryLabel(conn)}</p>
+                    <p class="truncate text-[11px] text-text-muted/80">{formatEmailLabel(getConnectionSecondaryLabel(conn), $emailPrivacy)}</p>
                   {/if}
                   {#if conn.provider === 'kiro'}
                     <div class="mt-1 flex flex-wrap items-center gap-1">
@@ -1361,91 +1382,13 @@
 </div>
 
 {#if editingConnection}
-  <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-    <div
-      class="absolute inset-0 bg-black/50 backdrop-blur-[2px]"
-      onclick={() => (editingConnection = null)}
-      role="presentation"
-    ></div>
-    <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-[14px] shadow-[var(--shadow-elev)] p-6">
-      <div class="flex items-center justify-between pb-3 border-b border-border-subtle mb-4">
-        <h2 class="text-lg font-semibold text-text-main">Edit Connection</h2>
-        <button
-          type="button"
-          onclick={() => (editingConnection = null)}
-          class="p-1 rounded text-text-muted hover:text-text-main cursor-pointer"
-        >
-          <span class="material-symbols-outlined text-lg">close</span>
-        </button>
-      </div>
-
-      <div class="space-y-4">
-        <div>
-          <label class="block text-xs font-medium text-text-muted mb-1" for="edit-quota-name">Name</label>
-          <input
-            id="edit-quota-name"
-            bind:value={editName}
-            class="w-full px-2.5 py-1.5 text-xs border border-border rounded-md bg-background text-text-main focus:outline-none focus:border-primary"
-          />
-        </div>
-
-        <div>
-          <label class="block text-xs font-medium text-text-muted mb-1" for="edit-quota-priority">Priority</label>
-          <input
-            id="edit-quota-priority"
-            type="number"
-            min="1"
-            max="100"
-            bind:value={editPriority}
-            class="w-full px-2.5 py-1.5 text-xs border border-border rounded-md bg-background text-text-main focus:outline-none focus:border-primary"
-          />
-        </div>
-
-        {#if editTestStatus === 'ok'}
-          <div class="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
-            <span class="material-symbols-outlined text-sm">check_circle</span>
-            Connection is reachable
-          </div>
-        {:else if editTestStatus === 'error'}
-          <div class="flex items-center gap-1.5 text-xs text-red-500">
-            <span class="material-symbols-outlined text-sm">error</span>
-            {editTestError || 'Test failed'}
-          </div>
-        {/if}
-
-        <div class="flex items-center justify-between pt-2 border-t border-border-subtle">
-          <button
-            type="button"
-            onclick={testEditingConnection}
-            disabled={isTestingEdit}
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border text-text-main hover:bg-surface-2 transition-colors disabled:opacity-50 cursor-pointer"
-          >
-            <span class="material-symbols-outlined text-sm {isTestingEdit ? 'animate-spin' : ''}">
-              {isTestingEdit ? 'progress_activity' : 'science'}
-            </span>
-            {isTestingEdit ? 'Testing...' : 'Test'}
-          </button>
-          <div class="flex items-center gap-2">
-            <button
-              type="button"
-              onclick={() => (editingConnection = null)}
-              class="px-3 py-1.5 text-xs font-medium rounded-md text-text-muted hover:text-text-main cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onclick={saveEditingConnection}
-              disabled={isSavingEdit}
-              class="px-3 py-1.5 text-xs font-semibold rounded-md bg-primary text-white hover:bg-primary/90 transition-colors disabled:opacity-50 cursor-pointer"
-            >
-              {isSavingEdit ? 'Saving...' : 'Save'}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <EditConnectionModal
+    connection={editingConnection}
+    onClose={() => (editingConnection = null)}
+    onSave={saveEditingConnection}
+    onSaveError={(message) => alert(message)}
+    testLabel="Test"
+  />
 {/if}
 
 {#if resetCreditConn}

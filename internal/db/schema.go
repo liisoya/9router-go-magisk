@@ -147,6 +147,16 @@ func coreSchema() []tableDef {
 				"CREATE INDEX IF NOT EXISTS idx_uh_provider ON usageHistory(provider)",
 				"CREATE INDEX IF NOT EXISTS idx_uh_model ON usageHistory(model)",
 				"CREATE INDEX IF NOT EXISTS idx_uh_conn ON usageHistory(connectionId)",
+				"CREATE INDEX IF NOT EXISTS idx_uh_ts_prov ON usageHistory(timestamp DESC, provider)",
+				"CREATE INDEX IF NOT EXISTS idx_uh_ts_model ON usageHistory(timestamp DESC, model)",
+				// The per-key lifetime token quota sums prompt+completion tokens
+				// WHERE apiKey = ? on every request for a quota-bearing key, and
+				// this ledger is never pruned (see usage_retention.go: it is the
+				// billing record). Without this index that sum is a full scan —
+				// measured at ~150 ms on a 200k-row ledger versus sub-millisecond
+				// with it. EnsureCoreSchema re-runs this list on every boot, so
+				// existing installs pick the index up on the next start.
+				"CREATE INDEX IF NOT EXISTS idx_uh_apikey ON usageHistory(apiKey)",
 			},
 		},
 		{
@@ -174,6 +184,82 @@ func coreSchema() []tableDef {
 				"CREATE INDEX IF NOT EXISTS idx_rd_conn ON requestDetails(connectionId)",
 			},
 		},
+		{
+			name: "compressionAnalytics",
+			columns: [][2]string{
+				{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+				{"timestamp", "TEXT NOT NULL"},
+				{"provider", "TEXT"},
+				{"model", "TEXT"},
+				{"mode", "TEXT NOT NULL"},
+				{"originalTokens", "INTEGER NOT NULL"},
+				{"compressedTokens", "INTEGER NOT NULL"},
+				{"tokensSaved", "INTEGER NOT NULL"},
+				{"durationMs", "INTEGER DEFAULT 0"},
+				{"requestId", "TEXT"},
+				{"actualPromptTokens", "INTEGER DEFAULT 0"},
+				{"actualCompletionTokens", "INTEGER DEFAULT 0"},
+				{"actualTotalTokens", "INTEGER DEFAULT 0"},
+				{"actualCacheReadTokens", "INTEGER DEFAULT 0"},
+				{"actualCacheWriteTokens", "INTEGER DEFAULT 0"},
+				{"estimatedUsdSaved", "REAL DEFAULT 0"},
+				{"skipReason", "TEXT"},
+			},
+			indexes: []string{
+				"CREATE INDEX IF NOT EXISTS idx_ca_ts ON compressionAnalytics(timestamp DESC)",
+				"CREATE INDEX IF NOT EXISTS idx_ca_provider ON compressionAnalytics(provider)",
+				"CREATE INDEX IF NOT EXISTS idx_ca_model ON compressionAnalytics(model)",
+				"CREATE INDEX IF NOT EXISTS idx_ca_mode ON compressionAnalytics(mode)",
+				"CREATE INDEX IF NOT EXISTS idx_ca_req ON compressionAnalytics(requestId)",
+				// The four indexes below exist for the analytics page, and the shape
+				// of each one is forced by a measured plan rather than by what looks
+				// natural. Against a 300k-run ledger the statements they serve fell
+				// from 4944 ms to 129 ms combined; every one of them was previously
+				// reading the table once per matching row.
+				//
+				// The breakdowns lead with the group key rather than with timestamp.
+				// A timestamp-led index can only serve a range predicate by seeking,
+				// and since timestamp is not the rowid it then has to return to the
+				// table for every column the SELECT reads — the index removes the
+				// scan and adds a lookup per row. Leading with the group key instead
+				// puts the timestamp inside the key, so the window filter still
+				// applies, the groups come out already clustered, and carrying the
+				// read columns makes the pass index-only: 1659 ms -> 50 ms for the
+				// model breakdown, 351 ms -> 37 ms for the provider one.
+				//
+				// idx_ca_ts_prov and idx_ca_ts_model, which led with timestamp, are
+				// gone: SQLite never chose them over the single-column index it was
+				// reaching for instead, so they only cost every insert.
+				"CREATE INDEX IF NOT EXISTS idx_ca_stat_p ON compressionAnalytics(provider, timestamp, tokensSaved, originalTokens, durationMs)",
+				"CREATE INDEX IF NOT EXISTS idx_ca_stat_m ON compressionAnalytics(model, timestamp, tokensSaved, originalTokens, durationMs)",
+				// Top 10 savers orders the window by tokensSaved, which nothing
+				// carried, so SQLite sorted every matching row to return ten. The
+				// sort column leads because SQLite has to walk the index to answer the
+				// ORDER BY either way: 971 ms -> under a millisecond, returning the
+				// same ten rows.
+				"CREATE INDEX IF NOT EXISTS idx_ca_saved ON compressionAnalytics(tokensSaved, timestamp)",
+				// The receipts aggregate filters on the actual-token columns and
+				// reads neither of them, so the timestamp index sent it to the table
+				// once per row: 940 ms -> 17 ms.
+				"CREATE INDEX IF NOT EXISTS idx_ca_receipt ON compressionAnalytics(timestamp, actualPromptTokens, actualTotalTokens)",
+			},
+		},
+		{
+			name: "semanticCacheEntries",
+			columns: [][2]string{
+				{"key", "TEXT PRIMARY KEY"},
+				{"model", "TEXT NOT NULL"},
+				{"responseBody", "BLOB NOT NULL"},
+				{"contentType", "TEXT"},
+				{"storedAt", "TEXT NOT NULL"},
+				{"hitCount", "INTEGER DEFAULT 0"},
+				{"tokensSaved", "INTEGER DEFAULT 0"},
+			},
+			indexes: []string{
+				"CREATE INDEX IF NOT EXISTS idx_sce_model ON semanticCacheEntries(model)",
+				"CREATE INDEX IF NOT EXISTS idx_sce_stored ON semanticCacheEntries(storedAt)",
+			},
+		},
 	}
 }
 
@@ -182,6 +268,100 @@ func coreSchema() []tableDef {
 var goOnlyColumns = [][3]string{
 	{"providerConnections", "lastUsedAt", "TEXT"},
 	{"providerConnections", "consecutiveUseCount", "INTEGER DEFAULT 0"},
+	// F-5 Credential Vault: sealed credential columns
+	{"providerConnections", "secretWrappedDEK", "TEXT DEFAULT ''"},
+	{"providerConnections", "secretCiphertext", "TEXT DEFAULT ''"},
+	{"providerConnections", "tokenWrappedDEK", "TEXT DEFAULT ''"},
+	{"providerConnections", "tokenCiphertext", "TEXT DEFAULT ''"},
+	{"providerConnections", "refreshWrappedDEK", "TEXT DEFAULT ''"},
+	{"providerConnections", "refreshCiphertext", "TEXT DEFAULT ''"},
+	// F-1 Rate Limiting per-key
+	{"apiKeys", "rateLimitRPM", "INTEGER DEFAULT 0"},
+	{"apiKeys", "rateLimitTPM", "INTEGER DEFAULT 0"},
+	{"apiKeys", "rateLimitConcurrency", "INTEGER DEFAULT 0"},
+	// F-1b Budget & queue: cumulative token quota and how long a request may
+	// wait for a concurrency slot before it is refused.
+	{"apiKeys", "tokenQuota", "INTEGER DEFAULT 0"},
+	{"apiKeys", "queueTimeoutMs", "INTEGER DEFAULT 0"},
+	// F-6 Argon2id key hashing
+	{"apiKeys", "keyHash", "TEXT DEFAULT ''"},
+	{"apiKeys", "lookupHash", "TEXT DEFAULT ''"},
+	{"apiKeys", "keyDisplay", "TEXT DEFAULT ''"},
+	// F-14 Time-limit keys + resale metadata
+	{"apiKeys", "expiresAt", "TEXT DEFAULT ''"},
+	{"apiKeys", "lastUsedAt", "TEXT DEFAULT ''"},
+	{"apiKeys", "usedCount", "INTEGER DEFAULT 0"},
+	{"apiKeys", "metadata", "TEXT DEFAULT ''"},
+}
+
+// keiRouterTables are Go-only tables for KeiRouter port features.
+// All use IF NOT EXISTS and are additive-only.
+var keiRouterTables = []tableDef{
+	{
+		name: "api_key_model_access",
+		columns: [][2]string{
+			{"api_key_id", "TEXT NOT NULL"},
+			{"model", "TEXT NOT NULL"},
+			{"created_at", "TEXT NOT NULL"},
+		},
+		primaryKey: "PRIMARY KEY (api_key_id, model)",
+		indexes: []string{
+			"CREATE INDEX IF NOT EXISTS idx_akma_key ON api_key_model_access(api_key_id)",
+		},
+	},
+	{
+		name: "guardrail_policies",
+		columns: [][2]string{
+			{"id", "TEXT PRIMARY KEY"},
+			{"tenant_id", "TEXT NOT NULL DEFAULT 'default'"},
+			{"scope", "TEXT NOT NULL"},
+			{"scope_id", "TEXT NOT NULL DEFAULT ''"},
+			{"name", "TEXT NOT NULL"},
+			{"enabled", "INTEGER NOT NULL DEFAULT 1"},
+			{"config", "TEXT NOT NULL DEFAULT '{}'"},
+			{"created_at", "TEXT NOT NULL"},
+			{"updated_at", "TEXT NOT NULL"},
+		},
+		indexes: []string{
+			"CREATE UNIQUE INDEX IF NOT EXISTS idx_grp_scope ON guardrail_policies(tenant_id, scope, scope_id)",
+		},
+	},
+	{
+		name: "guardrail_logs",
+		columns: [][2]string{
+			{"id", "TEXT PRIMARY KEY"},
+			{"tenant_id", "TEXT NOT NULL"},
+			{"request_id", "TEXT DEFAULT ''"},
+			{"api_key_id", "TEXT DEFAULT ''"},
+			{"provider", "TEXT DEFAULT ''"},
+			{"model", "TEXT DEFAULT ''"},
+			{"chain_id", "TEXT DEFAULT ''"},
+			{"detector", "TEXT NOT NULL"},
+			{"direction", "TEXT NOT NULL"},
+			{"action", "TEXT NOT NULL"},
+			{"severity", "TEXT DEFAULT ''"},
+			{"reason", "TEXT DEFAULT ''"},
+			{"findings", "TEXT DEFAULT '[]'"},
+			{"created_at", "TEXT NOT NULL"},
+		},
+		indexes: []string{
+			"CREATE INDEX IF NOT EXISTS idx_grl_ts ON guardrail_logs(created_at DESC)",
+		},
+	},
+}
+
+// supersededIndexes are dropped on every boot: each was replaced by an index
+// whose shape a measured query plan chose, and keeping the old ones would leave
+// SQLite with candidates it never picks while every write still updates them.
+//
+// idx_ca_ts_prov and idx_ca_ts_model are timestamp-led composites built for the
+// analytics breakdowns before those breakdowns carried their group key first.
+// Against a 300k-run ledger neither appeared in a single plan — SQLite reached
+// for the single-column index instead — while the breakdown they were named
+// for was still reading the table once per matching row.
+var supersededIndexes = []string{
+	"DROP INDEX IF EXISTS idx_ca_ts_prov",
+	"DROP INDEX IF EXISTS idx_ca_ts_model",
 }
 
 // EnsureCoreSchema creates the upstream core tables/indexes when absent,
@@ -198,6 +378,24 @@ func EnsureCoreSchema(db *sql.DB) error {
 			return err
 		}
 	}
+
+	// Indexes that a measured plan replaced. This is the one destructive
+	// statement in the bootstrap, and it is here because leaving them costs
+	// every insert to maintain an index SQLite never reads: against a 300k-run
+	// ledger the timestamp-led composites were not chosen for any analytics
+	// statement, while each of them still had to be updated on every write.
+	//
+	// It drops only indexes this build created and no query references any
+	// more. A user's rows, columns and every other index are untouched — this
+	// is a schema object, not data.
+	for _, superseded := range supersededIndexes {
+		if _, err := db.Exec(superseded); err != nil {
+			return fmt.Errorf("core schema: drop superseded index: %w", err)
+		}
+	}
+	if err := EnsureKeiRouterTables(db); err != nil {
+		return err
+	}
 	if err := EnsureAdditiveColumns(db); err != nil {
 		return err
 	}
@@ -211,16 +409,62 @@ func EnsureCoreSchema(db *sql.DB) error {
 	); err != nil {
 		return fmt.Errorf("core schema: seed settings: %w", err)
 	}
+	if err := BackfillCompressionAnalytics(db); err != nil {
+		return err
+	}
 	return nil
 }
 
 // EnsureAdditiveColumns adds the Go-only columns to a database whose tables
 // were created from the upstream core schema alone. Exported so test fixtures
-// built from dbtest.CreateTables get the same shape as a real database instead
-// of silently missing the round-robin bookkeeping columns.
+// get the same shape as a real database instead of silently missing the
+// round-robin bookkeeping columns or the KeiRouter per-key columns.
+//
+// A column whose table does not exist is skipped rather than treated as an
+// error. In production EnsureCoreSchema has created every core table before
+// this runs, so nothing is ever skipped; a test fixture that deliberately
+// builds only the tables it exercises has no use for the other columns, and
+// failing the whole pass over them would break fixtures testing unrelated
+// behaviour.
 func EnsureAdditiveColumns(db *sql.DB) error {
 	for _, c := range goOnlyColumns {
+		exists, err := tableExistsOnDB(db, c[0])
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
 		if err := addColumnIfMissing(db, c[0], c[1], c[2]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tableExistsOnDB reports whether a table is present, probed through sqlite_master
+// so the answer does not depend on rewordable driver error strings.
+func tableExistsOnDB(db *sql.DB, table string) (bool, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("core schema: inspect table %s: %w", table, err)
+	}
+	return count > 0, nil
+}
+
+// EnsureKeiRouterTables creates the Go-only tables backing the KeiRouter port
+// (per-key model access, guardrail policies, guardrail audit logs). Exported so
+// a test fixture that only builds the upstream core tables still gets the full
+// runtime shape instead of failing on a missing table at the first query.
+func EnsureKeiRouterTables(db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("keirouter tables: nil db")
+	}
+	for _, t := range keiRouterTables {
+		if err := ensureTable(db, t); err != nil {
 			return err
 		}
 	}

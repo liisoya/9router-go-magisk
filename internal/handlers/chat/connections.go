@@ -1,19 +1,24 @@
 package chat
 
 import (
+	"context"
 	json "encoding/json/v2"
 	"fmt"
 	"math/rand/v2"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
 	internalproxy "9router/proxy/internal/proxy"
+	"9router/proxy/internal/proxy/oauth"
 	"9router/proxy/internal/translator"
 )
 
@@ -25,12 +30,6 @@ var CredentialFallbacks = map[string]string{
 	"clinepass":     "cline",
 }
 
-// ResolveProviderProxyPoolID returns the active proxy pool ID configured for a
-// provider. The dashboard writes a provider-level pool under the provider's
-// short alias (ProviderDetailView's storageAlias) while requests arrive
-// carrying the canonical id, so both keys are checked — in the shape upstream
-// resolves them (src/shared/constants/providers.js), not a hand-written pair
-// list, which is how an assignment could be shown in the UI yet read as none.
 func (h *ChatHandler) ResolveProviderProxyPoolID(provider string) string {
 	if h.Repo == nil {
 		return ""
@@ -39,14 +38,58 @@ func (h *ChatHandler) ResolveProviderProxyPoolID(provider string) string {
 	if err != nil || settings == nil || settings.ProviderStrategies == nil {
 		return ""
 	}
+	var singleID, rotate string
 	for _, p := range providerStrategyKeys(provider) {
 		if strat, ok := settings.ProviderStrategies[p]; ok {
-			if strat.ProxyPoolID != "" && strat.ProxyPoolID != "__none__" {
-				return strat.ProxyPoolID
+			if singleID == "" && strat.ProxyPoolID != "" && strat.ProxyPoolID != "__none__" {
+				singleID = strat.ProxyPoolID
+			}
+			if rotate == "" && db.IsProxyPoolRotation(strat.ProxyRotateStrategy) {
+				rotate = strat.ProxyRotateStrategy
 			}
 		}
 	}
-	return ""
+	// Pool rotation is a NoAuth-provider feature: the provider card offers it
+	// only inside its `isNoAuth` block, and there `rotateStrategy` holds a POOL
+	// rotation. On a keyed provider the same key holds ACCOUNT rotation, so
+	// honouring it here would send that provider's egress through pools its
+	// operator never configured.
+	if rotate != "" && providers.IsNoAuthProvider(provider) {
+		if id := h.rotatedActiveProxyPool(provider, rotate); id != "" {
+			return id
+		}
+	}
+	return singleID
+}
+
+// poolRotationCursors holds one round-robin cursor per provider. A single
+// shared counter let one provider's traffic advance another's, so a provider
+// with a different number of active pools skipped positions.
+var poolRotationCursors sync.Map // map[string]*atomic.Uint64
+
+// rotatedActiveProxyPool picks the next pool for a provider under a rotation
+// strategy. The cursor is that provider's own round-robin position, so two
+// providers rotating at once advance independently.
+//
+// A pool with no URL is excluded upstream: it cannot serve a request, and
+// selecting it would hand a share of the traffic to a pool the resolver then
+// refuses.
+func (h *ChatHandler) rotatedActiveProxyPool(provider, strategy string) string {
+	if h.Repo == nil {
+		return ""
+	}
+	ids := h.Repo.ActivePoolIDs()
+	if len(ids) == 0 {
+		return ""
+	}
+	if strings.ToLower(strings.TrimSpace(strategy)) == "random" {
+		return ids[rand.IntN(len(ids))]
+	}
+	// Keyed on the resolved alias so `oc` and `opencode` share one cursor: they
+	// are the same provider and must advance together.
+	cursor, _ := poolRotationCursors.LoadOrStore(providers.ResolveAlias(provider), new(atomic.Uint64))
+	idx := cursor.(*atomic.Uint64).Add(1) - 1
+	return ids[idx%uint64(len(ids))]
 }
 
 // providerStrategyKeys lists the settings keys a provider's pool may be stored
@@ -77,6 +120,35 @@ func providerStrategyKeys(provider string) []string {
 	return keys
 }
 
+// connRotationStrategy resolves which connection-rotation strategy applies to a
+// provider, for the code paths that rotate accounts.
+//
+// A NoAuth provider is the case that needs care: its card writes pool rotation
+// to `rotateStrategy` and account rotation to `fallbackStrategy`, and both land
+// in the same stored entry. Reading RotateStrategy there would let the operator
+// rotate pools and silently start rotating connections too, so for those
+// providers only `fallbackStrategy` is trusted. Keyed providers keep the
+// original read, where `rotateStrategy` genuinely is the connection strategy.
+func connRotationStrategy(settings *db.SettingsData, provider string) db.ProviderStrategy {
+	strat := db.ProviderStrategy{}
+	hasStrat := false
+	if settings != nil && settings.ProviderStrategies != nil {
+		if s, ok := settings.ProviderStrategies[provider]; ok {
+			strat, hasStrat = s, true
+		}
+	}
+	if providers.IsNoAuthProvider(provider) {
+		strat.RotateStrategy = strat.ConnRotateStrategy
+	}
+	if settings != nil && (!hasStrat || strat.RotateStrategy == "") {
+		if settings.FallbackStrategy != "" && settings.FallbackStrategy != "fill-first" {
+			strat.RotateStrategy = settings.FallbackStrategy
+			strat.StickyLimit = settings.StickyRoundRobinLimit
+		}
+	}
+	return strat
+}
+
 // proxyPoolCounterpart returns the provider that shares a pool with this one
 // upstream (cline and clinepass are the same upstream account pool), so an
 // assignment made on one applies to the other.
@@ -96,13 +168,23 @@ func (h *ChatHandler) GetBestConnection(provider string, connectionID string, ex
 	return h.getBestConnection(provider, connectionID, excludeIDs, model)
 }
 
+// GetBestConnectionWithContext is the context-aware variant of GetBestConnection.
+func (h *ChatHandler) GetBestConnectionWithContext(ctx context.Context, provider string, connectionID string, excludeIDs []string, model string) (*models.ProviderConnection, *ConnectionData, error) {
+	return h.getBestConnectionWithContext(ctx, provider, connectionID, excludeIDs, model)
+}
+
 func (h *ChatHandler) getBestConnection(provider string, connectionID string, excludeIDs []string, model string) (*models.ProviderConnection, *ConnectionData, error) {
+	return h.getBestConnectionWithContext(context.Background(), provider, connectionID, excludeIDs, model)
+}
+
+func (h *ChatHandler) getBestConnectionWithContext(ctx context.Context, provider string, connectionID string, excludeIDs []string, model string) (*models.ProviderConnection, *ConnectionData, error) {
 	if model != "" && !h.Repo.IsProviderAvailable(provider, model) {
 		log.Warn("health", "unhealthy provider", "provider", provider, "model", model)
 	}
 
 	var conn *models.ProviderConnection
 	var err error
+	isProbe := handlerutil.IsProbeContext(ctx)
 
 	if connectionID != "" {
 		conn, err = h.Repo.GetProviderConnectionByID(connectionID)
@@ -126,6 +208,13 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 		// strategy. Honouring the pin unconditionally made the dashboard's
 		// enable/disable toggle a no-op for every pinned request.
 		ineligible, reason := h.pinnedConnectionIneligible(conn, excludeIDs, model)
+		if ineligible && isProbe && conn.IsActive == 1 && !slices.Contains(excludeIDs, conn.ID) {
+			if strings.HasPrefix(reason, "account cooldown") || strings.HasPrefix(reason, "model lock") || reason == "quota cache" {
+				// Probes bypass cooldown / locks to test actual upstream reachability,
+				// but must still honor model enablement, disabled accounts, and strict assignment.
+				ineligible = false
+			}
+		}
 		if ineligible {
 			log.Warn("connections", "pinned connection ineligible, falling back to strategy",
 				"provider", provider, "conn", conn.ID, "reason", reason)
@@ -168,26 +257,24 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 
 		settings, settingsErr := h.Repo.GetSettings()
 		connections = filterConnectionsForModel(provider, connections, model, settings)
+
 		if len(connections) == 0 {
 			return nil, nil, fmt.Errorf("no connection assigned to model %s for provider %s under strict assignment", model, provider)
 		}
 
+		// A codex account only serves the models it was granted. The pin is
+		// read before the rotation so a full strategy sweep cannot land on an
+		// account that cannot serve the request (upstream filters
+		// availableConnections before the pin and before the strategy —
+		// src/sse/services/auth.js:86-89, :100-148).
+		connections = filterConnectionsByEnabledModels(provider, connections, model)
+		if len(connections) == 0 {
+			return nil, nil, fmt.Errorf("no connection for provider %s has model %s enabled", provider, model)
+		}
+
 		// Rotate only connections eligible for the requested model.
 		if len(connections) > 1 && settingsErr == nil && settings != nil {
-			strat := db.ProviderStrategy{}
-			hasStrat := false
-			if settings.ProviderStrategies != nil {
-				if s, ok := settings.ProviderStrategies[provider]; ok {
-					strat = s
-					hasStrat = true
-				}
-			}
-			if !hasStrat || strat.RotateStrategy == "" {
-				if settings.FallbackStrategy != "" && settings.FallbackStrategy != "fill-first" {
-					strat.RotateStrategy = settings.FallbackStrategy
-					strat.StickyLimit = settings.StickyRoundRobinLimit
-				}
-			}
+			strat := connRotationStrategy(settings, provider)
 			if strat.RotateStrategy != "" && strat.RotateStrategy != "none" {
 				connections = h.applyConnectionStrategy(connections, strat)
 			}
@@ -200,40 +287,52 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 
 		conn = nil
 		var cooldownUntil time.Time
+		var inCooldown []*models.ProviderConnection
 		now := time.Now()
 		for _, c := range connections {
 			if excludeSet[c.ID] {
 				continue
 			}
-			// Account-scoped cooldown. An account whose quota is spent, or
-			// whose OAuth grant the provider already rejected, is skipped
-			// before it is selected — round-robin otherwise kept handing out
-			// dead accounts until a live 429/401 locked them, and a rejected
-			// grant cost a token-endpoint call on every request until the IP
-			// was rate limited. Upstream parity: filterAvailableAccounts.
-			if until, ok := db.ConnectionBlockedUntil(c.Data); ok && until.After(now) {
-				if cooldownUntil.IsZero() || until.Before(cooldownUntil) {
-					cooldownUntil = until
-				}
+			// The strategy sweep reorders the whole candidate list, so the
+			// account filter runs again on the row actually reached.
+			if !codexAccountServesModel(c, model) {
 				continue
 			}
-			// Skip connections that have an active per-connection model lock
-			if model != "" {
-				lockKey := canonicalLockModel(provider, model)
-				if locked, _ := h.Repo.IsConnectionModelLocked(c.ID, lockKey); locked {
+			// Per-model lock and quota cache first: an account parked for
+			// this model carries no cooldown to shorten, so it must not enter
+			// the forced pool either (h.connectionModelBlocked).
+			if !isProbe {
+				if h.connectionModelBlocked(c, provider, model) {
 					continue
 				}
-				if lockKey != model {
-					if locked, _ := h.Repo.IsConnectionModelLocked(c.ID, model); locked {
-						continue
+				// Account-scoped cooldown. An account whose quota is spent, or
+				// whose OAuth grant the provider already rejected, is skipped
+				// before it is selected — round-robin otherwise kept handing out
+				// dead accounts until a live 429/401 locked them, and a rejected
+				// grant cost a token-endpoint call on every request until the IP
+				// was rate limited. Upstream parity: filterAvailableAccounts.
+				if until, ok := db.ConnectionBlockedUntil(c.Data); ok && until.After(now) {
+					inCooldown = append(inCooldown, c)
+					if cooldownUntil.IsZero() || until.Before(cooldownUntil) {
+						cooldownUntil = until
 					}
-				}
-				if quotaCacheBlocked(provider, c.ID, model) {
 					continue
 				}
 			}
 			conn = c
 			break
+		}
+		if conn == nil && forceFallbackEnabled(settings) {
+			// The operator asked for traffic to keep flowing while every
+			// account is cooling down, so take the account that frees up
+			// first instead of failing the client turn outright
+			// (upstream decolua/9router PR #130).
+			forced, until, ok := h.forceMinCooldownConnection(provider, inCooldown, excludeSet, model, settings)
+			if ok {
+				conn = forced
+				log.Warn("connections", "all accounts in cooldown, forcing the soonest to reset",
+					"provider", provider, "conn", forced.ID, "reset", until.UTC().Format(time.RFC3339))
+			}
 		}
 		if conn == nil {
 			// Every candidate was in cooldown, so say when the first one comes
@@ -262,6 +361,21 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 			connData.ProxyPoolID = poolID
 		}
 	}
+
+	// providerSpecificData.baseUrl is where the dashboard stores a per-connection
+	// endpoint override (the Ollama Local host field, an Azure endpoint, the
+	// compatible-node URL). ConnectionData.BaseURL only carries the top-level
+	// baseUrl key, so an override written by the newer writer was parsed and then
+	// discarded — the request silently fell back to the registry default. Upstream
+	// reads the same nested field (open-sse/config/providers.js
+	// resolveOllamaLocalHost), so hydrate it here rather than in each caller.
+	if connData.BaseURL == "" {
+		if override, ok := connData.ProviderSpecificData["baseUrl"].(string); ok {
+			if trimmed := strings.TrimSpace(override); trimmed != "" {
+				connData.BaseURL = trimmed
+			}
+		}
+	}
 	// No per-connection binding: fall back to the pool assigned to the
 	// provider itself. It used to be read only for the synthesized no-auth
 	// connection, so a stored connection carrying its own key went out
@@ -269,6 +383,26 @@ func (h *ChatHandler) getBestConnection(provider string, connectionID string, ex
 	h.applyProviderProxyPool(&connData, provider)
 
 	return conn, &connData, nil
+}
+
+// connectionModelBlocked reports whether a connection is parked for this
+// specific model — an active per-model lock or a provider quota cache. An
+// empty model means nothing model-scoped applies (upstream parity: the lock
+// filter only runs for a model-bearing request).
+func (h *ChatHandler) connectionModelBlocked(c *models.ProviderConnection, provider, model string) bool {
+	if model == "" {
+		return false
+	}
+	lockKey := canonicalLockModel(provider, model)
+	if locked, _ := h.Repo.IsConnectionModelLocked(c.ID, lockKey); locked {
+		return true
+	}
+	if lockKey != model {
+		if locked, _ := h.Repo.IsConnectionModelLocked(c.ID, model); locked {
+			return true
+		}
+	}
+	return quotaCacheBlocked(provider, c.ID, model)
 }
 
 // applyProviderProxyPool binds a provider-level pool to a connection that has
@@ -316,6 +450,10 @@ func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection
 		return true, "quota cache"
 	}
 
+	if !codexAccountServesModel(conn, model) {
+		return true, "model not enabled on account"
+	}
+
 	settings, err := h.Repo.GetSettings()
 	if err != nil || settings == nil {
 		return false, ""
@@ -325,6 +463,46 @@ func (h *ChatHandler) pinnedConnectionIneligible(conn *models.ProviderConnection
 		return true, "strict model assignment"
 	}
 	return false, ""
+}
+
+// codexAccountServesModel reports whether a codex connection can serve model.
+//
+// Upstream skips a codex account whose providerSpecificData.enabledModels is a
+// non-empty array that does not contain the requested model
+// (src/sse/services/auth.js:86-89). The account is subscribed to a subset of
+// the catalog, and the ones it is not are rejected by OpenAI with a 400 — so
+// this is the one provider the pin gates, never a model-name guess about any
+// other provider (AGENTS.md §3.B).
+//
+// enabledModels is read from providerSpecificData first and from the
+// top-level field second, exactly like the /v1/models build
+// (models_list.go buildModelsList), because both writers are in the wild.
+// An empty or absent list leaves the account unrestricted, and an absent model
+// (model == "") skips the check as upstream does.
+func codexAccountServesModel(conn *models.ProviderConnection, model string) bool {
+	if conn == nil || conn.Provider != "codex" || model == "" {
+		return true
+	}
+	enabled := parseConnectionModelData(conn).EnabledModels()
+	if len(enabled) == 0 {
+		return true
+	}
+	return slices.Contains(enabled, model)
+}
+
+// filterConnectionsByEnabledModels drops the codex accounts that cannot serve
+// the requested model, keeping every other provider's rows untouched.
+func filterConnectionsByEnabledModels(provider string, conns []*models.ProviderConnection, model string) []*models.ProviderConnection {
+	if provider != "codex" || model == "" {
+		return conns
+	}
+	kept := make([]*models.ProviderConnection, 0, len(conns))
+	for _, c := range conns {
+		if codexAccountServesModel(c, model) {
+			kept = append(kept, c)
+		}
+	}
+	return kept
 }
 
 // quotaCacheBlocked reports whether a provider's in-memory quota cache says
@@ -355,13 +533,19 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 	var baseCfg *providers.ProviderConfig
 
 	if connData != nil && connData.BaseURL != "" {
+		// The override is completed to a chat-completions route: the dashboard
+		// stores a bare host for a self-hosted endpoint (the Ollama Local host
+		// field is typed as "http://192.168.1.10:11434"), and a host alone names
+		// no route, so the POST used to land on the server root. A URL that
+		// already names a route is passed through untouched.
+		baseURL := chatCompletionsURL(connData.BaseURL)
 		if cfg, ok := providers.KnownProviders[provider]; ok {
 			cloned := cfg
-			cloned.BaseURL = connData.BaseURL
+			cloned.BaseURL = baseURL
 			baseCfg = &cloned
 		} else {
 			baseCfg = &providers.ProviderConfig{
-				BaseURL:    connData.BaseURL,
+				BaseURL:    baseURL,
 				AuthHeader: constants.HeaderAuthorization,
 				AuthScheme: constants.AuthSchemeBearer,
 			}
@@ -376,16 +560,8 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 			return nil, fmt.Errorf("failed to look up provider node %s: %w", provider, err)
 		}
 		if node != nil && nodeData != nil && nodeData.BaseURL != "" {
-			baseURL := nodeData.BaseURL
-			if !strings.HasSuffix(baseURL, "/chat/completions") {
-				if strings.HasSuffix(baseURL, "/v1") || strings.HasSuffix(baseURL, "/v1/") {
-					baseURL = strings.TrimRight(baseURL, "/") + "/chat/completions"
-				} else {
-					baseURL = strings.TrimRight(baseURL, "/") + "/v1/chat/completions"
-				}
-			}
 			baseCfg = &providers.ProviderConfig{
-				BaseURL:    baseURL,
+				BaseURL:    chatCompletionsURL(nodeData.BaseURL),
 				AuthHeader: constants.HeaderAuthorization,
 				AuthScheme: constants.AuthSchemeBearer,
 			}
@@ -430,11 +606,119 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 			cloned := *baseCfg
 			cloned.StaticHeaders = internalproxy.BuildEdgeRelayHeaders(baseCfg.BaseURL, cloned.StaticHeaders)
 			cloned.BaseURL = relayURL
-			return &cloned, nil
+			return h.applyProviderOverrides(provider, &cloned), nil
 		}
 	}
 
-	return baseCfg, nil
+	return h.applyProviderOverrides(provider, baseCfg), nil
+}
+
+// chatCompletionsURL completes a configured endpoint into the chat-completions
+// route, and leaves one that already names a route untouched.
+//
+// A configured endpoint arrives in one of two shapes: the full route, or a bare
+// host — the compatible-node baseUrl and the Ollama Local host field both take
+// this form, and a dotted IP is the common case
+// ("http://192.168.1.10:11434"). A bare host names no route upstream, so the
+// gateway's /v1 is what makes it a chat endpoint.
+//
+// Detection is by shape, not by guessing whether the last path segment looks
+// like a filename: an early version did that and exempted exactly the dotted-IP
+// host it existed to fix. A URL whose path is only a version prefix (/v1, and
+// the /v1beta Google uses) is that prefix plus the route; a path that carries
+// any segment beyond it is taken to be an endpoint the operator named, and is
+// left alone rather than having /v1 appended behind it.
+func chatCompletionsURL(baseURL string) string {
+	url := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if url == "" {
+		return baseURL
+	}
+	for _, route := range []string{
+		"/chat/completions", "/messages", "/responses", "/completions",
+		"/chat", "/embeddings", "/api/chat", "/api/generate",
+	} {
+		if strings.HasSuffix(url, route) {
+			return url
+		}
+	}
+	// Split off the scheme and authority, then decide from the path alone: no
+	// path at all, or only a version prefix, means nothing named an endpoint and
+	// the route is appended to the prefix that is there.
+	_, rest, found := strings.Cut(url, "://")
+	if !found {
+		return url + "/v1/chat/completions"
+	}
+	_, path, _ := strings.Cut(rest, "/")
+	switch trimmed := strings.Trim(path, "/"); {
+	case trimmed == "":
+		return url + "/v1/chat/completions"
+	case isVersionPrefix(trimmed):
+		// Already versioned ("https://host/v1"): the lane is the prefix plus the
+		// route, not a second prefix.
+		return url + "/chat/completions"
+	default:
+		// A path carrying a segment beyond the prefix names an endpoint the
+		// operator chose; appending behind it would only produce a 404.
+		return url
+	}
+}
+
+// isVersionPrefix reports whether a path segment is only an API version, as in
+// "/v1", "/v2", or Gemini's "/v1beta". Anything else names an endpoint of its
+// own and must not be treated as a prefix.
+func isVersionPrefix(segment string) bool {
+	rest, ok := strings.CutPrefix(segment, "v")
+	if !ok {
+		return false
+	}
+	digits, _ := strings.CutSuffix(rest, "beta")
+	return isDigits(digits)
+}
+
+// isDigits reports whether s is non-empty and every character is an ASCII digit.
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// applyProviderOverrides merges the operator's stored header overrides for a
+// provider into a per-request config.
+//
+// This is the single injection point on purpose: every executor builds its
+// outbound headers from cfg.StaticHeaders, so merging here reaches all of
+// them without each one learning the feature. It is also after the relay
+// rewrite, so a relay's own headers are on the table the override wins over —
+// which is what upstream's executor-level merge does too.
+func (h *ChatHandler) applyProviderOverrides(provider string, cfg *providers.ProviderConfig) *providers.ProviderConfig {
+	if cfg == nil || h.Repo == nil {
+		return cfg
+	}
+	stored, err := h.Repo.GetProviderOverride(ProviderOverrideKey(provider))
+	if err != nil || stored == nil || len(stored.Headers) == 0 {
+		return cfg
+	}
+	merged := *cfg
+	merged.StaticHeaders = providers.MergeHeaderOverrides(cfg.StaticHeaders, stored.Headers)
+	return &merged
+}
+
+// ProviderOverrideKey resolves the settings key one provider's overrides are
+// stored under. The dashboard writes the canonical registry id (upstream keys
+// everything by `resolveProviderAlias(id)`), while the request path knows a
+// connection's provider as the alias a model id carries — `cc/claude-opus-4-5`
+// arrives as `claude`, the alias, not the canonical id. Both sides therefore
+// canonicalize, which is what makes one entry answer for both spellings.
+//
+// A custom provider node's id has no alias mapping, so it resolves to itself.
+func ProviderOverrideKey(provider string) string {
+	if provider == "" {
+		return provider
+	}
+	return providers.ResolveAlias(provider)
 }
 
 // ExtractAPIKey gets the API key from a connection's data.
@@ -457,7 +741,20 @@ func extractAPIKey(connData *ConnectionData) string {
 // 403 "The bearer token included in the request is invalid." even though the
 // access token is perfectly valid.
 func resolveProviderAuthToken(provider string, connData *ConnectionData, current string) string {
-	if connData == nil || provider != "kiro" {
+	if connData == nil {
+		return current
+	}
+	// Antigravity / gemini-cli authenticate with the OAuth access token only;
+	// apiKey there is a copy written at login that a refresh may not have
+	// rotated. Preferring it sent a stale token on every request, so each turn
+	// answered 401 and forced a refresh (oauth.SyncMirroredAPIKey heals the row).
+	if oauth.IsAccessTokenOnlyProvider(provider) {
+		if connData.AccessToken != "" {
+			return connData.AccessToken
+		}
+		return current
+	}
+	if provider != "kiro" {
 		return current
 	}
 	authMethod, _ := connData.ProviderSpecificData["authMethod"].(string)
@@ -655,13 +952,26 @@ func (h *ChatHandler) selectByRecency(conns []*models.ProviderConnection, sticky
 		consecutive = 1
 	}
 
-	if h.Repo != nil {
-		if err := h.Repo.TouchConnectionRotation(conns[winner].ID, consecutive); err != nil {
-			log.Warn("connections", "persist round-robin stamp failed", "conn", conns[winner].ID, "error", err)
+	// Fall back to the largest stamp already in the pool rather than a bare
+	// clock read: if the write fails, the in-memory row still has to advance
+	// past its neighbours, or this same request's rotation would repeat on the
+	// next pick.
+	highest := ""
+	for _, c := range conns {
+		if c != nil && c.LastUsedAt != nil && *c.LastUsedAt > highest {
+			highest = *c.LastUsedAt
 		}
 	}
-	now := time.Now().UTC().Format(db.RotationTimestampFormat)
-	conns[winner].LastUsedAt = &now
+	stamp := db.NextRotationStamp(highest)
+	if h.Repo != nil {
+		persisted, err := h.Repo.TouchConnectionRotation(conns[winner].ID, consecutive)
+		if err != nil {
+			log.Warn("connections", "persist round-robin stamp failed", "conn", conns[winner].ID, "error", err)
+		} else {
+			stamp = persisted
+		}
+	}
+	conns[winner].LastUsedAt = &stamp
 	conns[winner].ConsecutiveUseCount = &consecutive
 
 	rotated := make([]*models.ProviderConnection, 0, len(conns))

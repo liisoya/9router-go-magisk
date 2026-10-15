@@ -14,21 +14,29 @@ import (
 
 	json "encoding/json/v2"
 
-	"github.com/google/uuid"
-
 	"9router/proxy/internal/handlerutil"
 )
 
 // ProviderNodeResponse is the JSON representation of a provider node with unpacked data fields.
 type ProviderNodeResponse struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Name      string `json:"name"`
-	Prefix    string `json:"prefix,omitempty"`
-	APIType   string `json:"apiType,omitempty"`
-	BaseURL   string `json:"baseUrl,omitempty"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Prefix  string `json:"prefix,omitempty"`
+	APIType string `json:"apiType,omitempty"`
+	BaseURL string `json:"baseUrl,omitempty"`
+	// URLSuffix is the custom tail of the provider id, without the
+	// "openai-compatible-chat-" literal in front of it. It is empty for a node
+	// created before the field existed, whose id ends in a random uuid the
+	// dashboard therefore reports as generated rather than as a suffix the
+	// user can edit back.
+	URLSuffix string `json:"urlSuffix,omitempty"`
+	// URLSuffixGenerated marks an id whose tail is the random fallback, so the
+	// dashboard can render it read-only instead of offering an edit that would
+	// look like it was discarding a value the user never set.
+	URLSuffixGenerated bool   `json:"urlSuffixGenerated"`
+	CreatedAt          string `json:"createdAt"`
+	UpdatedAt          string `json:"updatedAt"`
 }
 
 // HandleGetProviderNodes handles GET /api/provider-nodes.
@@ -58,6 +66,11 @@ func (h *DashboardHandler) HandleGetProviderNodes(w http.ResponseWriter, r *http
 			UpdatedAt: n.UpdatedAt,
 		}
 
+		// The suffix is not a stored column — it is whatever the id carries
+		// after the type literal — so the list derives it the same way the
+		// create/update handlers composed it.
+		item.URLSuffix, item.URLSuffixGenerated = providerNodeSuffixOf(n.ID)
+
 		if n.Data != "" {
 			var dataObj struct {
 				Prefix  string `json:"prefix"`
@@ -80,6 +93,11 @@ func (h *DashboardHandler) HandleGetProviderNodes(w http.ResponseWriter, r *http
 }
 
 // HandleCreateProviderNode handles POST /api/provider-nodes.
+//
+// Mirrors upstream src/app/api/provider-nodes/route.js, with one addition:
+// the id tail is the caller's `urlSuffix` when supplied, so the provider id is
+// "openai-compatible-chat-<suffix>" instead of "openai-compatible-chat-<uuid>".
+// An empty suffix keeps the random id upstream generates.
 func (h *DashboardHandler) HandleCreateProviderNode(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -89,11 +107,12 @@ func (h *DashboardHandler) HandleCreateProviderNode(w http.ResponseWriter, r *ht
 	defer r.Body.Close()
 
 	var req struct {
-		Name    string `json:"name"`
-		Prefix  string `json:"prefix"`
-		APIType string `json:"apiType"`
-		BaseURL string `json:"baseUrl"`
-		Type    string `json:"type"`
+		Name      string `json:"name"`
+		Prefix    string `json:"prefix"`
+		APIType   string `json:"apiType"`
+		BaseURL   string `json:"baseUrl"`
+		Type      string `json:"type"`
+		URLSuffix string `json:"urlSuffix"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON")
@@ -122,17 +141,13 @@ func (h *DashboardHandler) HandleCreateProviderNode(w http.ResponseWriter, r *ht
 		apiType = "chat"
 	}
 
-	var id string
-	if nodeType == "anthropic-compatible" {
-		id = "anthropic-compatible-" + uuid.New().String()
-		if req.BaseURL == "" {
-			req.BaseURL = "https://api.anthropic.com/v1"
-		}
-	} else {
-		id = "openai-compatible-" + apiType + "-" + uuid.New().String()
-		if req.BaseURL == "" {
-			req.BaseURL = "https://api.openai.com/v1"
-		}
+	_, defaultBaseURL := providerNodeLiterals(nodeType, apiType)
+	if req.BaseURL == "" {
+		req.BaseURL = defaultBaseURL
+	}
+	id, suffix, ok := h.resolveProviderNodeID(w, nodeType, apiType, req.URLSuffix, "")
+	if !ok {
+		return
 	}
 
 	dataBytes, _ := json.Marshal(map[string]string{
@@ -149,14 +164,16 @@ func (h *DashboardHandler) HandleCreateProviderNode(w http.ResponseWriter, r *ht
 
 	handlerutil.WriteJSON(w, http.StatusCreated, map[string]any{
 		"node": ProviderNodeResponse{
-			ID:        node.ID,
-			Type:      nodeType,
-			Name:      req.Name,
-			Prefix:    req.Prefix,
-			APIType:   apiType,
-			BaseURL:   req.BaseURL,
-			CreatedAt: node.CreatedAt,
-			UpdatedAt: node.UpdatedAt,
+			ID:                 node.ID,
+			Type:               nodeType,
+			Name:               req.Name,
+			Prefix:             req.Prefix,
+			APIType:            apiType,
+			BaseURL:            req.BaseURL,
+			URLSuffix:          suffix,
+			URLSuffixGenerated: suffix == "",
+			CreatedAt:          node.CreatedAt,
+			UpdatedAt:          node.UpdatedAt,
 		},
 	})
 }
@@ -167,6 +184,11 @@ func (h *DashboardHandler) HandleCreateProviderNode(w http.ResponseWriter, r *ht
 // base URL is sanitized (strip /messages for anthropic-compatible,
 // /embeddings for custom-embedding). Attached connections inherit the new
 // prefix/apiType/baseUrl/nodeName into their providerSpecificData.
+//
+// A changed `urlSuffix` renames the provider id. Upstream cannot do this — its
+// id is fixed at creation — so the rename is additive here: the response
+// carries the new id and the dashboard navigates to it, because the URL the
+// user is looking at stops resolving the moment the row moves.
 func (h *DashboardHandler) HandleUpdateProviderNode(w http.ResponseWriter, r *http.Request) {
 	id := getURLParam(r, "id")
 	if id == "" {
@@ -180,10 +202,11 @@ func (h *DashboardHandler) HandleUpdateProviderNode(w http.ResponseWriter, r *ht
 	}
 	defer r.Body.Close()
 	var req struct {
-		Name    string `json:"name"`
-		Prefix  string `json:"prefix"`
-		APIType string `json:"apiType"`
-		BaseURL string `json:"baseUrl"`
+		Name      string `json:"name"`
+		Prefix    string `json:"prefix"`
+		APIType   string `json:"apiType"`
+		BaseURL   string `json:"baseUrl"`
+		URLSuffix string `json:"urlSuffix"`
 	}
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
@@ -238,28 +261,44 @@ func (h *DashboardHandler) HandleUpdateProviderNode(w http.ResponseWriter, r *ht
 	if nodeType == "openai-compatible" {
 		apiType = req.APIType
 	}
+
+	// An apiType change does not rename the node. Upstream's id is immutable,
+	// so there the two simply drift apart (docs/PARITY-REMAINING.md) and every
+	// reader takes the apiType from the data blob, not from the id. Keeping
+	// that behaviour also keeps the suffix the user typed across the edit,
+	// which is the whole point of the field.
+	newID, suffix, ok := h.resolveProviderNodeID(w, nodeType, apiType, req.URLSuffix, id)
+	if !ok {
+		return
+	}
+	renamedID, ok := h.applyProviderNodeRename(w, id, newID)
+	if !ok {
+		return
+	}
+
 	dataBytes, _ := json.Marshal(map[string]string{
 		"prefix":  prefix,
 		"apiType": apiType,
 		"baseUrl": baseURL,
 	})
-	updated, err := h.Repo.UpdateProviderNode(id, name, string(dataBytes))
+	updated, err := h.Repo.UpdateProviderNode(renamedID, name, string(dataBytes))
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	syncNodeConnections(h, id, prefix, apiType, nodeType, baseURL, name)
-	nodeName := name
+	syncNodeConnections(h, renamedID, prefix, apiType, nodeType, baseURL, name)
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"node": ProviderNodeResponse{
-			ID:        updated.ID,
-			Type:      nodeType,
-			Name:      nodeName,
-			Prefix:    prefix,
-			APIType:   apiType,
-			BaseURL:   baseURL,
-			CreatedAt: updated.CreatedAt,
-			UpdatedAt: updated.UpdatedAt,
+			ID:                 updated.ID,
+			Type:               nodeType,
+			Name:               name,
+			Prefix:             prefix,
+			APIType:            apiType,
+			BaseURL:            baseURL,
+			URLSuffix:          suffix,
+			URLSuffixGenerated: suffix == "",
+			CreatedAt:          updated.CreatedAt,
+			UpdatedAt:          updated.UpdatedAt,
 		},
 	})
 }

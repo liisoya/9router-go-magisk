@@ -5,6 +5,7 @@
     parseCallbackURL,
     writeCallback,
   } from '../../lib/oauth-handoff'
+  import { copyToClipboard } from '../../lib/clipboard'
 
   let status = $state<'working' | 'ok' | 'error'>('working')
   let message = $state('Memproses callback…')
@@ -66,7 +67,7 @@
 
   function copyRaw() {
     if (!raw) return
-    navigator.clipboard.writeText(raw).catch(() => {})
+    copyToClipboard(raw).catch(() => {})
   }
 </script>
 

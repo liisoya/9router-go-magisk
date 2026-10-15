@@ -179,7 +179,7 @@ func TestTestConnection_AnthropicCompatibleNode(t *testing.T) {
 	if gotURL != "https://node.example.com/v1/messages" {
 		t.Errorf("probed %q, want /v1/messages with the /messages suffix collapsed", gotURL)
 	}
-	if !strings.Contains(gotBody, connectionAnthropicProbeModel) {
+	if !strings.Contains(gotBody, AnthropicValidationModel) {
 		t.Errorf("probe body missing default model: %s", gotBody)
 	}
 
@@ -259,6 +259,22 @@ func TestTestConnection_UnknownProviderIsUnsupported(t *testing.T) {
 	_, body := postTestConnection(t, repo, "conn-unknown")
 	if body["valid"] != false || body["error"] != "Provider test not supported" {
 		t.Errorf("unexpected body: %v", body)
+	}
+
+	// Verify DB row persistence via persistProbeResult: testStatus should be active, lastError cleared
+	conn, err := repo.GetProviderConnectionByID("conn-unknown")
+	if err != nil {
+		t.Fatalf("fetch connection: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(conn.Data), &data); err != nil {
+		t.Fatalf("unmarshal conn data: %v", err)
+	}
+	if data["testStatus"] != "active" {
+		t.Errorf("testStatus = %v, want active for unsupported probe", data["testStatus"])
+	}
+	if data["lastError"] != nil {
+		t.Errorf("lastError = %v, want nil for unsupported probe", data["lastError"])
 	}
 }
 
@@ -465,6 +481,7 @@ func TestConnectionTokenExpired(t *testing.T) {
 	now := time.Now().UTC()
 	tests := []struct {
 		name      string
+		provider  string
 		expiresAt string
 		want      bool
 	}{
@@ -473,11 +490,36 @@ func TestConnectionTokenExpired(t *testing.T) {
 		{name: "past", expiresAt: now.Add(-time.Hour).Format(time.RFC3339), want: true},
 		{name: "inside the refresh lead", expiresAt: now.Add(time.Minute).Format(time.RFC3339), want: true},
 		{name: "far future", expiresAt: now.Add(time.Hour).Format(time.RFC3339), want: false},
+		{
+			// codex's registry lead is 10 minutes, not the 5-minute default, so
+			// a token inside that band is already refreshable for codex alone.
+			name:      "codex refreshes earlier than the default lead",
+			provider:  "codex",
+			expiresAt: now.Add(7 * time.Minute).Format(time.RFC3339),
+			want:      true,
+		},
+		{
+			name:      "another provider keeps the default lead for the same window",
+			provider:  "xai",
+			expiresAt: now.Add(7 * time.Minute).Format(time.RFC3339),
+			want:      false,
+		},
+		{
+			// claude's registry lead is 4 hours.
+			name:      "claude refreshes four hours out",
+			provider:  "claude",
+			expiresAt: now.Add(3 * time.Hour).Format(time.RFC3339),
+			want:      true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := connectionTokenExpired(connectionProbeData{ExpiresAt: tt.expiresAt}); got != tt.want {
-				t.Errorf("connectionTokenExpired(%q) = %v, want %v", tt.expiresAt, got, tt.want)
+			provider := tt.provider
+			if provider == "" {
+				provider = "xai"
+			}
+			if got := connectionTokenExpired(provider, connectionProbeData{ExpiresAt: tt.expiresAt}); got != tt.want {
+				t.Errorf("connectionTokenExpired(%q, %q) = %v, want %v", provider, tt.expiresAt, got, tt.want)
 			}
 		})
 	}
@@ -518,5 +560,35 @@ func TestHandleTestConnectionReadsRequestBody(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTestConnection_CodexProbeSendsAccountIDHeader(t *testing.T) {
+	repo, cleanup := setupProbeTestDB(t)
+	defer cleanup()
+
+	data := `{"accessToken":"tok","expiresAt":"2099-01-01T00:00:00Z","providerSpecificData":{"chatgptAccountId":"acct-123"}}`
+	if err := repo.CreateProviderConnectionFull("conn-codex", "codex", "oauth", "Codex", nil, data); err != nil {
+		t.Fatalf("create connection: %v", err)
+	}
+
+	var gotHeaders map[string]string
+	original := connectionProbeDo
+	connectionProbeDo = func(_ context.Context, _ *http.Client, _, _ string, headers map[string]string, _ []byte) (int, []byte, error) {
+		gotHeaders = headers
+		// 400 is the codex probe's accepted "token ok" status.
+		return http.StatusBadRequest, nil, nil
+	}
+	t.Cleanup(func() { connectionProbeDo = original })
+
+	_, body := postTestConnection(t, repo, "conn-codex")
+	if body["valid"] != true {
+		t.Fatalf("probe should be valid, got %v", body)
+	}
+	if gotHeaders["chatgpt-account-id"] != "acct-123" {
+		t.Errorf("chatgpt-account-id header = %q, want acct-123", gotHeaders["chatgpt-account-id"])
+	}
+	if gotHeaders["Authorization"] != "Bearer tok" {
+		t.Errorf("Authorization header = %q, want %q", gotHeaders["Authorization"], "Bearer tok")
 	}
 }

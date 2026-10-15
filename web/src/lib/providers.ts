@@ -30,6 +30,14 @@ export interface ProviderCatalogItem {
   systemoneConfig?: { baseUrl?: string; format?: string; headers?: Record<string, string> }
   /** Upstream registry passthroughModels: unknown ids are accepted unvalidated. */
   passthroughModels?: boolean
+  /** Upstream registry credentialForm: which credential form the dashboard renders. */
+  credentialForm?: string
+  /**
+   * Upstream registry apiKeyOptionalWith: the providerSpecificData field that stands in
+   * for an API key, so the create and validate routes accept an empty key rather than
+   * rejecting a documented setup.
+   */
+  apiKeyOptionalWith?: string
   /** Upstream registry features.usage: the quota tracker can read this provider. */
   usage?: boolean
   searchConfig?: Record<string, any>
@@ -122,8 +130,24 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "color": "#0F766E",
     "icon": "anchor",
     "website": "https://tokenharbor.ai",
-    "notice": {"text":"OpenAI-compatible aggregator. One API key reaches every model, billed per-token from a prepaid wallet. Model ids are bare (e.g. claude-opus-5.5, gpt-6-astra, deepseek-v4.1-flash:free) and are fetched live from the provider.", "apiKeyUrl":"https://tokenharbor.ai/dashboard"},
+    "notice": {"text":"OpenAI-compatible aggregator. One API key reaches every model, billed per-token from a prepaid wallet. Model ids are bare (e.g. claude-opus-5.5, gpt-6-astra, qwen3.8-flash:free) and are fetched live from the provider.", "apiKeyUrl":"https://tokenharbor.ai/dashboard"},
     "modelsFetcher": {"url": "https://tokenharbor.ai/v1/models", "type": "openai"},
+    "authType": "apikey",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
+    "id": "sumopod",
+    "name": "SumoPod",
+    "category": "apikey",
+    "alias": "sumopod",
+    "color": "#2563EB",
+    "icon": "cloud",
+    "website": "https://sumopod.com",
+    "notice": {"text":"OpenAI-compatible aggregator. One API key reaches every model, billed per-token. Model ids are bare (e.g. claude-opus-5-5, gemini/gemini-3.8-flash, qwen3.8-max) and are fetched live from the provider.", "apiKeyUrl":"https://ai.sumopod.com"},
+    "modelsFetcher": {"url": "https://ai.sumopod.com/v1/models", "type": "openai"},
     "authType": "apikey",
     "noAuth": false,
     "serviceKinds": [
@@ -327,6 +351,24 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "serviceKinds": [
       "llm",
       "webSearch"
+    ]
+  },
+  {
+    "id": "muse",
+    "name": "Muse (Meta Model API)",
+    "category": "oauth",
+    "alias": "muse",
+    "color": "#0866FF",
+    "icon": "auto_awesome",
+    "website": "https://muse.ai",
+    "notice": {"text":"Sign in with your Meta account (Muse Code subscription) or paste a Model API key from dev.meta.ai. Subscription keys are minted per account; Meta may train on contributor-tier data.", "apiKeyUrl":"https://dev.meta.ai", "signupUrl":"https://muse.ai"},
+    "noAuth": false,
+    "authModes": ["oauth", "apikey"],
+    "authType": "apikey",
+    "priority": 120,
+    "passthroughModels": true,
+    "serviceKinds": [
+      "llm"
     ]
   },
   {
@@ -558,7 +600,8 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "noAuth": false,
     "serviceKinds": [
       "llm",
-      "image"
+      "image",
+      "systemone"
     ]
   },
   {
@@ -860,18 +903,6 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
-    "id": "anthropic-version",
-    "name": "anthropic-version",
-    "category": "apikey",
-    "alias": "anthropic-version",
-    "color": "#888888",
-    "icon": "dns",
-    "noAuth": false,
-    "serviceKinds": [
-      "llm"
-    ]
-  },
-  {
     "id": "assemblyai",
     "name": "AssemblyAI",
     "category": "apikey",
@@ -901,6 +932,36 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     "serviceKinds": [
       "tts"
     ]
+  },
+  {
+    "id": "bedrock",
+    "name": "AWS Bedrock",
+    "category": "apikey",
+    "alias": "br",
+    "color": "#FF9900",
+    "icon": "cloud",
+    "website": "https://aws.amazon.com/bedrock/",
+    "notice": {"text":"Two ways to authenticate, both entered in the AWS Bedrock Credentials section below. SSO / profile (recommended): fill in Profile and Region, leave the API key empty, then run `aws sso login --profile <name>` — credentials refresh automatically. Static keys: put the AWS secret access key in the API Key field and the key id in Access Key ID, adding Session Token if they are temporary (ASIA…) keys. A profile, if set, takes precedence over static keys.","apiKeyUrl":"https://console.aws.amazon.com/iam/home#/security_credentials"},
+    "authType": "apikey",
+    "noAuth": false,
+    "credentialForm": "aws",
+    "apiKeyOptionalWith": "profile",
+    "passthroughModels": true
+  },
+  {
+    "id": "bedrock-xai",
+    "name": "AWS Bedrock (xAI)",
+    "category": "apikey",
+    "alias": "brx",
+    "color": "#FF9900",
+    "icon": "cloud",
+    "website": "https://aws.amazon.com/bedrock/",
+    "notice": {"text":"xAI Grok models hosted on AWS Bedrock. Authenticate exactly like the AWS Bedrock provider: fill in Profile and Region and leave the API key empty, then run `aws sso login --profile <name>`; or use static keys with the AWS secret access key as the API key. Note Grok is a reasoning model and spends output budget thinking before it answers — a small max_tokens returns finish_reason \"length\" with empty content, so allow a few thousand tokens.","apiKeyUrl":"https://console.aws.amazon.com/iam/home#/security_credentials"},
+    "authType": "apikey",
+    "noAuth": false,
+    "credentialForm": "aws",
+    "apiKeyOptionalWith": "profile",
+    "passthroughModels": true
   },
   {
     "id": "azure",
@@ -1420,6 +1481,44 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "minimax-code",
+    "name": "MiniMax Code",
+    "category": "oauth",
+    "alias": "mmc",
+    "color": "#FF4D4F",
+    "icon": "smart_toy",
+    "website": "https://agent.minimax.cn",
+    "notice": {"text": "MiniMax Code coding subscription. Sign in with your MiniMax account; ~/.minimax is never touched, so this login does not sign the CLI out."},
+    "authType": "oauth",
+    "noAuth": false,
+    "authModes": ["oauth"],
+    "priority": 80,
+    "usage": true,
+    "serviceKinds": [
+      "llm"
+    ],
+    "modelsFetcher": {"url":"https://agent.minimax.cn/mavis/api/v1/models?region=cn&buildEnv=prod","type":"minimax-code"}
+  },
+  {
+    "id": "minimax-code-global",
+    "name": "MiniMax Code (Global)",
+    "category": "oauth",
+    "alias": "mmg",
+    "color": "#FF4D4F",
+    "icon": "smart_toy",
+    "website": "https://agent.minimax.io",
+    "notice": {"text": "The international MiniMax Code site. Sign-ins are per site: an account on agent.minimax.cn says nothing about agent.minimax.io."},
+    "authType": "oauth",
+    "noAuth": false,
+    "authModes": ["oauth"],
+    "priority": 80,
+    "usage": true,
+    "serviceKinds": [
+      "llm"
+    ],
+    "modelsFetcher": {"url":"https://agent.minimax.io/mavis/api/v1/models?region=en&buildEnv=prod","type":"minimax-code"}
+  },
+  {
     "id": "minimax-cn",
     "name": "Minimax (China)",
     "category": "apikey",
@@ -1581,18 +1680,6 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
-    "id": "openai-intent",
-    "name": "openai-intent",
-    "category": "apikey",
-    "alias": "openai-intent",
-    "color": "#888888",
-    "icon": "dns",
-    "noAuth": false,
-    "serviceKinds": [
-      "llm"
-    ]
-  },
-  {
     "id": "opencode-go",
     "name": "OpenCode Go",
     "category": "apikey",
@@ -1631,18 +1718,6 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
       "systemone"
     ],
     "modelsFetcher": {"url":"https://opencode.ai/zen/v1/models","type":"opencode-free"}
-  },
-  {
-    "id": "originator",
-    "name": "originator",
-    "category": "apikey",
-    "alias": "originator",
-    "color": "#888888",
-    "icon": "dns",
-    "noAuth": false,
-    "serviceKinds": [
-      "llm"
-    ]
   },
   {
     "id": "perplexity",
@@ -1847,6 +1922,23 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "tinyfish",
+    "name": "TinyFish",
+    "category": "apikey",
+    "alias": "tinyfish",
+    "color": "#FF6700",
+    "icon": "dns",
+    "website": "https://www.tinyfish.ai/",
+    "notice": {"apiKeyUrl":"https://agent.tinyfish.ai/api-keys"},
+    "authType": "apikey",
+    "noAuth": false,
+    "priority": 999,
+    "serviceKinds": [
+      "webSearch",
+      "webFetch"
+    ]
+  },
+  {
     "id": "together",
     "name": "Together AI",
     "category": "apikey",
@@ -1910,15 +2002,23 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
-    "id": "user-agent",
-    "name": "user-agent",
+    "id": "v1m",
+    "name": "v1m (System One)",
     "category": "apikey",
-    "alias": "user-agent",
-    "color": "#888888",
-    "icon": "dns",
+    "alias": "v1m",
+    "color": "#6366F1",
+    "icon": "psychology",
+    "website": "https://v1m.ir",
+    "notice": {"text":"v1m System One calibrated decision engine. Fast probabilistic evaluations over state and questions.", "apiKeyUrl":"https://v1m.ir"},
+    "authType": "apikey",
     "noAuth": false,
+    "priority": 45,
+    "systemoneConfig": {
+      "baseUrl": "https://v1m.ir/v1/systemone",
+      "format": "systemone"
+    },
     "serviceKinds": [
-      "llm"
+      "systemone"
     ]
   },
   {
@@ -2017,54 +2117,6 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
-    "id": "x-codebuddy-request",
-    "name": "x-codebuddy-request",
-    "category": "apikey",
-    "alias": "x-codebuddy-request",
-    "color": "#888888",
-    "icon": "dns",
-    "noAuth": false,
-    "serviceKinds": [
-      "llm"
-    ]
-  },
-  {
-    "id": "x-github-api-version",
-    "name": "x-github-api-version",
-    "category": "apikey",
-    "alias": "x-github-api-version",
-    "color": "#888888",
-    "icon": "dns",
-    "noAuth": false,
-    "serviceKinds": [
-      "llm"
-    ]
-  },
-  {
-    "id": "x-requested-with",
-    "name": "x-requested-with",
-    "category": "apikey",
-    "alias": "x-requested-with",
-    "color": "#888888",
-    "icon": "dns",
-    "noAuth": false,
-    "serviceKinds": [
-      "llm"
-    ]
-  },
-  {
-    "id": "x-vscode-user-agent-library-version",
-    "name": "x-vscode-user-agent-library-version",
-    "category": "apikey",
-    "alias": "x-vscode-user-agent-library-version",
-    "color": "#888888",
-    "icon": "dns",
-    "noAuth": false,
-    "serviceKinds": [
-      "llm"
-    ]
-  },
-  {
     "id": "xiaomi-tokenplan",
     "name": "Xiaomi MiMo (Token Plan)",
     "category": "apikey",
@@ -2127,14 +2179,18 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
   },
   {
     "id": "zai-search",
-    "name": "zai-search",
+    "name": "Z.ai Web Search",
     "category": "apikey",
     "alias": "zai-search",
-    "color": "#888888",
-    "icon": "dns",
+    "color": "#2563EB",
+    "icon": "search",
+    "website": "https://z.ai",
+    "notice": {"text":"Web search via the Z.ai MCP endpoint. Reuses the API key from the GLM (Zhipu) provider.","apiKeyUrl":"https://z.ai/manage-apikey/apikey-list"},
+    "authType": "apikey",
     "noAuth": false,
+    "priority": 999,
     "serviceKinds": [
-
+      "webSearch"
     ]
   },
   {

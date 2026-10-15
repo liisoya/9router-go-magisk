@@ -7,8 +7,8 @@ import "strings"
 // opencode-zen declares one transport per format
 // (open-sse/providers/registry/opencode-zen.js transports[]).
 const (
-	FormatOpenAI         = "openai"
-	FormatClaude         = "claude"
+	FormatOpenAI          = "openai"
+	FormatClaude          = "claude"
 	FormatOpenAIResponses = "openai-responses"
 )
 
@@ -17,8 +17,51 @@ const (
 // with more than one transport declare it; everything else routes on the
 // transport its base URL already names.
 var ProviderModelFormats = map[string]map[string]ModelFormats{
-	"ocz":       openCodeZenModelFormats,
+	"muse":         museModelFormats,
+	"kimi":         kimiModelFormats,
+	"kimi-coding":  kimiModelFormats,
+	"ocz":          openCodeZenModelFormats,
 	"opencode-zen": openCodeZenModelFormats,
+}
+
+// museModelFormats mirrors open-sse/providers/registry/muse.js models[]: Meta
+// accepts Chat Completions and Responses on the same key, but Muse Spark
+// reasoning only round-trips on /v1/responses, so every Muse Spark model pins
+// the Responses lane for both its target and its only supported format.
+var museModelFormats = map[string]ModelFormats{
+	"muse-spark-1.3":             {TargetFormat: FormatOpenAIResponses, SupportedFormats: []string{FormatOpenAIResponses}},
+	"muse-spark-1.2":             {TargetFormat: FormatOpenAIResponses, SupportedFormats: []string{FormatOpenAIResponses}},
+	"muse-spark-1.1":             {TargetFormat: FormatOpenAIResponses, SupportedFormats: []string{FormatOpenAIResponses}},
+	"muse-spark-1.3-contributor": {TargetFormat: FormatOpenAIResponses, SupportedFormats: []string{FormatOpenAIResponses}},
+	"muse-spark-1.2-contributor": {TargetFormat: FormatOpenAIResponses, SupportedFormats: []string{FormatOpenAIResponses}},
+}
+
+// kimiFormats is the contract every Kimi Code model declares. Kimi Code
+// natively serves the OpenAI Responses API (Codex wire_api = "responses") off
+// the same key as Chat Completions, so a client speaking either lane is
+// forwarded to it untouched; Responses is the target lane for a client whose
+// format matches neither. Upstream's registry models[] entries carry no
+// supportedFormats, which is why the sourceFormat-matched transport wins for
+// both lanes here (open-sse/handlers/chatCore.js resolveTransport).
+func kimiFormats() ModelFormats {
+	return ModelFormats{
+		TargetFormat:     FormatOpenAIResponses,
+		SupportedFormats: []string{FormatOpenAI, FormatOpenAIResponses},
+	}
+}
+
+// kimiModelFormats mirrors open-sse/providers/registry/kimi.js models[].
+var kimiModelFormats = map[string]ModelFormats{
+	"kimi-k3":                   kimiFormats(),
+	"k3":                        kimiFormats(),
+	"kimi-for-coding":           kimiFormats(),
+	"kimi-for-coding-highspeed": kimiFormats(),
+	"kimi-k2.7-code":            kimiFormats(),
+	"kimi-k2.7-code-highspeed":  kimiFormats(),
+	"kimi-k2.6":                 kimiFormats(),
+	"kimi-k2.5":                 kimiFormats(),
+	"kimi-k2.5-thinking":        kimiFormats(),
+	"kimi-latest":               kimiFormats(),
 }
 
 // ModelFormats is one registry model's declared format contract.
@@ -41,14 +84,14 @@ func openCodeZenFormats(target string, supported ...string) ModelFormats {
 // family on /zen/v1/responses, and the rest on /zen/v1/chat/completions.
 var openCodeZenModelFormats = map[string]ModelFormats{
 	// Claude (messages)
-	"claude-fable-5":   openCodeZenFormats(FormatClaude, FormatClaude),
-	"claude-fable-5-1": openCodeZenFormats(FormatClaude, FormatClaude),
-	"claude-opus-5":    openCodeZenFormats(FormatClaude, FormatClaude),
-	"claude-opus-4-8":  openCodeZenFormats(FormatClaude, FormatClaude),
-	"claude-opus-4-7":  openCodeZenFormats(FormatClaude, FormatClaude),
-	"claude-opus-4-6":  openCodeZenFormats(FormatClaude, FormatClaude),
-	"claude-opus-4-5":  openCodeZenFormats(FormatClaude, FormatClaude),
-	"claude-sonnet-5":  openCodeZenFormats(FormatClaude, FormatClaude),
+	"claude-fable-5":    openCodeZenFormats(FormatClaude, FormatClaude),
+	"claude-fable-5-1":  openCodeZenFormats(FormatClaude, FormatClaude),
+	"claude-opus-5":     openCodeZenFormats(FormatClaude, FormatClaude),
+	"claude-opus-4-8":   openCodeZenFormats(FormatClaude, FormatClaude),
+	"claude-opus-4-7":   openCodeZenFormats(FormatClaude, FormatClaude),
+	"claude-opus-4-6":   openCodeZenFormats(FormatClaude, FormatClaude),
+	"claude-opus-4-5":   openCodeZenFormats(FormatClaude, FormatClaude),
+	"claude-sonnet-5":   openCodeZenFormats(FormatClaude, FormatClaude),
 	"claude-sonnet-4-6": openCodeZenFormats(FormatClaude, FormatClaude),
 	"claude-sonnet-4-5": openCodeZenFormats(FormatClaude, FormatClaude),
 	"claude-sonnet-4":   openCodeZenFormats(FormatClaude, FormatClaude),
@@ -62,60 +105,60 @@ var openCodeZenModelFormats = map[string]ModelFormats{
 	"gemini-3.1-pro":        openCodeZenFormats(FormatOpenAI, FormatOpenAI),
 	"gemini-3-flash":        openCodeZenFormats(FormatOpenAI, FormatOpenAI),
 	// GPT / Grok / Muse Spark paid (responses)
-	"gpt-6-astra":       openCodeZenResponsesFormat,
-	"gpt-5.6-sol":       openCodeZenResponsesFormat,
-	"gpt-5.6-terra":     openCodeZenResponsesFormat,
-	"gpt-5.6-luna":      openCodeZenResponsesFormat,
-	"gpt-5.5":           openCodeZenResponsesFormat,
-	"gpt-5.5-pro":       openCodeZenResponsesFormat,
-	"gpt-5.4":           openCodeZenResponsesFormat,
-	"gpt-5.4-pro":       openCodeZenResponsesFormat,
-	"gpt-5.4-mini":      openCodeZenResponsesFormat,
-	"gpt-5.4-nano":      openCodeZenResponsesFormat,
+	"gpt-6-astra":         openCodeZenResponsesFormat,
+	"gpt-5.6-sol":         openCodeZenResponsesFormat,
+	"gpt-5.6-terra":       openCodeZenResponsesFormat,
+	"gpt-5.6-luna":        openCodeZenResponsesFormat,
+	"gpt-5.5":             openCodeZenResponsesFormat,
+	"gpt-5.5-pro":         openCodeZenResponsesFormat,
+	"gpt-5.4":             openCodeZenResponsesFormat,
+	"gpt-5.4-pro":         openCodeZenResponsesFormat,
+	"gpt-5.4-mini":        openCodeZenResponsesFormat,
+	"gpt-5.4-nano":        openCodeZenResponsesFormat,
 	"gpt-5.3-codex-spark": openCodeZenResponsesFormat,
-	"gpt-5.3-codex":     openCodeZenResponsesFormat,
-	"gpt-5.2":           openCodeZenResponsesFormat,
-	"gpt-5.2-codex":     openCodeZenResponsesFormat,
-	"gpt-5.1":           openCodeZenResponsesFormat,
-	"gpt-5.1-codex-max": openCodeZenResponsesFormat,
-	"gpt-5.1-codex":     openCodeZenResponsesFormat,
-	"gpt-5.1-codex-mini": openCodeZenResponsesFormat,
-	"gpt-5":             openCodeZenResponsesFormat,
-	"gpt-5-codex":       openCodeZenResponsesFormat,
-	"gpt-5-nano":        openCodeZenResponsesFormat,
-	"grok-build-0.1":    openCodeZenResponsesFormat,
-	"grok-4.6":          openCodeZenResponsesFormat,
-	"grok-4.5":          openCodeZenResponsesFormat,
-	"muse-spark-1.3":    openCodeZenResponsesFormat,
-	"muse-spark-1.2":    openCodeZenResponsesFormat,
+	"gpt-5.3-codex":       openCodeZenResponsesFormat,
+	"gpt-5.2":             openCodeZenResponsesFormat,
+	"gpt-5.2-codex":       openCodeZenResponsesFormat,
+	"gpt-5.1":             openCodeZenResponsesFormat,
+	"gpt-5.1-codex-max":   openCodeZenResponsesFormat,
+	"gpt-5.1-codex":       openCodeZenResponsesFormat,
+	"gpt-5.1-codex-mini":  openCodeZenResponsesFormat,
+	"gpt-5":               openCodeZenResponsesFormat,
+	"gpt-5-codex":         openCodeZenResponsesFormat,
+	"gpt-5-nano":          openCodeZenResponsesFormat,
+	"grok-build-0.1":      openCodeZenResponsesFormat,
+	"grok-4.6":            openCodeZenResponsesFormat,
+	"grok-4.5":            openCodeZenResponsesFormat,
+	"muse-spark-1.3":      openCodeZenResponsesFormat,
+	"muse-spark-1.2":      openCodeZenResponsesFormat,
 	// Qwen paid (messages)
 	"qwen3.6-plus": openCodeZenFormats(FormatClaude, FormatClaude),
 	"qwen3.5-plus": openCodeZenFormats(FormatClaude, FormatClaude),
 	// DeepSeek / GLM / MiniMax / Kimi / Big Pickle (chat completions)
-	"deepseek-v4-pro":            openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"deepseek-v4-flash":          openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"deepseek-v4-pro":              openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"deepseek-v4-flash":            openCodeZenFormats(FormatOpenAI, FormatOpenAI),
 	"deepseek-v4-flash-vision-exp": openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"glm-5.3-flash":              openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"glm-5.3":                    openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"glm-5.2":                    openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"glm-5.1":                    openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"glm-5":                      openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"minimax-m3":                 openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"minimax-m2.7":               openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"minimax-m2.5":               openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"kimi-k3":                    openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"kimi-k2.7-code":             openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"kimi-k2.6":                  openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"kimi-k2.5":                  openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"big-pickle":                 openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"union-alpha":                openCodeZenFormats(FormatClaude, FormatClaude),
+	"glm-5.3-flash":                openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"glm-5.3":                      openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"glm-5.2":                      openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"glm-5.1":                      openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"glm-5":                        openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"minimax-m3":                   openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"minimax-m2.7":                 openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"minimax-m2.5":                 openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"kimi-k3":                      openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"kimi-k2.7-code":               openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"kimi-k2.6":                    openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"kimi-k2.5":                    openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"big-pickle":                   openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"union-alpha":                  openCodeZenFormats(FormatClaude, FormatClaude),
 	// Free tier on the keyed lane (chat completions)
-	"deepseek-v4-flash-free":        openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"mimo-v2.6-flash-free":          openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"mimo-v2.5-free":                openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"ling-3.0-flash-fin-free":       openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"nemotron-3-ultra-free":         openCodeZenFormats(FormatOpenAI, FormatOpenAI),
-	"nemotron-3.5-lightning-free":   openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"deepseek-v4-flash-free":      openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"mimo-v2.6-flash-free":        openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"mimo-v2.5-free":              openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"ling-3.0-flash-fin-free":     openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"nemotron-3-ultra-free":       openCodeZenFormats(FormatOpenAI, FormatOpenAI),
+	"nemotron-3.5-lightning-free": openCodeZenFormats(FormatOpenAI, FormatOpenAI),
 	// Free tier on the keyed lane (responses)
 	"muse-spark-1.3-contributor-free": openCodeZenResponsesFormat,
 	"muse-spark-1.2-contributor-free": openCodeZenResponsesFormat,
@@ -200,6 +243,46 @@ func openCodeFamilyFormatsFor(base string) *ModelFormats {
 		}
 	}
 	return nil
+}
+
+// openCodeFreeTierModels lists the curated free-tier ids. Live upstream
+// behavior (403 "free tier can only be used from within OpenCode" for keyed
+// /zen/v1 requests) plus the upstream free-executor routing show these ids
+// answer behind the keyless /inference/v1 gate, so the keyed zen lane
+// forwards them there with public credentials instead of the user key.
+// big-pickle is deliberately absent: it has no live 403 evidence and the lane
+// table carries it as paid chat, so moving it could break working calls.
+var openCodeFreeTierModels = map[string]bool{
+	// opencode (free provider)
+	"muse-spark-1.2-contributor-free": true,
+	"muse-spark-1.3-contributor-free": true,
+	"jev-1.13-free":                   true,
+	// opencode-zen free tier on the keyed lane
+	"deepseek-v4-flash-free":      true,
+	"mimo-v2.6-flash-free":        true,
+	"mimo-v2.5-free":              true,
+	"ling-3.0-flash-fin-free":     true,
+	"nemotron-3-ultra-free":       true,
+	"nemotron-3.5-lightning-free": true,
+	// opencode-go free tier on the paid lane
+	"space-bunny-free": true,
+}
+
+// IsOpencodeFreeTierModel reports whether a bare model id is one of the
+// OpenCode free-tier ids, so executors can pick the /inference/v1 prefix.
+// The model must also be curated for the named provider; an id that only
+// exists on the free provider is not a zen free model and vice versa.
+func IsOpencodeFreeTierModel(provider, baseModelID string) bool {
+	if !openCodeFreeTierModels[baseModelID] {
+		return false
+	}
+	models := ProviderModels[provider]
+	for _, m := range models {
+		if m == baseModelID {
+			return true
+		}
+	}
+	return false
 }
 
 // SupportsFormat reports whether the model serves a client format directly.

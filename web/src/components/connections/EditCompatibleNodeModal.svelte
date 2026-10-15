@@ -5,19 +5,27 @@
   import Input from '../../lib/ui/Input.svelte'
   import Modal from '../../lib/ui/Modal.svelte'
   import { api, type ProviderNode } from '../../api/client'
+  import { nodeFormSeed } from './nodeFormSeed'
 
   interface Props {
     isOpen: boolean
     node?: ProviderNode | null
     isAnthropic?: boolean
     onClose: () => void
-    onSave: (data: { name: string; prefix: string; apiType?: string; baseUrl: string }) => Promise<void> | void
+    onSave: (data: {
+      name: string
+      prefix: string
+      apiType?: string
+      baseUrl: string
+      urlSuffix: string
+    }) => Promise<void> | void
   }
 
   let { isOpen, node = null, isAnthropic = false, onClose, onSave }: Props = $props()
 
   let formName = $state('')
   let formPrefix = $state('')
+  let formUrlSuffix = $state('')
   let formApiType = $state<'chat' | 'responses'>('chat')
   let formBaseUrl = $state('')
   let checkKey = $state('')
@@ -26,18 +34,42 @@
   let validation = $state<'success' | 'failed' | null>(null)
   let saving = $state(false)
 
-  // Seed the form from the node whenever it (re)opens, mirroring useEffect([node]).
+  // Seed once per open, not once per `node` object.
+  //
+  // The dashboard polls /api/provider-nodes every 10s and replaces the array,
+  // so `selectedNode` arrives here as a brand-new object with identical
+  // contents every tick. Keying the seed on that identity re-ran this effect
+  // while the user was still typing, overwriting every unsaved field with the
+  // stored value (issue #234). The stable identity of a node is its id, and a
+  // genuine edit — a different node, or a reopen — still has to reseed, or the
+  // form would open carrying the previous node's values.
+  //
+  // Plain variables, not $state: writing them must not be something the effect
+  // reads back and re-trigger on.
+  let seededNodeId: string | null = null
+  let wasOpen = false
+
   $effect(() => {
-    if (isOpen && node) {
-      formName = node.name || ''
-      formPrefix = node.prefix || ''
-      formApiType = node.apiType === 'responses' ? 'responses' : 'chat'
-      formBaseUrl = node.baseUrl || (isAnthropic ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1')
-      checkKey = ''
-      checkModelId = ''
-      validation = null
-      saving = false
-    }
+    const open = isOpen
+    const id = node?.id ?? null
+    // A node that only arrives after the modal opened (id goes null -> id) is
+    // a first seed too, which is why identity is compared against the last
+    // seeded one rather than only against `wasOpen`.
+    const shouldSeed = open && !!node && (!wasOpen || id !== seededNodeId)
+    wasOpen = open
+    if (!shouldSeed || !node) return
+
+    seededNodeId = id
+    const seed = nodeFormSeed(node, isAnthropic)
+    formName = seed.name
+    formPrefix = seed.prefix
+    formUrlSuffix = seed.urlSuffix
+    formApiType = seed.apiType
+    formBaseUrl = seed.baseUrl
+    checkKey = ''
+    checkModelId = ''
+    validation = null
+    saving = false
   })
 
   let saveDisabled = $derived(
@@ -66,10 +98,17 @@
     if (saveDisabled) return
     saving = true
     try {
-      const payload: { name: string; prefix: string; apiType?: string; baseUrl: string } = {
+      const payload: {
+        name: string
+        prefix: string
+        apiType?: string
+        baseUrl: string
+        urlSuffix: string
+      } = {
         name: formName.trim(),
         prefix: formPrefix.trim(),
         baseUrl: formBaseUrl.trim(),
+        urlSuffix: formUrlSuffix.trim(),
       }
       if (!isAnthropic) payload.apiType = formApiType
       await onSave(payload)
@@ -93,6 +132,15 @@
       bind:value={formPrefix}
       placeholder={isAnthropic ? 'ac-prod' : 'oc-prod'}
       hint="Required. Used as the provider prefix for model IDs."
+    />
+    <Input
+      label="Custom URL Suffix"
+      bind:value={formUrlSuffix}
+      placeholder="e.g. bai"
+      hint={node.urlSuffixGenerated
+        ? 'Optional. This provider still carries a randomized suffix; fill this in to name it.'
+        : 'Optional. Changing this renames the provider id and carries this node\'s credentials, models and history with it.'}
+      inputClass="font-mono"
     />
     {#if !isAnthropic}
       <div>

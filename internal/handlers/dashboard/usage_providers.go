@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
 )
 
@@ -89,8 +90,12 @@ func fetchProviderUsage(ctx context.Context, provider string, data map[string]an
 		return fetchGrokCliUsage(ctx, accessToken, psd), true
 	case "codex":
 		return fetchCodexUsage(ctx, firstNonEmptyStr(accessToken, apiKey)), true
+	case "claude":
+		return fetchClaudeUsage(ctx, firstNonEmptyStr(accessToken, apiKey)), true
 	case "opencode-zen":
 		return fetchOpenCodeZenUsage(ctx, apiKey, connectionBaseURL(data)), true
+	case "minimax-code", "minimax-code-global":
+		return fetchMiniMaxCodeUsage(ctx, provider, accessToken, psdStr(psd, "realUserID")), true
 	default:
 		return usageResult{}, false
 	}
@@ -1214,9 +1219,9 @@ func fetchKiroUsage(ctx context.Context, accessToken string, psd map[string]any)
 // ---------- grok-cli: billing + user ----------
 
 const (
-	grokCliVersion          = "0.2.99"
-	grokCliClientIdentifier = "grok-shell"
-	grokCliUserAgent        = "grok-shell/0.2.99 (linux; x86_64)"
+	grokCliVersion          = providers.GrokCLIVersion
+	grokCliClientIdentifier = providers.GrokCLIClientIdentifier
+	grokCliUserAgent        = providers.GrokCLIUserAgent
 	grokCliBillingURL       = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 	grokCliUserURL          = "https://cli-chat-proxy.grok.com/v1/user?include=subscription"
 )
@@ -1539,8 +1544,10 @@ var antigravityImportantModels = map[string]bool{
 	"gemini-3.8-flash-high": true, "gemini-3.8-flash-medium": true, "gemini-3.8-flash-low": true,
 	"gemini-3.7-flash-high": true, "gemini-3.7-flash-medium": true, "gemini-3.7-flash-low": true,
 	"gemini-3.6-flash-high": true, "gemini-3.6-flash-medium": true, "gemini-3.6-flash-low": true,
-	"gemini-3.5-flash-low": true, "gemini-3.5-flash-extra-low": true,
-	"gemini-pro-agent": true, "gemini-3.1-pro-low": true,
+	"gemini-3.1-pro-high": true, "gemini-pro-agent": true, "gemini-3.1-pro-low": true,
+	"claude-sonnet-5-5-high": true, "claude-sonnet-5-5-medium": true, "claude-sonnet-5-5-low": true,
+	"claude-sonnet-5-5": true, "claude-opus-5-5-high": true, "claude-opus-5-5-medium": true,
+	"claude-opus-5-5-low": true, "claude-opus-5-5": true,
 	"claude-sonnet-4-6": true, "claude-opus-4-6-thinking": true,
 	"gpt-oss-120b-medium":    true,
 	"gemini-3.1-flash-image": true,
@@ -1628,17 +1635,18 @@ func fetchAntigravityDashboardUsage(ctx context.Context, accessToken, projectID 
 					continue
 				}
 				frac := usageNum(qi["remainingFraction"], 0)
-				total := 1000.0
-				remaining := math.Round(total * frac)
-				used := math.Max(0, total-remaining)
+				total := 100.0
+				remPct := math.Round(frac * 100)
+				used := math.Max(0, math.Round((1.0-frac)*100))
 				dn, _ := info["displayName"].(string)
 				if dn == "" {
 					dn = modelKey
 				}
 				quotas[modelKey] = map[string]any{
-					"used": used, "total": total,
+					"used":                used,
+					"total":               total,
 					"resetAt":             usageResetTime(qi["resetTime"]),
-					"remainingPercentage": frac * 100,
+					"remainingPercentage": remPct,
 					"unlimited":           false,
 					"displayName":         dn,
 				}
@@ -1714,6 +1722,7 @@ func fetchAntigravityDashboardWeekly(ctx context.Context, accessToken, projectID
 	type familyTarget struct {
 		key         string
 		displayName string
+		window      string
 	}
 	type familyConfig struct {
 		pattern string
@@ -1723,13 +1732,13 @@ func fetchAntigravityDashboardWeekly(ctx context.Context, accessToken, projectID
 	configs := []familyConfig{
 		{
 			pattern: "gemini",
-			weekly:  familyTarget{"gemini_weekly", "Gemini (Weekly)"},
-			session: familyTarget{"gemini_session", "Gemini (5h)"},
+			weekly:  familyTarget{"gemini_weekly", "Gemini (Weekly)", "weekly"},
+			session: familyTarget{"gemini_session", "Gemini (5h)", "5h"},
 		},
 		{
 			pattern: "claude",
-			weekly:  familyTarget{"claude_gpt_weekly", "Claude & GPT (Weekly)"},
-			session: familyTarget{"claude_gpt_session", "Claude & GPT (5h)"},
+			weekly:  familyTarget{"claude_gpt_weekly", "Claude & GPT (Weekly)", "weekly"},
+			session: familyTarget{"claude_gpt_session", "Claude & GPT (5h)", "5h"},
 		},
 	}
 	result := map[string]any{}
@@ -1776,16 +1785,17 @@ func fetchAntigravityDashboardWeekly(ctx context.Context, accessToken, projectID
 					if _, exists := result[target.key]; exists {
 						break
 					}
-					total := 1000.0
-					remaining := math.Round(total * frac)
-					used := math.Max(0, total-remaining)
+					total := 100.0
+					remPct := math.Round(frac * 100)
+					used := math.Max(0, math.Round((1.0-frac)*100))
 					result[target.key] = map[string]any{
 						"used":                used,
 						"total":               total,
 						"resetAt":             usageResetTime(b["resetTime"]),
-						"remainingPercentage": frac * 100,
+						"remainingPercentage": remPct,
 						"unlimited":           false,
 						"displayName":         target.displayName,
+						"window":              target.window,
 					}
 					break
 				}

@@ -75,6 +75,9 @@ func resolveEgress(connData *ConnectionData, cfg *providers.ProviderConfig) Egre
 	if connData == nil {
 		return Egress{Kind: "direct"}
 	}
+	if poolID != "" {
+		return Egress{Kind: "http", PoolID: poolID, PoolName: poolName}
+	}
 	if enabled, proxyURL := legacyProxyFields(connData); enabled {
 		return Egress{Kind: "http", PoolID: poolID, PoolName: poolName, Target: proxyURL}
 	}

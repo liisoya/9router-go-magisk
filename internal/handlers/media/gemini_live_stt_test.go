@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -209,18 +209,36 @@ func TestTranscribeGeminiLive_PartialTranscriptOnClose(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newLiveSTTServer(t, func(conn *websocket.Conn) {
 				sendFrame(t, conn, map[string]any{"serverContent": map[string]any{"setupComplete": true}})
+				// Drain the client's turn before sending anything. After
+				// setupComplete the client streams its audio chunks and then
+				// the flushing clientContent frame; closing on the first read
+				// raced that write, so the close could land before the client
+				// had read the delta sent below — turning a passing case into
+				// "socket closed before completion" about one run in twelve.
+				// Reading through turnComplete means the client is parked in
+				// its read loop by the time this sends, so the close is always
+				// the last thing it observes.
 				for {
-					if _, _, err := conn.ReadMessage(); err != nil {
+					_, data, err := conn.ReadMessage()
+					if err != nil {
 						return
 					}
-					if tt.delta != "" {
-						sendFrame(t, conn, map[string]any{"serverContent": map[string]any{
-							"inputTranscription": map[string]any{"text": tt.delta},
-						}})
+					var frame map[string]any
+					if err := json.Unmarshal(data, &frame); err != nil {
+						continue
 					}
-					// Close without ever signalling turnComplete.
-					return
+					if cc, ok := frame["clientContent"].(map[string]any); ok {
+						if done, _ := cc["turnComplete"].(bool); done {
+							break
+						}
+					}
 				}
+				if tt.delta != "" {
+					sendFrame(t, conn, map[string]any{"serverContent": map[string]any{
+						"inputTranscription": map[string]any{"text": tt.delta},
+					}})
+				}
+				// Close without ever signalling turnComplete.
 			})
 			srv.upgrader.CheckOrigin = func(*http.Request) bool { return true }
 

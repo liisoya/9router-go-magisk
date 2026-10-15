@@ -3,7 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"io"
 	"net/http"
@@ -601,5 +601,57 @@ func TestCodexLoopback_completesLoginEndToEnd(t *testing.T) {
 func TestIsAddrInUse(t *testing.T) {
 	if isAddrInUse(errors.New("some other failure")) {
 		t.Error("unrelated errors must not be reported as a busy port")
+	}
+}
+
+func TestCodexProxy_stopFailsPendingSessions(t *testing.T) {
+	p := &codexProxy{sessions: map[string]*codexSession{}}
+	p.register("state-pending", "verifier-1", codexRedirectURI, "")
+	p.register("state-done", "verifier-2", codexRedirectURI, "")
+	p.complete("state-done", "cx-abc", "dev@example.com")
+
+	p.stop()
+
+	sess, ok := p.lookup("state-pending")
+	if !ok || sess.status != "error" {
+		t.Fatalf("pending session should fail on stop, got %+v", sess)
+	}
+	if sess.errMsg == "" {
+		t.Error("expected an explanatory error message for the failed session")
+	}
+	sess, _ = p.lookup("state-done")
+	if sess.status != "done" {
+		t.Errorf("completed session must not be disturbed by stop, got %q", sess.status)
+	}
+}
+
+func TestCodexProxy_sweepStaleSessions(t *testing.T) {
+	p := &codexProxy{sessions: map[string]*codexSession{}}
+	p.register("state-old", "verifier", codexRedirectURI, "")
+	p.sessions["state-old"].createdAt = time.Now().Add(-codexSessionTTL - time.Minute)
+	p.register("state-new", "verifier", codexRedirectURI, "")
+
+	// register() already sweeps; call explicitly too for the direct path.
+	p.sweepStaleSessions()
+	if _, ok := p.lookup("state-old"); ok {
+		t.Error("stale session should be swept")
+	}
+	if _, ok := p.lookup("state-new"); !ok {
+		t.Error("fresh session should survive the sweep")
+	}
+}
+
+func TestValidateCodexConnectionData(t *testing.T) {
+	good := map[string]any{"providerSpecificData": map[string]any{"chatgptAccountId": "acct-1"}}
+	if fail := validateCodexConnectionData("codex", good); fail != nil {
+		t.Errorf("connection with an account id should pass, got %v", fail)
+	}
+	if fail := validateCodexConnectionData("codex", map[string]any{}); fail == nil {
+		t.Error("codex login without an account id must fail fast")
+	} else if fail.status != http.StatusBadGateway {
+		t.Errorf("fail status = %d, want %d", fail.status, http.StatusBadGateway)
+	}
+	if fail := validateCodexConnectionData("claude", map[string]any{}); fail != nil {
+		t.Errorf("other providers must not be affected, got %v", fail)
 	}
 }

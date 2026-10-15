@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,25 +27,58 @@ import (
 // Console log capture: an in-process ring buffer plus live subscribers, so the
 // dashboard can stream server log output. Mirrors the Next translator
 // console-logs contract (buffer + SSE with init/line/lines/clear events).
+//
+// Each entry carries the level and arrival time the emitter already knew. The
+// dashboard used to re-parse rendered text to guess a level and fell back to
+// green for anything it did not recognise, which is why untagged output all
+// read as the same success green.
 const (
 	consoleMaxLines = 200
 	consoleBufSize  = 256
 )
 
+// ConsoleEntry is one captured line plus the metadata known at emit time.
+// Time is the arrival wall clock, not a logger stamp: the text format carries
+// no timestamp, so this is what makes rows readable after a page reload. JSON
+// lines keep the authoritative "time" field inside Line, which the dashboard
+// prefers whenever both are present.
+type ConsoleEntry struct {
+	Time  time.Time
+	Level Level
+	Line  string
+}
+
+// MarshalJSON emits the compact {time,level,line} shape the dashboard reads.
+// Hand-rolled because encoding/json/v2 on a time.Time would marshal the whole
+// struct's exported shape instead of the wire contract.
+func (e ConsoleEntry) MarshalJSON() ([]byte, error) {
+	b := make([]byte, 0, len(e.Line)+64)
+	b = append(b, `{"time":`...)
+	b = strconv.AppendQuote(b, e.Time.UTC().Format(time.RFC3339Nano))
+	b = append(b, `,"level":"`...)
+	b = append(b, e.Level.String()...)
+	b = append(b, `","line":`...)
+	line, err := json.Marshal(e.Line)
+	if err != nil {
+		return nil, fmt.Errorf("log.ConsoleEntry.MarshalJSON: %w", err)
+	}
+	return append(append(b, line...), '}'), nil
+}
+
 type consoleEvent struct {
-	kind string // "line" | "clear"
-	line string
+	kind  string // "line" | "clear"
+	entry ConsoleEntry
 }
 
 // Kind returns the event kind ("line" or "clear").
 func (e consoleEvent) Kind() string { return e.kind }
 
-// Line returns the log line for "line" events.
-func (e consoleEvent) Line() string { return e.line }
+// Entry returns the captured line for "line" events.
+func (e consoleEvent) Entry() ConsoleEntry { return e.entry }
 
 var (
 	consoleMu   sync.Mutex
-	consoleLogs []string
+	consoleLogs []ConsoleEntry
 	consoleSubs = map[int]chan consoleEvent{}
 	consoleNext int
 )
@@ -62,11 +96,12 @@ func stripANSI(line string) string {
 }
 
 // captureConsole appends a formatted line to the ring buffer and fans it out
-// to live subscribers without blocking the logger.
-func captureConsole(raw string) {
-	line := stripANSI(raw)
+// to live subscribers without blocking the logger. The level comes from the
+// emitter, so the dashboard never has to infer it from rendered text.
+func captureConsole(l Level, raw string) {
+	entry := ConsoleEntry{Time: time.Now(), Level: l, Line: stripANSI(raw)}
 	consoleMu.Lock()
-	consoleLogs = append(consoleLogs, line)
+	consoleLogs = append(consoleLogs, entry)
 	if len(consoleLogs) > consoleMaxLines {
 		consoleLogs = consoleLogs[len(consoleLogs)-consoleMaxLines:]
 	}
@@ -77,17 +112,17 @@ func captureConsole(raw string) {
 	consoleMu.Unlock()
 	for _, ch := range subs {
 		select {
-		case ch <- consoleEvent{kind: "line", line: line}:
+		case ch <- consoleEvent{kind: "line", entry: entry}:
 		default: // drop for slow subscriber, never block logging
 		}
 	}
 }
 
-// ConsoleLogs returns a copy of the buffered console lines.
-func ConsoleLogs() []string {
+// ConsoleEntries returns a copy of the buffered console entries.
+func ConsoleEntries() []ConsoleEntry {
 	consoleMu.Lock()
 	defer consoleMu.Unlock()
-	out := make([]string, len(consoleLogs))
+	out := make([]ConsoleEntry, len(consoleLogs))
 	copy(out, consoleLogs)
 	return out
 }
@@ -168,6 +203,17 @@ var (
 	colorReset   = "\033[0m"
 	colorEnabled bool
 )
+
+// String returns the canonical lowercase level name ("debug", "info", "warn",
+// "error"). The console wire contract and LevelString share one vocabulary.
+func (l Level) String() string {
+	for name, lv := range levelNames {
+		if lv == l {
+			return name
+		}
+	}
+	return "info"
+}
 
 func init() {
 	currentLevel = LevelInfo
@@ -337,7 +383,7 @@ func output(l Level, tag, msg string, kv ...any) {
 		b, err := json.Marshal(entry)
 		if err == nil {
 			line := string(b)
-			captureConsole(line)
+			captureConsole(l, line)
 			log.Println(line)
 			return
 		}
@@ -371,6 +417,6 @@ func output(l Level, tag, msg string, kv ...any) {
 	}
 
 	line := b.String()
-	captureConsole(line)
+	captureConsole(l, line)
 	log.Println(line)
 }

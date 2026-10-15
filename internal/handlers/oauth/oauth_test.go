@@ -144,7 +144,9 @@ func TestHandleOAuthKiroSocialExchange_missingCode(t *testing.T) {
 }
 
 func TestHandleKiroAutoImport_MissingCache(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	temp := t.TempDir()
+	t.Setenv("HOME", temp)
+	t.Setenv("USERPROFILE", temp)
 	handler := NewOAuthHandler(nil)
 	req := httptest.NewRequest("GET", "/api/oauth/kiro/auto-import", nil)
 	rec := httptest.NewRecorder()

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import type { ActiveRequestItem } from './types'
-  import { getIconPath } from '../connections/types'
+  import ProviderArtwork from '../providers/ProviderArtwork.svelte'
 
   interface ProviderNodeItem {
     id: string
@@ -29,19 +29,13 @@
     onRefresh
   }: Props = $props()
 
-  // Default fallback providers if none connected
-  const FALLBACK_PROVIDERS: ProviderNodeItem[] = [
-    { id: 'antigravity', name: 'Antigravity', color: '#F59E0B' },
-    { id: 'opencode', name: 'OpenCode Free', color: '#3B82F6' },
-    { id: 'nvidia', name: 'NVIDIA NIM', color: '#76B900' },
-    { id: 'freebuff', name: 'Freebuff', color: '#10B981' },
-    { id: 'openrouter', name: 'OpenRouter', color: '#6366F1' },
-    { id: 'clinepass', name: 'ClinePass', color: '#8B5CF6' }
-  ]
-
-  let displayProviders = $derived(
-    providers.length > 0 ? providers : FALLBACK_PROVIDERS
-  )
+  // Upstream parity (#4615): an empty list renders an empty state, it does not
+  // fall back to a hardcoded free-provider roster. Those nodes have no
+  // connection behind them, and upstream #4615 exists precisely because
+  // drawing them unconditionally made an idle map look busy — so a catalog
+  // fallback here would re-introduce the very bug that PR removed, on the one
+  // screen where nothing is actually in use.
+  let displayProviders = $derived(providers)
 
   let activeProviderIds = $derived.by(() => {
     const set = new Set<string>()
@@ -494,16 +488,7 @@
           style="background-color: {node.color}15;"
         >
           {#if !imageErrors[node.id]}
-            <img
-              src={getIconPath(node.id)}
-              alt={node.name}
-              class="w-6 h-6 rounded-sm object-contain"
-              onerror={() => {
-                imageErrors = { ...imageErrors, [node.id]: true }
-              }}
-              loading="lazy"
-              decoding="async"
-            />
+            <ProviderArtwork id={node.id} class="w-6 h-6 rounded-sm object-contain" />
           {:else}
             <span class="text-sm font-bold" style="color: {node.color};">
               {node.textIcon}
@@ -539,6 +524,14 @@
       </div>
     {/each}
   </div>
+  <!-- Upstream empty state: nothing has been used in the period, so there is
+       nothing honest to draw. The router core and the zoom controls stay put so
+       the card keeps its shape instead of collapsing. -->
+  {#if displayProviders.length === 0}
+    <div class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4 text-center text-sm text-text-muted">
+      No providers connected
+    </div>
+  {/if}
 
   <!-- Bottom-left React Flow style controls -->
   <div class="absolute bottom-4 left-4 z-20 flex flex-col rounded-md border border-border bg-surface/90 shadow-md overflow-hidden backdrop-blur">

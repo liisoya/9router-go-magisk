@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, type SystemVersionInfo } from '../api/client'
+  import { copyToClipboard } from '../lib/clipboard'
   import { TAB_ROUTES, type ActiveTab } from '../lib/router'
 
   export type { ActiveTab }
@@ -61,9 +62,7 @@
   })
 
   async function copyInstallCmd() {
-    try {
-      await navigator.clipboard.writeText(INSTALL_CMD)
-    } catch {}
+    await copyToClipboard(INSTALL_CMD)
     copied = true
     setTimeout(() => {
       copied = false
@@ -112,6 +111,15 @@
     if (tab === 'console-log') {
       return activeTab === 'console-log' || activeTab === 'terminal'
     }
+    // Cache and Compression Analytics are Usage sections (#200): they left the
+    // sidebar, so the Usage entry has to stay lit while one of them is open.
+    if (tab === 'analytics') {
+      return (
+        activeTab === 'analytics' ||
+        activeTab === 'usage-cache' ||
+        activeTab === 'usage-compression'
+      )
+    }
     return activeTab === tab
   }
 </script>
@@ -147,7 +155,7 @@
           9router-go
         </h1>
         <span class="text-xs text-text-muted leading-tight">
-          {version ? `v${version}` : 'v1.9.7'}
+          {version ? `v${version}` : 'v1.9.9'}
         </span>
       </div>
     </a>
@@ -294,6 +302,23 @@
           settings
         </span>
         <span class="text-[13px]">Settings</span>
+      </a>
+
+      <a
+        href={TAB_ROUTES.security}
+        onclick={(e) => handleNav('security', e)}
+        class="flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {isLinkActive('security')
+          ? 'bg-primary/10 text-primary font-medium'
+          : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
+      >
+        <span
+          class="material-symbols-outlined text-[18px] {isLinkActive('security')
+            ? 'fill-1'
+            : 'group-hover:text-primary transition-colors'}"
+        >
+          shield_lock
+        </span>
+        <span class="text-[13px]">Security</span>
       </a>
     </div>
   </nav>

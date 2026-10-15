@@ -55,12 +55,15 @@ func ForwardCodex(w http.ResponseWriter, req *Request) error {
 	// The ChatGPT Codex backend rejects a max_output_tokens it did not ask
 	// for; every chat-completions client sends one, so drop it here (#48).
 	transformedBody = stripCodexUnsupportedTokenParams(transformedBody)
+	// Only now that the "(level)" suffix is gone can the catalog id be mapped
+	// to its wire id, so this has to follow the transform rather than precede it.
+	transformedBody = rewriteCodexUpstreamModel(transformedBody)
 	cfg, transformedBody := applyCodexCompact(req.Config, transformedBody)
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData)
+	resp, err := proxy.ForwardCodex(ctx, req.Client, cfg, req.APIKey, transformedBody, req.IsStream, req.ConnData, codexResponsesLiteBody(transformedBody))
 	if err != nil {
 		return fmt.Errorf("ForwardCodex: %w", err)
 	}
@@ -578,8 +581,6 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	_ = json.Unmarshal(req.Body, &reqObj)
 	cleanModel := strings.TrimPrefix(reqObj.Model, "oc/")
 	cleanModel = strings.TrimPrefix(cleanModel, "opencode/")
-	cleanModel = strings.TrimPrefix(cleanModel, "antigravity/")
-	cleanModel = strings.TrimPrefix(cleanModel, "ag/")
 	if parenIdx := strings.IndexByte(cleanModel, '('); parenIdx != -1 {
 		cleanModel = cleanModel[:parenIdx]
 	}
@@ -599,7 +600,7 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		// The free-tier gate fingerprints the lowercase tool quartet; capitalised
 		// variants from Claude Code CLI are renamed here and restored on the
 		// response (translator.ConcealFingerprintTools).
-		transformedBody, toolNameMap := translator.ConcealFingerprintTools(transformedBody)
+		transformedBody, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(transformedBody, true, isOpenCodeAutoToolChoiceModel(cleanModel))
 		req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
 		w = NewToolNameRestoringWriter(w, toolNameMap)
 
@@ -612,13 +613,11 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 			for k, v := range req.Config.StaticHeaders {
 				cfg.StaticHeaders[k] = v
 			}
-			cfg.StaticHeaders["x-relay-path"] = "/zen/v1/responses"
-		} else if !strings.HasSuffix(cfg.BaseURL, "/responses") {
+			cfg.StaticHeaders["x-relay-path"] = "/inference/v1/responses"
+		} else {
 			baseURL := strings.TrimRight(cfg.BaseURL, "/")
-			if strings.HasSuffix(baseURL, "/chat/completions") {
-				baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
-			}
-			cfg.BaseURL = baseURL + "/responses"
+			baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
+			cfg.BaseURL = opencodeInferenceBase(baseURL) + "/responses"
 		}
 		cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, req.SessionID, req.IsStream)
 		ctx := req.Ctx
@@ -646,7 +645,7 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 
 	body := InjectReasoningContent(req.Body, "opencode")
 	// opencode Chat Completions path: same conceal + restore of tool names.
-	body, toolNameMap := translator.ConcealFingerprintTools(body)
+	body, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
 	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
 	w = NewToolNameRestoringWriter(w, toolNameMap)
 
@@ -658,12 +657,16 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		if cleanModel != "" {
 			reqMap["model"] = cleanModel
 		}
-		if b, err := json.Marshal(reqMap); err == nil {
+		// Deterministic marshaling keeps the serialized request prefix
+		// stable across turns, which DeepSeek's prefix prompt cache
+		// requires; json/v2 randomizes map member order by default.
+		if b, err := marshalStable(reqMap); err == nil {
 			body = b
 		}
 	}
 
 	cfg := *req.Config
+	cfg.BaseURL = opencodeChatURL(cfg.BaseURL)
 	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, req.SessionID, true)
 
 	ctx := req.Ctx
@@ -694,6 +697,67 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	return jsonResponse(req.Ctx, w, bytes.NewReader(data), req.TranslateResp, req.ResponseBuf)
 }
 
+// opencodeInferenceBase rewrites a zen-layout base URL to the v2 inference
+// gate's /inference/v1 prefix. Any host mirroring the zen layout follows the
+// same migration, so the rewrite keys off the prefix rather than the host. A
+// base with no zen prefix — a custom endpoint, or the registry default that
+// already points at /inference/v1 — is returned untouched.
+func opencodeInferenceBase(base string) string {
+	base = strings.TrimRight(base, "/")
+	base = strings.TrimSuffix(base, "/chat/completions")
+	base = strings.TrimSuffix(base, "/messages")
+	base = strings.TrimSuffix(base, "/responses")
+	switch {
+	case strings.HasSuffix(base, "/zen/v1"):
+		return strings.TrimSuffix(base, "/zen/v1") + "/inference/v1"
+	case strings.HasSuffix(base, "/inference/v1"):
+		return base
+	default:
+		return base
+	}
+}
+
+func opencodeChatURL(base string) string {
+	base = strings.TrimRight(base, "/")
+	if !strings.HasSuffix(base, "/chat/completions") {
+		return base
+	}
+	trimmed := strings.TrimSuffix(base, "/chat/completions")
+	if strings.HasSuffix(trimmed, "/zen/v1") {
+		return strings.TrimSuffix(trimmed, "/zen/v1") + "/inference/v1/chat/completions"
+	}
+	return base
+}
+
+// isOpenCodeAutoToolChoiceModel ports the upstream forceAutoToolChoiceModels
+// quirk (open-sse/executors/opencode.js): only models confirmed auto-only get
+// their explicit tool_choice rewritten, so the allowlist stays closed until a
+// model is probed.
+func isOpenCodeAutoToolChoiceModel(cleanModel string) bool {
+	return cleanModel == "muse-spark-1.3-contributor-free"
+}
+
+// isOpencodeFreeModel reports whether a bare model id belongs to the OpenCode
+// free tier. Keyed zen requests for these ids answer 403 ("free tier can only
+// be used from within OpenCode"), so the zen lane forwards them to the
+// keyless /inference/v1 gate with public credentials. The source of truth is
+// the curated registry (providers.IsOpencodeFreeTierModel) — never suffix
+// matching.
+func isOpencodeFreeModel(cleanModel string) bool {
+	base := cleanModel
+	if parenIdx := strings.IndexByte(base, '('); parenIdx != -1 {
+		base = base[:parenIdx]
+	}
+	// IsOpencodeFreeTierModel already requires catalog membership, so this
+	// stays catalog-driven across all three lanes (free, zen, go).
+	for _, provider := range []string{"opencode", "opencode-zen", "opencode-go"} {
+		if providers.IsOpencodeFreeTierModel(provider, base) {
+			return true
+		}
+	}
+	return false
+}
+
 var opencodeGoMessagesModels = map[string]bool{
 	"minimax-m3":    true,
 	"minimax-m2.7":  true,
@@ -712,6 +776,13 @@ func EnsureClaudeMessages(body []byte, model string) []byte {
 	return ensureMessagesMaxTokens(body, model)
 }
 
+// EnsureClaudeMessagesFor is EnsureClaudeMessages for a Claude-shaped lane
+// that is not Anthropic itself (minimax-code, opencode-zen, ...): provider
+// selects the capability row that decides the thinking format.
+func EnsureClaudeMessagesFor(body []byte, provider, model string) []byte {
+	return ensureMessagesFor(body, provider, model)
+}
+
 // ensureMessagesMaxTokens converts an incoming request (OpenAI or Claude) into a spec-compliant
 // Claude Messages API request payload:
 // - Guarantees positive integer max_tokens (fallback from max_completion_tokens or default 4096)
@@ -722,6 +793,10 @@ func EnsureClaudeMessages(body []byte, model string) []byte {
 // - Merges consecutive same-role messages to uphold Claude alternating role invariant
 // - Strips OpenAI-only fields like stream_options, store, max_completion_tokens, reasoning_effort
 func ensureMessagesMaxTokens(body []byte, model string) []byte {
+	return ensureMessagesFor(body, "claude", model)
+}
+
+func ensureMessagesFor(body []byte, provider, model string) []byte {
 	var reqMap map[string]any
 	if err := json.Unmarshal(body, &reqMap); err != nil {
 		return body
@@ -774,6 +849,17 @@ func ensureMessagesMaxTokens(body []byte, model string) []byte {
 		}
 	}
 
+	// 3b. parallel_tool_calls is OpenAI's single-tool-call policy; Claude
+	// spells it as a flag on tool_choice. Without tools there is nothing to
+	// restrict, so the flag would only add noise (#4581). Either way the
+	// OpenAI-only key is stripped, as step 5 does for other foreign fields.
+	if ptc, hasPTC := reqMap["parallel_tool_calls"]; hasPTC {
+		if ptc == false && hasClaudeTools(reqMap) {
+			reqMap["tool_choice"] = withDisabledParallelToolUse(reqMap["tool_choice"])
+		}
+		delete(reqMap, "parallel_tool_calls")
+	}
+
 	// 4. messages & system
 	if msgs, ok := reqMap["messages"].([]any); ok && len(msgs) > 0 {
 		extractedSys, claudeMsgs := convertOpenAIMessagesToClaude(msgs)
@@ -793,6 +879,7 @@ func ensureMessagesMaxTokens(body []byte, model string) []byte {
 	// translation on its own — capture it into the Claude field first.
 	// (upstream thinkingUnified captureThinking)
 	applyClaudeThinkingDisplay(reqMap)
+	applyClaudeThinkingType(reqMap, provider, model)
 	delete(reqMap, "stream_options")
 	delete(reqMap, "store")
 	delete(reqMap, "reasoning_effort")
@@ -840,6 +927,9 @@ func convertOpenAIToolsToClaude(tools []any) []any {
 			if cc, ok := m["cache_control"]; ok {
 				cTool["cache_control"] = cc
 			}
+			if strict, ok := toolStrict(m, fn); ok {
+				cTool["strict"] = strict
+			}
 			out = append(out, cTool)
 			continue
 		}
@@ -859,6 +949,21 @@ func convertOpenAIToolsToClaude(tools []any) []any {
 	return out
 }
 
+// toolStrict resolves an explicit tool strict mode, preferring the flat
+// Responses/Codex shape and falling back to the Chat-Completions `function`
+// shape (parity with decolua/9router#4543/#4573). An absent or non-boolean
+// strict stays absent — the flag must never be invented.
+func toolStrict(tool, fn map[string]any) (bool, bool) {
+	if strict, ok := tool["strict"].(bool); ok {
+		return strict, true
+	}
+	if fn == nil {
+		return false, false
+	}
+	strict, ok := fn["strict"].(bool)
+	return strict, ok
+}
+
 func convertToolChoiceToClaude(tc any) any {
 	if tc == nil {
 		return nil
@@ -871,7 +976,9 @@ func convertToolChoiceToClaude(tc any) any {
 		case "required":
 			return map[string]any{"type": "any"}
 		case "none":
-			return nil
+			// Claude has a native "none"; dropping the key instead would hand
+			// the model the tool permission the client withheld (#4577).
+			return map[string]any{"type": "none"}
 		default:
 			return map[string]any{"type": "auto"}
 		}
@@ -887,6 +994,26 @@ func convertToolChoiceToClaude(tc any) any {
 	default:
 		return tc
 	}
+}
+
+// hasClaudeTools reports whether the body still declares at least one tool.
+// A policy about calling tools is meaningless without any.
+func hasClaudeTools(reqMap map[string]any) bool {
+	tools, ok := reqMap["tools"].([]any)
+	return ok && len(tools) > 0
+}
+
+// withDisabledParallelToolUse returns the Claude tool_choice carrying
+// disable_parallel_tool_use. An explicit choice keeps its type and name — the
+// restriction is added, never substituted — and only a missing choice is
+// filled in with Claude's own default, "auto" (parity #4581).
+func withDisabledParallelToolUse(tc any) map[string]any {
+	choice, ok := tc.(map[string]any)
+	if !ok {
+		choice = map[string]any{"type": "auto"}
+	}
+	choice["disable_parallel_tool_use"] = true
+	return choice
 }
 
 // sanitizeToolUseID returns a tool id valid for the Anthropic Messages API
@@ -1069,7 +1196,37 @@ func normalizeClaudeBlocks(c any) []any {
 	}
 }
 
+// isOpencodeResponsesModel ports the upstream free-executor lane rule
+// (open-sse/executors/opencode.js isResponsesModel): the two curated free ids
+// plus any Muse Spark model (upstream isMuseSparkModel:
+// /^muse[-_]?spark(?:$|[-_:.\s])/i), so future free Spark ids keep the
+// Responses lane without a code change. Paid lanes must not share this
+// predicate — opencode-go has its own (isOpencodeGoResponsesModel).
 func isOpencodeResponsesModel(model string) bool {
+	base := model
+	if parenIdx := strings.IndexByte(base, '('); parenIdx != -1 {
+		base = base[:parenIdx]
+	}
+	if base == "muse-spark-1.2-contributor-free" || base == "muse-spark-1.3-contributor-free" {
+		return true
+	}
+	lower := strings.ToLower(base)
+	for _, prefix := range []string{"muse-spark", "musespark", "muse_spark"} {
+		rest, ok := strings.CutPrefix(lower, prefix)
+		if !ok {
+			continue
+		}
+		if rest == "" || strings.ContainsRune("-_:.\u00a0 \t", rune(rest[0])) {
+			return true
+		}
+	}
+	return false
+}
+
+// isOpencodeGoResponsesModel preserves the paid opencode-go lane rule exactly
+// as it was before the v2 free-tier port: go models route on the broader
+// predicate and must never follow the free executor's narrowing.
+func isOpencodeGoResponsesModel(model string) bool {
 	base := model
 	if parenIdx := strings.IndexByte(base, '('); parenIdx != -1 {
 		base = base[:parenIdx]
@@ -1137,6 +1294,83 @@ func normalizeMuseSparkResponsesBody(body []byte, cleanModel string) ([]byte, er
 }
 
 // ForwardOpencodeGo handles requests for opencode-go (paid tier).
+// opencodeGoInferenceBase rewrites a go-layout base URL to the v2 inference
+// gate's /inference/v1 prefix, mirroring opencodeInferenceBase for the
+// /zen/go/v1 layout. Custom endpoints pass through untouched.
+func opencodeGoInferenceBase(base string) string {
+	base = strings.TrimRight(base, "/")
+	base = strings.TrimSuffix(base, "/chat/completions")
+	base = strings.TrimSuffix(base, "/messages")
+	base = strings.TrimSuffix(base, "/responses")
+	switch {
+	case strings.HasSuffix(base, "/zen/go/v1"):
+		return strings.TrimSuffix(base, "/zen/go/v1") + "/inference/v1"
+	case strings.HasSuffix(base, "/inference/v1"):
+		return base
+	default:
+		return base
+	}
+}
+
+// forwardOpencodeGoFree serves free-tier ids on the paid go lane (today only
+// space-bunny-free). Keyed requests for them 403, so they travel exactly like
+// free-executor requests: the inference chat lane (no free go model takes the
+// Responses lane upstream), v2 fingerprint, public credentials.
+func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel string) error {
+	body := InjectReasoningContent(req.Body, "opencode-go")
+	body, toolNameMap := translator.ConcealOpenCodeV2FingerprintTools(body, false, isOpenCodeAutoToolChoiceModel(cleanModel))
+	req.Ctx = translator.WithToolNameMap(req.Ctx, toolNameMap)
+	w = NewToolNameRestoringWriter(w, toolNameMap)
+
+	var reqMap map[string]any
+	if err := json.Unmarshal(body, &reqMap); err == nil {
+		reqMap["stream"] = true
+		if cleanModel != "" {
+			reqMap["model"] = cleanModel
+		}
+		if b, err := marshalStable(reqMap); err == nil {
+			body = b
+		}
+	}
+
+	cfg := *req.Config
+	if isRelayConfig(&cfg) {
+		cfg.StaticHeaders = copyHeaders(cfg.StaticHeaders)
+		cfg.StaticHeaders["x-relay-path"] = "/inference/v1/chat/completions"
+		cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
+	} else {
+		cfg.BaseURL = opencodeGoInferenceBase(cfg.BaseURL) + "/chat/completions"
+	}
+	cfg.StaticHeaders = proxy.BuildOpenCodeHeaders(cfg.StaticHeaders, req.SessionID, true)
+
+	ctx := req.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, "public", body, true)
+	if err != nil {
+		return fmt.Errorf("ForwardOpencodeGo (free lane): %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
+		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody}
+	}
+
+	if req.IsStream {
+		return execSSEStream(w, resp.Body, req)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	if err != nil {
+		return fmt.Errorf("read opencode-go free response: %w", err)
+	}
+	if converted, ok := sseToOpenAIJSON(data); ok {
+		data = converted
+	}
+	return jsonResponse(req.Ctx, w, bytes.NewReader(data), req.TranslateResp, req.ResponseBuf)
+}
+
 func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 	body := InjectReasoningContent(req.Body, "opencode-go")
 
@@ -1152,13 +1386,17 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 	cleanModel := strings.TrimPrefix(reqObj.Model, "oc/")
 	cleanModel = strings.TrimPrefix(cleanModel, "opencode-go/")
 	cleanModel = strings.TrimPrefix(cleanModel, "opencode/")
-	cleanModel = strings.TrimPrefix(cleanModel, "antigravity/")
-	cleanModel = strings.TrimPrefix(cleanModel, "ag/")
 	if parenIdx := strings.IndexByte(cleanModel, '('); parenIdx != -1 {
 		cleanModel = cleanModel[:parenIdx]
 	}
 
-	if isOpencodeResponsesModel(cleanModel) {
+	// Free-tier ids 403 on the keyed go lane just like on zen, so they take
+	// the keyless inference gate with public credentials (see zen).
+	if isOpencodeFreeModel(cleanModel) {
+		return forwardOpencodeGoFree(w, req, cleanModel)
+	}
+
+	if isOpencodeGoResponsesModel(cleanModel) {
 		// Route through Responses API format: https://opencode.ai/zen/go/v1/responses (#3819, #3820, v0.5.75)
 		transformedBody, _, err := buildResponsesBody(req.Body)
 		if err != nil {
@@ -1190,8 +1428,8 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		for k, v := range cfg.StaticHeaders {
 			headers[k] = v
 		}
-		if headers["User-Agent"] == "" || !proxy.HasValidOpenCodeVersion(headers["User-Agent"]) {
-			headers["User-Agent"] = proxy.DefaultOpenCodeUA
+		if headers["User-Agent"] == "" || !proxy.HasValidOpenCodeV1Version(headers["User-Agent"]) {
+			headers["User-Agent"] = proxy.DefaultOpenCodeV1UA
 		}
 		if headers["x-opencode-client"] == "" {
 			headers["x-opencode-client"] = "desktop"
@@ -1248,7 +1486,7 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		messagesBody := ensureMessagesMaxTokens(body, cleanModel)
+		messagesBody := ensureMessagesFor(body, "opencode-go", cleanModel)
 		resp, err := proxy.DoRequest(ctx, req.Client, "POST", messagesURL, headers, messagesBody)
 		if err != nil {
 			return fmt.Errorf("ForwardOpencodeGo (messages route): %w", err)
@@ -1271,7 +1509,10 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		if cleanModel != "" {
 			reqGoMap["model"] = cleanModel
 		}
-		if b, err := json.Marshal(reqGoMap); err == nil {
+		// Deterministic marshaling keeps the serialized request prefix
+		// stable across turns, which DeepSeek's prefix prompt cache
+		// requires; json/v2 randomizes map member order by default.
+		if b, err := marshalStable(reqGoMap); err == nil {
 			body = b
 		}
 	}
@@ -1281,8 +1522,9 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 	for k, v := range cfg.StaticHeaders {
 		headers[k] = v
 	}
-	if headers["User-Agent"] == "" || !proxy.HasValidOpenCodeVersion(headers["User-Agent"]) {
-		headers["User-Agent"] = proxy.DefaultOpenCodeUA
+	// The paid go lane keeps the v1 identity (see DefaultOpenCodeV1UA).
+	if headers["User-Agent"] == "" || !proxy.HasValidOpenCodeV1Version(headers["User-Agent"]) {
+		headers["User-Agent"] = proxy.DefaultOpenCodeV1UA
 	}
 	if headers["x-opencode-client"] == "" {
 		headers["x-opencode-client"] = "desktop"

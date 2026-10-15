@@ -1,3 +1,5 @@
+import { PROVIDER_CATALOG } from '../../lib/providers'
+
 export type MainTab = 'overview' | 'details'
 export type PeriodPreset = 'today' | '24h' | '7d' | '30d' | '60d' | 'all'
 // A custom entry is "<n>d" or "<n>h"; the server parses both, so the selector is
@@ -5,6 +7,14 @@ export type PeriodPreset = 'today' | '24h' | '7d' | '30d' | '60d' | 'all'
 export type Period = PeriodPreset | (string & {})
 export type TableView = 'model' | 'account' | 'apiKey' | 'endpoint'
 export type ViewMode = 'costs' | 'tokens'
+
+// ViewOption names one entry of a section's sub-view picker. The option carries
+// its own icon so the closed control and the open list show the same mark.
+export interface ViewOption {
+  value: string
+  label: string
+  icon: string
+}
 
 export interface UsageItem {
   requests?: number
@@ -42,8 +52,21 @@ export interface RequestDetailItem {
   id?: string
   status?: string
   timestamp?: string
+  startedAt?: string
+  endedAt?: string
   provider?: string
   model?: string
+  requestedModel?: string
+  connectionId?: string
+  connName?: string
+  connEmail?: string
+  account?: string
+  apiKey?: string
+  combo?: string
+  protocol?: string
+  cacheSource?: string
+  cost?: number
+  error?: string
   latency?: {
     total?: number
     ttft?: number
@@ -53,6 +76,20 @@ export interface RequestDetailItem {
     completion_tokens?: number
     cached_tokens?: number
     cache_read_input_tokens?: number
+    cache_creation_input_tokens?: number
+    reasoning_tokens?: number
+    original_input_tokens?: number
+    compressed_input_tokens?: number
+    saved_tokens?: number
+    saved_percent?: number
+  }
+  request?: {
+    messages?: Array<{ role?: string; content?: unknown }>
+  }
+  response?: {
+    content?: string
+    error?: string
+    status?: number
   }
   [key: string]: unknown
 }
@@ -115,6 +152,23 @@ export const TABLE_OPTIONS: { value: TableView; label: string }[] = [
   { value: 'endpoint', label: 'Usage by Endpoint' },
 ]
 
+// providerDisplayName resolves a stored provider id to the label the dashboard
+// shows. Custom compatible nodes persist under a synthetic id
+// ("openai-compatible-chat-<uuid>") and the catalog carries the display name for
+// everything else, so the column never renders an opaque id. Unknown ids pass
+// through unchanged.
+export function providerDisplayName(
+  providerId?: string | null,
+  nodes?: { id: string; name?: string }[]
+): string {
+  const id = (providerId || '').trim()
+  if (!id) return 'unknown'
+  const node = nodes?.find((n) => n?.id === id)
+  if (node?.name) return node.name
+  const cat = PROVIDER_CATALOG.find((p) => p.id === id || p.alias === id)
+  return cat?.name || id
+}
+
 export function fmt(n?: number): string {
   return (n || 0).toLocaleString()
 }
@@ -134,4 +188,35 @@ export function timeAgo(timestamp?: string): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`
+}
+
+export function formatDuration(ms?: number | null): string {
+  if (ms == null || isNaN(ms)) return '—'
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+export function calculateTPS(
+  completionTokens?: number | null,
+  durationMs?: number | null,
+  ttftMs?: number | null
+): string | null {
+  if (!completionTokens || completionTokens <= 0 || !durationMs || durationMs <= 0) return null
+  const genTimeMs = ttftMs && ttftMs > 0 && ttftMs < durationMs ? durationMs - ttftMs : durationMs
+  if (genTimeMs <= 0) return null
+  const tps = (completionTokens / (genTimeMs / 1000)).toFixed(1)
+  return `${tps} tps`
+}
+
+export function formatLocalTimestamp(ts?: string | null): string {
+  if (!ts) return '—'
+  try {
+    const d = new Date(ts)
+    if (isNaN(d.getTime())) return ts
+    const dateStr = d.toLocaleDateString()
+    const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    return `${dateStr} ${timeStr}`
+  } catch {
+    return ts
+  }
 }

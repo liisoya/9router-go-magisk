@@ -466,6 +466,7 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
                   total: Number(quota.total) || 0,
                   resetAt: (quota.resetAt as string) || null,
                   remainingPercentage: quota.remainingPercentage !== undefined ? Number(quota.remainingPercentage) : undefined,
+                  window: (quota.window as string) || (modelKey.includes('weekly') ? 'weekly' : '5h'),
                 })
               })
           } else if (geminiModels.length > 0) {
@@ -499,6 +500,7 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
                   total: Number(quota.total) || 0,
                   resetAt: (quota.resetAt as string) || null,
                   remainingPercentage: quota.remainingPercentage !== undefined ? Number(quota.remainingPercentage) : undefined,
+                  window: (quota.window as string) || (modelKey.includes('weekly') ? 'weekly' : '5h'),
                 })
               })
           }
@@ -515,6 +517,7 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
                   total: Number(quota.total) || 0,
                   resetAt: (quota.resetAt as string) || null,
                   remainingPercentage: quota.remainingPercentage !== undefined ? Number(quota.remainingPercentage) : undefined,
+                  window: (quota.window as string) || (modelKey.includes('weekly') ? 'weekly' : '5h'),
                 })
               })
           } else if (claudeModels.length > 0) {
@@ -548,6 +551,7 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
                   total: Number(quota.total) || 0,
                   resetAt: (quota.resetAt as string) || null,
                   remainingPercentage: quota.remainingPercentage !== undefined ? Number(quota.remainingPercentage) : undefined,
+                  window: (quota.window as string) || (modelKey.includes('weekly') ? 'weekly' : '5h'),
                 })
               })
           }
@@ -683,6 +687,7 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
         break
 
       case 'codebuddy-cn':
+      case 'codebuddy-intl':
         if (d.quotas) {
           Object.entries(d.quotas).forEach(([name, quota]) => {
             normalizedQuotas.push({
@@ -780,6 +785,34 @@ export function parseQuotaData(provider: string, data: unknown): NormalizedQuota
               remainingPercentage: quota.remainingPercentage !== undefined ? Number(quota.remainingPercentage) : undefined,
               unlimited: Boolean(quota.unlimited),
             })
+          })
+        }
+        break
+
+      case 'minimax-code':
+      case 'minimax-code-global':
+        // The service already answers in dashboard shape: a credits balance
+        // (isCreditBalance → an amount, not a percentage) plus M Plan rate
+        // windows as 0-100 percent rows. Every field is passed through rather
+        // than rebuilt, so a window the backend labelled is not relabelled
+        // here — and a per-window failure message survives next to the
+        // credits row it sits beside.
+        if (d.quotas) {
+          Object.entries(d.quotas).forEach(([name, quota]) => {
+            const row: NormalizedQuota = {
+              name,
+              used: Number(quota.used) || 0,
+              total: Number(quota.total) || 0,
+              resetAt: (quota.resetAt as string) || null,
+            }
+            if (quota.remaining !== undefined) row.remaining = Number(quota.remaining)
+            if (quota.remainingPercentage !== undefined) {
+              row.remainingPercentage = Number(quota.remainingPercentage)
+            }
+            if (quota.isCreditBalance !== undefined) row.isCreditBalance = Boolean(quota.isCreditBalance)
+            if (quota.currency !== undefined) row.currency = String(quota.currency)
+            if (quota.message !== undefined) row.message = String(quota.message)
+            normalizedQuotas.push(row)
           })
         }
         break

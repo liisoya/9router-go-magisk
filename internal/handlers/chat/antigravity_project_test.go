@@ -2,6 +2,8 @@ package chat
 
 import (
 	"context"
+	json "encoding/json/v2"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -113,4 +115,84 @@ func TestProjectNoCache(t *testing.T) {
 	if projectProbeCached("test-conn") {
 		t.Fatal("expired cache entry should not report cached")
 	}
+}
+
+func TestAntigravityProbe_HeadersAndMetadata(t *testing.T) {
+	var gotUA, gotGoogClient, gotClientMeta string
+	var gotBodyMeta map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotGoogClient = r.Header.Get("X-Goog-Api-Client")
+		gotClientMeta = r.Header.Get("Client-Metadata")
+
+		var body struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		_ = json.Unmarshal(mustReadAll(r.Body), &body)
+		gotBodyMeta = body.Metadata
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"cloudaicompanionProject":{"id":"test-proj"}}`))
+	}))
+	defer srv.Close()
+
+	oldL, oldO := loadCodeAssistURL, onboardUserURL
+	loadCodeAssistURL, onboardUserURL = srv.URL+"/loadCodeAssist", srv.URL+"/onboardUser"
+	defer func() { loadCodeAssistURL, onboardUserURL = oldL, oldO }()
+
+	pid, auth, noProj := fetchAntigravityProjectID(context.Background(), srv.Client(), "test-token")
+	if pid != "test-proj" || auth || noProj {
+		t.Fatalf("unexpected result: pid=%q, auth=%v, noProj=%v", pid, auth, noProj)
+	}
+
+	if gotUA != "antigravity/ide/2.11.0 darwin/arm64" {
+		t.Errorf("User-Agent = %q, want %q", gotUA, "antigravity/ide/2.11.0 darwin/arm64")
+	}
+	if gotGoogClient != "" {
+		t.Errorf("X-Goog-Api-Client = %q, want empty", gotGoogClient)
+	}
+	if gotClientMeta != "" {
+		t.Errorf("Client-Metadata = %q, want empty", gotClientMeta)
+	}
+	if gotBodyMeta["ideType"] != float64(9) {
+		t.Errorf("body metadata ideType = %v, want 9", gotBodyMeta["ideType"])
+	}
+	if gotBodyMeta["platform"] != float64(2) {
+		t.Errorf("body metadata platform = %v, want 2", gotBodyMeta["platform"])
+	}
+	if gotBodyMeta["pluginType"] != float64(2) {
+		t.Errorf("body metadata pluginType = %v, want 2", gotBodyMeta["pluginType"])
+	}
+}
+
+func TestExtractProjectID(t *testing.T) {
+	cases := []struct {
+		input any
+		want  string
+	}{
+		{nil, ""},
+		{"", ""},
+		{"  ", ""},
+		{"proj-direct", "proj-direct"},
+		{"  proj-trimmed  ", "proj-trimmed"},
+		{map[string]any{"id": "proj-from-id"}, "proj-from-id"},
+		{map[string]any{"projectId": "proj-from-projectId"}, "proj-from-projectId"},
+		{map[string]any{"project_id": "proj-from-project_id"}, "proj-from-project_id"},
+		{map[string]any{"id": "", "projectId": "fallback-pid"}, "fallback-pid"},
+		{map[string]any{}, ""},
+		{123, ""},
+	}
+
+	for _, tc := range cases {
+		got := extractProjectID(tc.input)
+		if got != tc.want {
+			t.Errorf("extractProjectID(%v) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func mustReadAll(r io.Reader) []byte {
+	b, _ := io.ReadAll(r)
+	return b
 }

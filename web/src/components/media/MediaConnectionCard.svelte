@@ -3,6 +3,7 @@
   import type { ProviderConnection } from '../../api/client'
   import Card from '../../lib/ui/Card.svelte'
   import Toggle from '../../lib/ui/Toggle.svelte'
+  import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
 
   interface Props {
     conn: ProviderConnection
@@ -17,10 +18,10 @@
 
 <Card class="p-4 flex items-center justify-between gap-3 {conn.isActive === 1 ? 'border-border' : 'border-border opacity-60 bg-surface-2/40'}">
   <div class="flex items-center gap-3 min-w-0">
-    <div class="w-2.5 h-2.5 rounded-full shrink-0 {conn.isActive === 1 ? (conn.lastError ? 'bg-red-500' : 'bg-emerald-500') : 'bg-text-muted/40'}"></div>
+    <div class="w-2.5 h-2.5 rounded-full shrink-0 {conn.isActive === 1 ? ((conn.testStatus === 'error' || conn.testStatus === 'failed' || (conn.testStatus !== 'active' && conn.testStatus !== 'passed' && conn.testStatus !== 'success' && conn.lastError)) ? 'bg-red-500' : 'bg-emerald-500') : 'bg-text-muted/40'}"></div>
     <div class="min-w-0">
       <p class="text-sm font-medium text-text-main truncate">
-        {conn.displayName || conn.name || conn.email || conn.id}
+        {formatEmailLabel(conn.displayName || conn.name || conn.email || conn.id, $emailPrivacy)}
       </p>
       <div class="flex items-center gap-2 text-xs text-text-muted mt-0.5">
         <span class="font-mono text-[11px]">{conn.authType}</span>

@@ -18,6 +18,7 @@ import (
 // assembles the router by hand, so this is the one that fails if wiring, DI,
 // config loading, the database bootstrap or the listener itself breaks.
 func TestRealApplicationBootAndServesTraffic(t *testing.T) {
+	t.Setenv("ALLOW_PRIVATE_NETWORKING", "true")
 	t.Run("the schema was created in the configured database", func(t *testing.T) {
 		// A wrong DatabasePath would leave the server serving from a different
 		// file and every other assertion here would fail confusingly.

@@ -12,12 +12,22 @@ export interface ComboStrategyInfo {
  * includes the global routing mode, not just the per-combo overrides.
  */
 export const COMBO_STRATEGIES = [
+  { value: 'inherit', label: 'Inherit global strategy' },
   { value: 'fallback', label: 'Fallback — try in order' },
   { value: 'round-robin', label: 'Round Robin — rotate' },
   { value: 'sticky', label: 'Sticky — stay until the limit' },
   { value: 'capacity', label: 'Capacity — prefer free tiers' },
   { value: 'fusion', label: 'Fusion — panel + judge' }
 ] as const
+
+/**
+ * The only value that removes a per-combo override. Upstream #4576: the UI
+ * used to prune an entry whenever the chosen strategy equalled the default
+ * `fallback`, so picking "Fallback" on a combo whose global mode was
+ * round-robin looked saved and was not — the combo silently inherited
+ * round-robin again. Removal now has to be an explicit choice.
+ */
+export const INHERIT_STRATEGY = 'inherit'
 
 // The global "Combo Routing Mode" calls try-in-order `first-model`, while a
 // combo card calls it `fallback`. applyComboStrategy treats an unrecognised
@@ -30,6 +40,35 @@ export function resolveComboStrategy(value: string | undefined | null): string {
   if (!value) return 'fallback'
   const resolved = STRATEGY_ALIASES[value] ?? value
   return COMBO_STRATEGIES.some((s) => s.value === resolved) ? resolved : 'fallback'
+}
+
+/**
+ * The options a strategy <select> renders, with the inherit entry naming the
+ * global strategy it would fall back to. Without the name, "Inherit" reads as
+ * a sixth routing mode instead of "whatever Combo Routing Mode says".
+ */
+export function comboStrategyOptions(globalStrategy?: string | null): { value: string; label: string }[] {
+  const globalLabel = resolveComboStrategy(globalStrategy)
+  return COMBO_STRATEGIES.map((s) =>
+    s.value === INHERIT_STRATEGY
+      ? { value: s.value, label: `Inherit global — ${globalLabel}` }
+      : { value: s.value, label: s.label }
+  )
+}
+
+/**
+ * The strategy a combo actually routes with: its own override when it has one,
+ * otherwise the global mode. The server resolves the same precedence (a
+ * non-empty per-combo strategy first, the global one second), so the card
+ * needs the global value to answer "is this combo fusing?" for an inheriting
+ * combo — otherwise a globally-fusing combo shows no judge picker at all.
+ */
+export function effectiveComboStrategy(
+  fallbackStrategy: string | undefined | null,
+  globalStrategy?: string | null
+): string {
+  if (fallbackStrategy) return resolveComboStrategy(fallbackStrategy)
+  return resolveComboStrategy(globalStrategy)
 }
 
 export interface AdapterPool {
@@ -94,20 +133,27 @@ export function getComboModels(c: Combo): string[] {
 }
 
 
+/**
+ * Merge a per-combo strategy patch into `settings.comboStrategies`. Upstream
+ * #4576: this used to drop the entry whenever the chosen value was the
+ * default `fallback`, which silently threw away an explicit choice — the
+ * combo then resolved to the global strategy instead. Only `inherit` (or an
+ * empty judge-clearing case, see clearJudgeModel) removes an override now.
+ */
 export function updateComboStrategy(
   currentStrategies: Record<string, ComboStrategyInfo>,
   comboName: string,
   newStrategy: string
 ): Record<string, ComboStrategyInfo> {
   const updated = { ...currentStrategies }
-  const current = updated[comboName] || {}
-  const next = { ...current, fallbackStrategy: newStrategy }
-
-  if (newStrategy === 'fallback' && !next.judgeModel) {
-    delete updated[comboName]
-  } else {
-    updated[comboName] = next
+  if (newStrategy === INHERIT_STRATEGY) {
+    const rest = { ...(updated[comboName] || {}) }
+    delete rest.fallbackStrategy
+    if (Object.keys(rest).length === 0) delete updated[comboName]
+    else updated[comboName] = rest
+    return updated
   }
+  updated[comboName] = { ...(updated[comboName] || {}), fallbackStrategy: newStrategy }
   return updated
 }
 
@@ -129,10 +175,12 @@ export function clearJudgeModel(
   const updated = { ...currentStrategies }
   if (updated[comboName]) {
     const { judgeModel: _, ...rest } = updated[comboName]
-    if (!rest.fallbackStrategy || rest.fallbackStrategy === 'fallback') {
-      delete updated[comboName]
-    } else {
+    // Only an inheriting combo loses its entry here: a combo that names
+    // `fallback` explicitly keeps it (upstream #4576).
+    if (rest.fallbackStrategy && rest.fallbackStrategy !== INHERIT_STRATEGY) {
       updated[comboName] = rest
+    } else {
+      delete updated[comboName]
     }
   }
   return updated
@@ -145,7 +193,7 @@ export function parseCapacityAdapterSettings(ca: Record<string, unknown> | undef
     vision: {
       enabled: v?.enabled !== false,
       roundRobin: !!v?.roundRobin,
-      models: Array.isArray(v?.models) ? (v.models as string[]) : ['ag/gemini-3.7-flash-high'],
+      models: Array.isArray(v?.models) ? (v.models as string[]) : [],
     },
     audioInput: {
       enabled: a?.enabled !== false,

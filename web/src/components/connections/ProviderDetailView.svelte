@@ -25,9 +25,16 @@
     readCallback,
     savePending,
     oauthLoopbackCallbackURL,
+    writeCallback,
   } from '../../lib/oauth-handoff'
   import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
+  import { copyToClipboard } from '../../lib/clipboard'
   import { notifyCustomModelsChanged } from '../../lib/customModels'
+  import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
+  import { loadDeprecations, refreshDeprecations, subscribeDeprecations } from '../../lib/modelDeprecations.svelte'
+  import DeprecatedBadge from '../../lib/ui/DeprecatedBadge.svelte'
+  import Menu from '../../lib/ui/Menu.svelte'
+  import MenuItem from '../../lib/ui/MenuItem.svelte'
   import {
     buildAvailableModels,
     fetchProviderModelsData,
@@ -39,9 +46,25 @@
     type SuggestedModel
   } from './types'
   import { proxyBadgeInfo } from './proxyBadge'
+  import {
+    formatCheckAllSummary,
+    getBlockedModelIds,
+    parseModelTestVerdict,
+    type CheckAllSummary,
+    type ModelTestStatus,
+  } from './modelCheckAll'
+  import {
+    badgeFor,
+    canProbeRow,
+    probeOutcomeFrom,
+    probeOutcomeFromError,
+    testingStatus,
+    type ProbeStatus
+  } from './connectionProbe'
+  import EditConnectionModal, { type ConnectionUpdate } from './EditConnectionModal.svelte'
   import AddConnectionModal from './AddConnectionModal.svelte'
   import AddCustomModelModal from './AddCustomModelModal.svelte'
-  import AddCompatibleNodeModal from './AddCompatibleNodeModal.svelte'
+  import ProviderHeaderOverridesModal from './ProviderHeaderOverridesModal.svelte'
   import EditCompatibleNodeModal from './EditCompatibleNodeModal.svelte'
   import FreebuffSessionBanner from './FreebuffSessionBanner.svelte'
   import ProviderIcon from './ProviderIcon.svelte'
@@ -52,6 +75,8 @@
     providerNodes: ProviderNode[]
     onBack: () => void
     onRefresh: () => void
+    /** Called with the new id after a URL-suffix rename moves this node. */
+    onSelectProvider?: (id: string) => void
   }
 
   let {
@@ -59,7 +84,8 @@
     connections = [],
     providerNodes = [],
     onBack,
-    onRefresh
+    onRefresh,
+    onSelectProvider
   }: Props = $props()
 
   // Catalog & Node resolution
@@ -112,7 +138,8 @@
   let isDeviceOAuth = $derived(
     providerId === 'qoder' || providerId === 'kilocode' || providerId === 'grok-cli' ||
     providerId === 'github' || providerId === 'kiro' || providerId === 'kimi' ||
-    providerId === 'kimi-coding' || providerId === 'codebuddy-cn' || providerId === 'codebuddy-intl'
+    providerId === 'kimi-coding' || providerId === 'codebuddy-cn' || providerId === 'codebuddy-intl' ||
+    providerId === 'minimax-code' || providerId === 'minimax-code-global' || providerId === 'muse'
   )
   // Upstream parity: only the explicit noAuth flag hides the Connections card
   // ([id]/page.js isFreeNoAuth = !!FREE_PROVIDERS[id]?.noAuth). Category "free"
@@ -189,6 +216,8 @@
   let allDisabled = $derived(
     allAvailableModels.length > 0 && disabledModelIds.length >= allAvailableModels.length
   )
+  let isSyncingModels = $state(false)
+  let modelDeprecationCount = $state(0)
 
   // Capabilities + thinking levels are resolved server-side (GET /api/models/caps):
   // the catalog ships as a static bundle, but caps depend on the provider
@@ -278,18 +307,19 @@
   let oneByOneSummary = $state<
     { total: number; completed: number; passed: number; failed: number; stopped: boolean } | null
   >(null)
-  let oneByOneStatuses = $state<
-    Record<string, { state: 'queued' | 'testing' | 'success' | 'failed'; error?: string | null }>
-  >({})
+  // Written by both the sweep and the per-row refresh (PR #196); the shared
+  // ProbeStatus keeps those two writers from drifting apart.
+  let oneByOneStatuses = $state<Record<string, ProbeStatus>>({})
 
   // Row UI state
   let activeProxyDropdownId = $state<string | null>(null)
   let dropdownPos = $state<{ top: number; right: number }>({ top: 0, right: 0 })
   let updatingProxyConnId = $state<string | null>(null)
   let copiedModelId = $state<string | null>(null)
-  let modelTestStatuses = $state<Record<string, 'ok' | 'error' | 'testing'>>({})
+  let modelTestStatuses = $state<Record<string, ModelTestStatus>>({})
   let modelTestErrors = $state<Record<string, string | null>>({})
   let activeModelTestError = $state<string | null>(null)
+  let checkAllSummary = $state<CheckAllSummary | null>(null)
 
   // Modals state
   let showRiskNoticeModal = $state(false)
@@ -508,24 +538,15 @@
     )
   })
 
+  // The connection whose Edit Connection modal is open; null when closed. The
+  // modal owns its own fields and payload (issue #158).
   let editingConnection = $state<ProviderConnection | null>(null)
-  let editName = $state('')
-  let editPriority = $state<number>(1)
-  // The value the priority field was seeded with. Saving sends priority only
-  // when the field actually changed: a NULL-priority row has no number of its
-  // own, so seeding the input with 1 and always sending it turned a plain
-  // rename into an assignment of rank 1, colliding with whichever row already
-  // held it.
-  let editSeededPriority = $state<number>(1)
-  let editTestStatus = $state<'ok' | 'error' | null>(null)
-  let editTestError = $state<string | null>(null)
-  let isTestingEdit = $state(false)
-  let isSavingEdit = $state(false)
 
   let showAddKeyModal = $state(false)
   let addConnectionError = $state('')
   let showAddCustomModelModal = $state(false)
   let showEditNodeModal = $state(false)
+  let showHeaderOverrides = $state(false)
   // Freebuff specific state & session tracking
   let isFreebuff = $derived(
     providerId === 'freebuff' || storageAlias === 'fb' || storageAlias === 'freebuff'
@@ -1019,29 +1040,19 @@
 
         const conn = providerConnections[index]
         oneByOneCurrentId = conn.id
-        oneByOneStatuses = { ...oneByOneStatuses, [conn.id]: { state: 'testing', error: null } }
+        oneByOneStatuses = { ...oneByOneStatuses, [conn.id]: testingStatus() }
 
         try {
           const res = await api.testConnection(conn.id)
           if (res?.valid) {
             passed += 1
-            oneByOneStatuses = { ...oneByOneStatuses, [conn.id]: { state: 'success', error: null } }
           } else {
             failed += 1
-            oneByOneStatuses = {
-              ...oneByOneStatuses,
-              [conn.id]: { state: 'failed', error: res?.error || 'Test failed' }
-            }
           }
+          oneByOneStatuses = { ...oneByOneStatuses, [conn.id]: probeOutcomeFrom(res) }
         } catch (err) {
           failed += 1
-          oneByOneStatuses = {
-            ...oneByOneStatuses,
-            [conn.id]: {
-              state: 'failed',
-              error: err instanceof Error ? err.message : 'Test failed'
-            }
-          }
+          oneByOneStatuses = { ...oneByOneStatuses, [conn.id]: probeOutcomeFromError(err) }
         }
 
         oneByOneSummary = {
@@ -1069,6 +1080,22 @@
     if (!isTestingOneByOne) return
     isStopTesting = true
     isStoppingOneByOne = true
+  }
+
+  // Per-row refresh: probe one account straight from its row instead of
+  // opening the edit modal. Reuses the one-by-one badge state so the row
+  // shows the live testing/success/failed indicator for free.
+  async function refreshOneConnection(conn: ProviderConnection) {
+    if (!canProbeRow(isTestingOneByOne, oneByOneStatuses[conn.id])) return
+    oneByOneStatuses = { ...oneByOneStatuses, [conn.id]: testingStatus() }
+    try {
+      const res = await api.testConnection(conn.id)
+      oneByOneStatuses = { ...oneByOneStatuses, [conn.id]: probeOutcomeFrom(res) }
+    } catch (err) {
+      oneByOneStatuses = { ...oneByOneStatuses, [conn.id]: probeOutcomeFromError(err) }
+    } finally {
+      onRefresh()
+    }
   }
 
   // Priority reordering.
@@ -1106,7 +1133,7 @@
   }
 
   async function handleDeleteConnection(conn: ProviderConnection) {
-    if (!confirm(`Delete connection "${conn.name || conn.id}"? This cannot be undone.`)) return
+    if (!confirm(`Delete connection "${formatEmailLabel(conn.name || conn.id, $emailPrivacy)}"? This cannot be undone.`)) return
     try {
       await api.deleteConnection(conn.id)
       onRefresh()
@@ -1208,59 +1235,17 @@
     )
   }
 
-  // Edit connection modal
+  // Edit connection modal. Every field, the probe and the payload live in
+  // EditConnectionModal; this only decides when it opens and who refreshes.
   function openEditConnection(conn: ProviderConnection) {
     editingConnection = conn
-    editName = conn.name || ''
-    editPriority = conn.priority ?? 1
-    editSeededPriority = editPriority
-    editTestStatus = null
-    editTestError = null
   }
 
-  async function testEditingConnection() {
+  async function saveEditingConnection(payload: ConnectionUpdate) {
     if (!editingConnection) return
-    isTestingEdit = true
-    editTestStatus = null
-    editTestError = null
-    try {
-      const res = await api.testConnection(editingConnection.id)
-      if (res?.valid) {
-        editTestStatus = 'ok'
-      } else {
-        editTestStatus = 'error'
-        editTestError = res?.error || 'Test failed'
-      }
-    } catch (err) {
-      editTestStatus = 'error'
-      editTestError = err instanceof Error ? err.message : 'Test failed'
-    } finally {
-      isTestingEdit = false
-    }
-  }
-
-  async function saveEditingConnection() {
-    if (!editingConnection) return
-    isSavingEdit = true
-    try {
-      const payload: { name?: string; priority?: number } = {
-        name: editName.trim() || undefined
-      }
-      // Omit an untouched priority: a NULL-priority row has no number of its
-      // own, so always sending the seeded 1 would rewrite a plain rename into
-      // a rank-1 assignment, tying with whoever already holds it and
-      // recreating the un-reorderable pair the reorder endpoint repairs.
-      if (editPriority !== editSeededPriority) {
-        payload.priority = editPriority
-      }
-      await api.updateConnection(editingConnection.id, payload)
-      editingConnection = null
-      onRefresh()
-    } catch (err) {
-      alert(`Failed to save connection: ${err instanceof Error ? err.message : String(err)}`)
-    } finally {
-      isSavingEdit = false
-    }
+    await api.updateConnection(editingConnection.id, payload)
+    editingConnection = null
+    onRefresh()
   }
 
   // Add Connection Button flow
@@ -1812,7 +1797,7 @@
 
   function copyAuthUrl() {
     if (!oauthAuthUrl) return
-    navigator.clipboard.writeText(oauthAuthUrl)
+    copyToClipboard(oauthAuthUrl)
     copiedAuthUrl = true
     setTimeout(() => (copiedAuthUrl = false), 2000)
   }
@@ -2085,7 +2070,7 @@
   function copyModelId(modelId: string) {
     const level = resolveThinkingSuffix(modelId)
     const full = `${storageAlias}/${modelId}${level ? `(${level})` : ''}`
-    navigator.clipboard.writeText(full)
+    copyToClipboard(full)
     copiedModelId = modelId
     setTimeout(() => (copiedModelId = null), 2000)
   }
@@ -2100,14 +2085,11 @@
     try {
       const res = await api.testModel(`${storageAlias}/${modelId}`)
       if (pid !== providerId) return
-      if (res.ok) {
-        modelTestStatuses[modelId] = 'ok'
-        modelTestErrors[modelId] = null
-      } else {
-        modelTestStatuses[modelId] = 'error'
-        const err = res.error || 'Model test failed'
-        modelTestErrors[modelId] = err
-        if (!silent) activeModelTestError = `${modelId}: ${err}`
+      const verdict = parseModelTestVerdict(res)
+      modelTestStatuses[modelId] = verdict.status
+      modelTestErrors[modelId] = verdict.error
+      if (!silent && verdict.error) {
+        activeModelTestError = `${modelId}: ${verdict.error}`
       }
     } catch (err) {
       if (pid !== providerId) return
@@ -2159,13 +2141,19 @@
   }
 
   // Custom Model & Node handlers
-  async function submitAddCustomModel(modelId: string, caps?: { vision?: boolean; reasoning?: boolean }) {
+  async function submitAddCustomModel(
+    modelId: string,
+    caps?: { vision?: boolean; reasoning?: boolean },
+    limits?: { contextWindow?: number; maxOutput?: number },
+  ) {
     try {
       await api.saveCustomModel(`${storageAlias}|${modelId}|llm`, {
         id: modelId,
         providerAlias: storageAlias,
         type: 'llm',
-        ...(caps ? { caps } : {})
+        ...(caps ? { caps } : {}),
+        ...(limits?.contextWindow ? { contextWindow: limits.contextWindow } : {}),
+        ...(limits?.maxOutput ? { maxOutput: limits.maxOutput } : {}),
       })
       showAddCustomModelModal = false
       const modelsData = await fetchProviderModelsData(providerId, storageAlias)
@@ -2209,16 +2197,30 @@
   }
 
   // Upstream parity: PUT /api/provider-nodes/[id] then refresh the node list.
-  async function handleSaveEditedNode(data: { name: string; prefix: string; apiType?: string; baseUrl: string }) {
+  //
+  // A changed URL suffix renames the provider id, and this page is routed by
+  // that id — so a rename has to navigate to the new one or the user lands on a
+  // node that no longer exists.
+  async function handleSaveEditedNode(data: {
+    name: string
+    prefix: string
+    apiType?: string
+    baseUrl: string
+    urlSuffix: string
+  }) {
     if (!selectedNode) return
     try {
-      await api.updateProviderNode(selectedNode.id, {
+      const res = await api.updateProviderNode(selectedNode.id, {
         name: data.name,
         prefix: data.prefix,
         ...(selectedNode.type === 'openai-compatible' && data.apiType ? { apiType: data.apiType } : {}),
         baseUrl: data.baseUrl,
+        urlSuffix: data.urlSuffix || undefined
       })
       showEditNodeModal = false
+      if (res?.node?.id && res.node.id !== selectedNode.id) {
+        onSelectProvider?.(res.node.id)
+      }
       onRefresh()
     } catch (err) {
       alert(`Save failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -2310,7 +2312,7 @@
   }
 
   function copyCompatibleModel(modelId: string) {
-    navigator.clipboard.writeText(`${displayAlias()}/${modelId}`)
+    copyToClipboard(`${displayAlias()}/${modelId}`)
     copiedModelId = modelId
     setTimeout(() => (copiedModelId = null), 2000)
   }
@@ -2395,11 +2397,24 @@
           typeof m.capabilities === 'object'
             ? (m.capabilities as { vision?: boolean; reasoning?: boolean })
             : undefined
+        // An endpoint that reports its own limits is the authoritative source;
+        // saving them means /v1/models keeps publishing them after the row
+        // outlives this import.
+        const declaredCtxLen =
+          typeof m === 'object' && m !== null && 'context_length' in m
+            ? Number(m.context_length) || 0
+            : 0
+        const declaredMaxOut =
+          typeof m === 'object' && m !== null && 'max_completion_tokens' in m
+            ? Number(m.max_completion_tokens) || 0
+            : 0
         await api.saveCustomModel(`${storageAlias}|${modelId}|llm`, {
           id: modelId,
           providerAlias: storageAlias,
           type: 'llm',
           ...(caps ? { caps } : {}),
+          ...(declaredCtxLen > 0 ? { contextWindow: declaredCtxLen } : {}),
+          ...(declaredMaxOut > 0 ? { maxOutput: declaredMaxOut } : {}),
         })
         imported++
       }
@@ -2435,6 +2450,7 @@
     checkAllProgress = { done: 0, total: 0 }
     modelTestStatuses = {}
     modelTestErrors = {}
+    checkAllSummary = null
     activeModelTestError = null
   })
 
@@ -2443,10 +2459,12 @@
   // providers). Kept in sync so the button only renders where it can work.
   const ModelsListURLs = new Set([
     'tokenharbor',
+    'sumopod',
     'dahl',
     'atria',
     'agnes',
     'bai',
+    'muse',
   ])
 
   // canListLiveModels mirrors the backend's list of providers with a live
@@ -2519,15 +2537,13 @@
   // the browser (a ~30-model provider fires 30 simultaneous fetches).
   const TEST_CONCURRENCY = 6
 
-  async function handleCheckAllModels() {
-    if (isCheckingAll) return
+  // Runs ids through the bounded pool, then publishes the sweep summary. A
+  // run that outlives its provider panel publishes nothing: the verdicts it
+  // produced belong to a provider this panel no longer shows.
+  async function runModelSweep(ids: string[]) {
     const pid = providerId
     isCheckingAll = true
-    const ids = allAvailableModels.map((m) => m.id)
     checkAllProgress = { done: 0, total: ids.length }
-    // Reset previous verdicts so the run is not confused with stale ones.
-    modelTestStatuses = {}
-    modelTestErrors = {}
     try {
       let cursor = 0
       const workers = Array.from({ length: Math.min(TEST_CONCURRENCY, ids.length) }, async () => {
@@ -2540,15 +2556,37 @@
       })
       await Promise.allSettled(workers)
       if (pid !== providerId) return
-      const failed = Object.values(modelTestStatuses).filter((s) => s === 'error')
-      if (failed.length > 0) {
-        activeModelTestError = `${failed.length} of ${ids.length} model(s) failed — see per-row status. Delete unusable models individually.`
-      } else {
-        activeModelTestError = null
-      }
+      const summary = formatCheckAllSummary(modelTestStatuses)
+      checkAllSummary = summary
+      activeModelTestError = summary.message
     } finally {
       if (pid === providerId) isCheckingAll = false
     }
+  }
+
+  async function handleCheckAllModels() {
+    if (isCheckingAll) return
+    // Reset previous verdicts so the run is not confused with stale ones.
+    // Only the full sweep clears them — a retry must keep the passed and
+    // failed verdicts it is not re-testing.
+    modelTestStatuses = {}
+    modelTestErrors = {}
+    checkAllSummary = null
+    // visibleModels, not allAvailableModels: the table below renders exactly
+    // this list, so probing a disabled model produced a verdict no row could
+    // show and spent an upstream request on a model the operator switched off.
+    await runModelSweep(visibleModels.map((m) => m.id))
+  }
+
+  // A blocked model was never asked anything, so re-testing only those is
+  // cheap. It reuses the same bounded pool: a serial loop would leave the
+  // button looking hung for as long as the cooldown, which is exactly the
+  // wait the operator is sitting through.
+  async function handleRetryBlockedModels() {
+    if (isCheckingAll) return
+    const blockedIds = getBlockedModelIds(modelTestStatuses)
+    if (blockedIds.length === 0) return
+    await runModelSweep(blockedIds)
   }
 
   // Delete is only real for custom models; registry models are static, so an
@@ -2569,6 +2607,52 @@
     }
     await handleDisableModel(modelId)
   }
+
+  // Deprecated models of this provider, so the section can say how many of
+  // the listed models are dead upstream instead of leaving the operator to
+  // count the badges.
+  async function reloadDeprecations() {
+    const pid = providerId
+    const deps = await loadDeprecations()
+    if (pid !== providerId) return
+    modelDeprecationCount = Object.values(deps).filter(
+      (d) => d.provider === providerId && visibleModels.some((m) => m.id === d.model)
+    ).length
+  }
+
+  /**
+   * Re-reads the provider's live catalogue and clears the badge from any model
+   * it still serves. Only revival is decided here: a model missing from the
+   * catalogue is not badged on that evidence, because catalogues are routinely
+   * partial and a healthy model would be blacklisted with it.
+   */
+  async function handleSyncModelDeprecations() {
+    if (isSyncingModels) return
+    const pid = providerId
+    isSyncingModels = true
+    try {
+      const res = await api.syncProviderModels(providerId)
+      if (pid !== providerId) return
+      await refreshDeprecations()
+      if (res.revived > 0) {
+        await reloadDeprecations()
+        alert(`Sync complete — ${res.revived} model(s) are serving again and no longer marked Deprecated.`)
+      } else {
+        await reloadDeprecations()
+        alert('Sync complete. Models the provider no longer serves stay marked until a live request confirms they are gone.')
+      }
+    } catch (err) {
+      alert(`Model sync failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      if (pid === providerId) isSyncingModels = false
+    }
+  }
+
+  $effect(() => {
+    const unsubscribe = subscribeDeprecations(reloadDeprecations)
+    void reloadDeprecations()
+    return unsubscribe
+  })
 </script>
 
 <div class="flex min-w-0 flex-col gap-6 px-1 sm:gap-8 sm:px-0">
@@ -2851,6 +2935,15 @@
               />
             </div>
           {/if}
+
+          <button
+            type="button"
+            onclick={() => (showHeaderOverrides = true)}
+            class="inline-flex h-7 items-center gap-1.5 rounded-[8px] px-3 text-xs font-medium text-text-muted transition-colors hover:bg-surface-2 hover:text-text-main"
+          >
+            <span class="material-symbols-outlined text-[18px]" aria-hidden="true">tune</span>
+            Custom headers
+          </button>
         </div>
       </div>
     </div>
@@ -2868,16 +2961,16 @@
           {/if}
           {#if isTestingOneByOne && oneByOneCurrentId}
             <span>
-              Running: {providerConnections.find((conn) => conn.id === oneByOneCurrentId)?.name || oneByOneCurrentId}
+              Running: {formatEmailLabel(providerConnections.find((conn) => conn.id === oneByOneCurrentId)?.name || oneByOneCurrentId, $emailPrivacy)}
             </span>
           {/if}
         </div>
       </div>
     {/if}
 
-    <!-- Select All Checkbox -->
+    <!-- Select All Checkbox & Sensor Email Toggle -->
     {#if providerConnections.length > 0}
-      <div class="mb-3 flex items-center gap-2 border-b border-black/[0.03] pb-2 dark:border-white/[0.03]">
+      <div class="mb-3 flex items-center justify-between gap-2 border-b border-black/[0.03] pb-2 dark:border-white/[0.03]">
         <label class="flex cursor-pointer items-center gap-1.5 text-xs text-text-muted hover:text-primary">
           <input
             type="checkbox"
@@ -2887,6 +2980,19 @@
           />
           Select All
         </label>
+
+        <!-- Sensor Email Toggle Button -->
+        <button
+          type="button"
+          onclick={() => emailPrivacy.toggle()}
+          class="flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition-colors cursor-pointer {$emailPrivacy ? 'border-brand-500/40 bg-brand-500/10 text-brand-500 font-medium' : 'border-border-subtle bg-surface text-text-muted hover:text-text-main hover:bg-surface-2'}"
+          title={$emailPrivacy ? 'Tampilkan email lengkap' : 'Sensor / sembunyikan email'}
+        >
+          <span class="material-symbols-outlined text-[15px]">
+            {$emailPrivacy ? 'visibility_off' : 'visibility'}
+          </span>
+          <span>{$emailPrivacy ? 'Email Disensor' : 'Sensor Email'}</span>
+        </button>
       </div>
     {/if}
 
@@ -2981,6 +3087,10 @@
           {@const priorityNum = conn.priority ?? idx + 1}
           {@const isConnActive = conn.isActive === 1}
           {@const cooldownInfo = getCooldownInfo(conn)}
+          <!-- badgeFor owns the precedence between the live probe and the
+               connection's persisted testStatus; the markup below only renders
+               the verdict it returns. -->
+          {@const connBadge = badgeFor(status, conn.testStatus, lastErr)}
           <div class="flex min-w-0 items-stretch">
             <!-- Multi-select checkbox -->
             <div class="flex shrink-0 items-center pl-1 sm:pl-2">
@@ -3029,17 +3139,16 @@
                   <!-- Title & badges -->
                   <div class="flex-1 min-w-0">
                     <p class="text-sm font-medium truncate">
-                      {conn.name || conn.email || (conn.authType === 'oauth' ? 'OAuth Account' : 'API Key Slot')}
+                      {formatEmailLabel(conn.name || conn.email || (conn.authType === 'oauth' ? 'OAuth Account' : 'API Key Slot'), $emailPrivacy)}
                     </p>
                     <!-- Secondary label: upstream ConnectionRow shows the email
                          under a name, or the displayName when the stored name is
                          the email (which is what the Qoder device flow writes). -->
                     {#if secondaryConnLabel(conn)}
-                      <p class="truncate text-xs text-text-muted">{secondaryConnLabel(conn)}</p>
+                      <p class="truncate text-xs text-text-muted">{formatEmailLabel(secondaryConnLabel(conn), $emailPrivacy)}</p>
                     {/if}
                     <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
-                      <!-- Status badge (queued/testing/success/failed while a one-by-one run is in flight) -->
-                      {#if status?.state === 'queued'}
+                      {#if connBadge === 'queued'}
                         <span
                           class="inline-flex items-center gap-1.5 rounded-full font-semibold bg-surface-2 text-text-muted px-2 py-0.5 text-[10px]"
                           title="Waiting for its turn"
@@ -3047,12 +3156,12 @@
                           <span class="size-1.5 rounded-full bg-text-muted/50"></span>
                           queued
                         </span>
-                      {:else if status?.state === 'testing'}
+                      {:else if connBadge === 'testing'}
                         <span class="inline-flex items-center gap-1.5 rounded-full font-semibold bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2 py-0.5 text-[10px]">
                           <span class="material-symbols-outlined text-[10px] animate-spin">progress_activity</span>
                           testing
                         </span>
-                      {:else if (status?.state === 'failed' && status.error !== 'Provider test not supported') || ((conn.testStatus === 'failed' || conn.testStatus === 'error') && lastErr !== 'Provider test not supported')}
+                      {:else if connBadge === 'error'}
                         <span
                           class="inline-flex items-center gap-1.5 rounded-full font-semibold bg-red-500/10 text-red-600 dark:text-red-400 px-2 py-0.5 text-[10px]"
                           title={status?.state === 'failed' && status.error ? `failed: ${status.error}` : undefined}
@@ -3063,7 +3172,7 @@
                       {:else}
                         <span
                           class="inline-flex items-center gap-1.5 rounded-full font-semibold bg-green-500/10 text-green-600 dark:text-green-400 px-2 py-0.5 text-[10px]"
-                          title={status?.state === 'success' ? 'last one-by-one probe passed' : undefined}
+                          title={status?.state === 'success' ? 'last probe passed' : undefined}
                         >
                           <span class="size-1.5 rounded-full bg-green-500"></span>
                           active
@@ -3142,9 +3251,19 @@
                       {/if}
                       <!-- Last error tooltip -->
                       {#if lastErr && lastErr !== 'Provider test not supported'}
-                        <span class="max-w-full truncate text-xs text-red-500 sm:max-w-[300px]" title={lastErr}>
-                          {lastErr.length > 50 ? lastErr.slice(0, 50) + '...' : lastErr}
-                        </span>
+                        {@const isModelScoped = Boolean(conn.lastErrorModel)}
+                        {@const isHealthy = connBadge !== 'error'}
+                        <div
+                          class="flex items-center gap-1 min-w-0 max-w-full sm:max-w-[360px]"
+                          title={isModelScoped ? `[${conn.lastErrorModel}] ${lastErr}` : lastErr}
+                        >
+                          {#if isModelScoped}
+                            <span class="font-mono text-[11px] text-text-muted shrink-0">[{conn.lastErrorModel}]</span>
+                          {/if}
+                          <span class="truncate text-xs {isHealthy ? 'text-text-muted' : 'text-red-500'}">
+                            {lastErr.length > 50 ? lastErr.slice(0, 50) + '...' : lastErr}
+                          </span>
+                        </div>
                       {/if}
 
                       <!-- Priority tag -->
@@ -3154,7 +3273,12 @@
                     {#if lastErr && lastErr !== 'Provider test not supported' && (status?.state === 'failed' || conn.testStatus === 'failed' || conn.testStatus === 'error')}
                       <div class="mt-1.5 flex items-start gap-1.5 text-xs text-red-500 bg-red-500/10 px-2.5 py-1.5 rounded-md border border-red-500/20 max-w-full">
                         <span class="material-symbols-outlined text-sm shrink-0 mt-0.5">error</span>
-                        <span class="break-words font-medium leading-relaxed">{lastErr}</span>
+                        <span class="break-words font-medium leading-relaxed">
+                          {#if conn.lastErrorModel}
+                            <span class="font-mono text-[11px] mr-1">[{conn.lastErrorModel}]</span>
+                          {/if}
+                          {lastErr}
+                        </span>
                       </div>
                     {/if}
                     <!-- Proxy detail line: pool/legacy label, masked endpoint, no_proxy -->
@@ -3188,7 +3312,12 @@
 
                 <!-- Right actions -->
                 <div class="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-end">
-                  <div class="grid flex-1 grid-cols-3 gap-1 sm:flex sm:flex-none">
+                  <!-- The proxy picker stays a control of its own: it is a
+                       two-tap choice between pools, not a verb. Everything that
+                       runs and is done moved into one menu, because four to five
+                       labelled buttons in a row left the connection name almost
+                       no width (issue #224). -->
+                  <div class="grid flex-1 grid-flow-col auto-cols-fr gap-1 sm:flex sm:flex-none">
                     <!-- Proxy dropdown -->
                     <div class="relative">
                       <button
@@ -3261,38 +3390,33 @@
                         </div>
                       {/if}
                     </div>
-                    <!-- Freebuff session manage button -->
-                    {#if isFreebuff}
-                    <button
-                      type="button"
-                      onclick={() => selectFreebuffAccount(conn.id)}
-                      class="flex flex-col items-center rounded px-2 py-1 transition-colors hover:bg-black/5 dark:hover:bg-white/5 {targetFreebuffConn?.id === conn.id ? 'text-primary font-medium' : 'text-text-muted hover:text-primary'} cursor-pointer"
-                      title="Manage session for this account"
+                    <Menu
+                      label="Actions for this connection"
+                      triggerIcon="more_horiz"
+                      hideLabel
+                      minWidth="13rem"
                     >
-                      <span class="material-symbols-outlined text-[18px]">lock_clock</span>
-                      <span class="text-[10px] leading-tight">Session</span>
-                    </button>
-                    {/if}
+                      {#if isFreebuff}
+                        <MenuItem
+                          label="Manage session"
+                          icon="lock_clock"
+                          onSelect={() => selectFreebuffAccount(conn.id)}
+                        />
+                        <div class="my-1 border-t border-border-subtle" role="separator"></div>
+                      {/if}
 
-                    <!-- Edit button -->
-                    <button
-                      type="button"
-                      onclick={() => openEditConnection(conn)}
-                      class="flex flex-col items-center rounded px-2 py-1 text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5 cursor-pointer"
-                    >
-                      <span class="material-symbols-outlined text-[18px]">edit</span>
-                      <span class="text-[10px] leading-tight">Edit</span>
-                    </button>
+                      <MenuItem
+                        label="Refresh"
+                        icon="sync"
+                        disabled={isTestingOneByOne || status?.state === 'testing'}
+                        onSelect={() => refreshOneConnection(conn)}
+                      />
+                      <MenuItem label="Edit" icon="edit" onSelect={() => openEditConnection(conn)} />
 
-                    <!-- Delete button -->
-                    <button
-                      type="button"
-                      onclick={() => handleDeleteConnection(conn)}
-                      class="flex flex-col items-center rounded px-2 py-1 text-red-500 hover:bg-red-500/10 cursor-pointer"
-                    >
-                      <span class="material-symbols-outlined text-[18px]">delete</span>
-                      <span class="text-[10px] leading-tight">Delete</span>
-                    </button>
+                      <div class="my-1 border-t border-border-subtle" role="separator"></div>
+
+                      <MenuItem label="Delete" icon="delete" danger onSelect={() => handleDeleteConnection(conn)} />
+                    </Menu>
                   </div>
 
                   <!-- Active toggle switch -->
@@ -3487,6 +3611,15 @@
     <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-center gap-3">
         <h2 class="text-lg font-semibold">Available Models</h2>
+        {#if modelDeprecationCount > 0}
+          <span
+            class="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning border border-warning/25"
+            title="These models were retired by the provider and cannot serve a request"
+          >
+            <span class="material-symbols-outlined text-[13px] leading-none" aria-hidden="true">error</span>
+            {modelDeprecationCount} deprecated
+          </span>
+        {/if}
         {#if providerThinkingLevels}
         <select
           title="Appends (level) suffix to copied model names"
@@ -3514,15 +3647,27 @@
     </div>
 
     {#if activeModelTestError}
-      <div class="mb-3 flex items-start gap-2.5 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-600 dark:text-red-400">
-        <span class="material-symbols-outlined shrink-0 text-base">error</span>
-        <div class="flex-1 font-medium leading-relaxed">
-          {activeModelTestError}
+      {@const isBlockedSeverity = checkAllSummary?.severity === 'blocked'}
+      {@const blockedCount = getBlockedModelIds(modelTestStatuses).length}
+      <div class="mb-3 flex items-start gap-2.5 rounded-lg border {isBlockedSeverity ? 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400' : 'border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400'} p-3 text-xs">
+        <span class="material-symbols-outlined shrink-0 text-base">{isBlockedSeverity ? 'schedule' : 'error'}</span>
+        <div class="flex-1 font-medium leading-relaxed flex items-center justify-between gap-2 flex-wrap">
+          <span>{activeModelTestError}</span>
+          {#if blockedCount > 0}
+            <button
+              type="button"
+              onclick={handleRetryBlockedModels}
+              disabled={isCheckingAll}
+              class="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-700 dark:text-amber-300 font-semibold text-xs cursor-pointer disabled:opacity-50"
+            >
+              Retry blocked ({blockedCount})
+            </button>
+          {/if}
         </div>
         <button
           type="button"
-          onclick={() => (activeModelTestError = null)}
-          class="text-red-600 dark:text-red-400 hover:opacity-75 cursor-pointer"
+          onclick={() => { activeModelTestError = null; checkAllSummary = null; }}
+          class="hover:opacity-75 cursor-pointer shrink-0"
           title="Dismiss"
         >
           <span class="material-symbols-outlined text-sm">close</span>
@@ -3542,7 +3687,7 @@
             const specific = c.providerSpecificData as Record<string, any> | undefined
             return {
               id: c.id,
-              name: c.name || c.email || 'Freebuff Account',
+              name: formatEmailLabel(c.name || c.email || 'Freebuff Account', $emailPrivacy),
               isActive: c.isActive === 1,
               currentModel: freebuffSessions[c.id]?.currentModel || (specific?.freebuffModel as string) || (specific?.assignedModel as string),
               status: freebuffSessions[c.id]?.status,
@@ -3563,7 +3708,7 @@
         {@const isTestingThis = testStatus === 'testing'}
         {@const isSessionActive = checkIsActiveSession(model.id)}
         <div
-          class="group min-w-0 max-w-full rounded-lg border px-3 py-2 {testStatus === 'ok' ? 'border-green-500/40' : testStatus === 'error' ? 'border-red-500/40' : 'border-border'} hover:bg-sidebar/50 transition-colors"
+          class="group min-w-0 max-w-full rounded-lg border px-3 py-2 {testStatus === 'ok' ? 'border-green-500/40' : testStatus === 'blocked' ? 'border-amber-500/40' : testStatus === 'error' ? 'border-red-500/40' : 'border-border'} hover:bg-sidebar/50 transition-colors"
         >
           <div class="flex min-w-0 items-start gap-2 sm:items-center">
             <span class="material-symbols-outlined shrink-0 text-base text-text-muted">smart_toy</span>
@@ -3572,12 +3717,18 @@
                 <code class="max-w-[72vw] truncate rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-muted sm:max-w-[360px]">
                   {fullModelId}
                 </code>
+                {#if rowCaps?.free}
+                  <span class="inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+                    FREE
+                  </span>
+                {/if}
                 {#if isSessionActive}
                   <span class="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
                     <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
                     Active Session
                   </span>
                 {/if}
+                <DeprecatedBadge provider={providerId} model={model.id} />
               </div>
               <span class="flex min-w-0 items-center text-[9px] gap-1 pl-1">
                 <span class="truncate text-[9px] italic text-text-muted/70">{model.name}</span>
@@ -3602,7 +3753,7 @@
               </span>
             </div>
               {#if modelTestErrors[model.id]}
-                <span class="text-[9px] text-red-500 dark:text-red-400 font-medium pl-1 truncate max-w-[280px]" title={modelTestErrors[model.id]}>
+                <span class="text-[9px] {testStatus === 'blocked' ? 'text-amber-500 dark:text-amber-400' : 'text-red-500 dark:text-red-400'} font-medium pl-1 truncate max-w-[280px]" title={modelTestErrors[model.id]}>
                   {modelTestErrors[model.id]}
                 </span>
               {/if}
@@ -3620,6 +3771,8 @@
                   <span class="material-symbols-outlined text-sm animate-spin text-primary">progress_activity</span>
                 {:else if testStatus === 'ok'}
                   <span class="material-symbols-outlined text-sm text-green-500">check</span>
+                {:else if testStatus === 'blocked'}
+                  <span class="material-symbols-outlined text-sm text-amber-500">schedule</span>
                 {:else if testStatus === 'error'}
                   <span class="material-symbols-outlined text-sm text-red-500">error</span>
                 {:else}
@@ -3631,6 +3784,8 @@
                   Testing...
                 {:else if testStatus === 'ok'}
                   Passed
+                {:else if testStatus === 'blocked'}
+                  {modelTestErrors[model.id] || 'Blocked — account in cooldown'}
                 {:else if testStatus === 'error'}
                   {modelTestErrors[model.id] || 'Failed'}
                 {:else}
@@ -3710,7 +3865,7 @@
         </button>
       {/if}
 
-      {#if allAvailableModels.length > 0}
+      {#if visibleModels.length > 0}
         <button
           type="button"
           onclick={handleCheckAllModels}
@@ -3721,7 +3876,7 @@
           <span class="material-symbols-outlined text-sm">{isCheckingAll ? 'progress_activity' : 'troubleshoot'}</span>
           {isCheckingAll
             ? `Checking ${checkAllProgress.done}/${checkAllProgress.total}...`
-            : `Check All Models (${allAvailableModels.length})`}
+            : `Check All Models (${visibleModels.length})`}
         </button>
       {/if}
 
@@ -3735,6 +3890,21 @@
         >
           <span class="material-symbols-outlined text-sm">{isCheckingLatest ? 'progress_activity' : 'cached'}</span>
           {isCheckingLatest ? 'Checking...' : 'Check Latest Models'}
+        </button>
+      {/if}
+
+      {#if providerConnections.some((c) => c.isActive !== 0)}
+        <button
+          type="button"
+          onclick={handleSyncModelDeprecations}
+          disabled={isSyncingModels}
+          class="flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-surface-2 hover:bg-surface-3 px-3 py-2 text-xs text-text-main transition-colors sm:w-auto cursor-pointer disabled:opacity-50"
+          title="Re-read the provider's live catalog and clear the Deprecated badge from any model it still serves"
+        >
+          <span class="material-symbols-outlined text-sm {isSyncingModels ? 'animate-spin' : ''}">
+            {isSyncingModels ? 'progress_activity' : 'sync'}
+          </span>
+          {isSyncingModels ? 'Syncing...' : 'Sync Models'}
         </button>
       {/if}
     </div>
@@ -4286,92 +4456,12 @@
 
 <!-- 4. Edit Connection Modal -->
 {#if editingConnection}
-  <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-    <div
-      class="absolute inset-0 bg-black/50 backdrop-blur-[2px] fade-in"
-      onclick={() => (editingConnection = null)}
-      role="presentation"
-    ></div>
-    <div class="relative w-full bg-surface border border-border-subtle rounded-[14px] shadow-[var(--shadow-elev)] fade-in max-w-md p-6">
-      <div class="flex items-center justify-between pb-3 border-b border-border-subtle mb-4">
-        <h2 class="text-lg font-semibold text-text-main">Edit Connection</h2>
-        <button
-          type="button"
-          onclick={() => (editingConnection = null)}
-          class="p-1 rounded text-text-muted hover:text-text-main cursor-pointer"
-        >
-          <span class="material-symbols-outlined text-lg">close</span>
-        </button>
-      </div>
-
-      <div class="space-y-4">
-        <div>
-          <label class="block text-xs font-medium text-text-muted mb-1" for="edit-conn-name">Name</label>
-          <input
-            id="edit-conn-name"
-            bind:value={editName}
-            class="w-full px-2.5 py-1.5 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary"
-          />
-        </div>
-
-        {#if editingConnection.email}
-          <div>
-            <span class="block text-xs font-medium text-text-muted mb-1">Email</span>
-            <p class="text-xs text-text-main font-medium">{editingConnection.email}</p>
-          </div>
-        {/if}
-
-        <div>
-          <label class="block text-xs font-medium text-text-muted mb-1" for="edit-conn-priority">Priority</label>
-          <input
-            id="edit-conn-priority"
-            type="number"
-            min="1"
-            bind:value={editPriority}
-            class="w-full px-2.5 py-1.5 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary"
-          />
-        </div>
-
-        {#if editTestStatus}
-          <div class="text-xs {editTestStatus === 'ok' ? 'text-green-500' : 'text-red-500'}">
-            {editTestStatus === 'ok' ? 'Connection valid!' : editTestError || 'Test failed'}
-          </div>
-        {/if}
-
-        <div class="flex items-center justify-between pt-2">
-          <button
-            type="button"
-            onclick={testEditingConnection}
-            disabled={isTestingEdit}
-            class="px-3 py-1.5 text-xs font-semibold rounded-[8px] bg-surface-2 hover:bg-surface-3 text-text-main border border-border flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-          >
-            {#if isTestingEdit}
-              <span class="material-symbols-outlined text-sm animate-spin">progress_activity</span>
-            {/if}
-            Test Connection
-          </button>
-
-          <div class="flex gap-2">
-            <button
-              type="button"
-              onclick={() => (editingConnection = null)}
-              class="px-3 py-1.5 text-xs font-semibold rounded-[8px] bg-surface-2 hover:bg-surface-3 text-text-main border border-border cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onclick={saveEditingConnection}
-              disabled={isSavingEdit}
-              class="px-3 py-1.5 text-xs font-semibold rounded-[8px] bg-brand-500 hover:bg-brand-600 text-white shadow-sm disabled:opacity-50 cursor-pointer"
-            >
-              Save
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <EditConnectionModal
+    connection={editingConnection}
+    onClose={() => (editingConnection = null)}
+    onSave={saveEditingConnection}
+    onSaveError={(message) => alert(message)}
+  />
 {/if}
 
 <!-- 5. Add Custom Model Modal -->
@@ -4383,6 +4473,13 @@
   onSave={submitAddCustomModel}
 />
 {/if}
+
+<!-- 5a. Per-provider header overrides (upstream CustomConfigCard parity) -->
+<ProviderHeaderOverridesModal
+  isOpen={showHeaderOverrides}
+  providerId={providerId}
+  onClose={() => (showHeaderOverrides = false)}
+/>
 
 <!-- 5b. Edit Compatible Node Modal (upstream EditCompatibleNodeModal parity) -->
 <EditCompatibleNodeModal

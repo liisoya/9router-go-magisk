@@ -3,19 +3,39 @@ package dashboard
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/handlers/shared"
+	"9router/proxy/internal/observ"
+	"9router/proxy/internal/semanticcache"
+	"github.com/go-chi/chi/v5"
+)
+
+// Default probe URLs for proxy pool health checks.
+const (
+	DefaultPrimaryProbeURL   = "https://www.google.com/generate_204"
+	DefaultSecondaryProbeURL = "https://cloudflare.com/cdn-cgi/trace"
 )
 
 // DashboardHandler handles dashboard REST API endpoints.
 type DashboardHandler struct {
-	Repo *db.Repo
+	Repo              *db.Repo
+	PrimaryProbeURL   string
+	SecondaryProbeURL string
+	TokenSaver        *shared.TokenSaverConfig
+	SemanticCache     *semanticcache.Cache
 }
 
 // NewDashboardHandler initializes a DashboardHandler with the provided Repo.
-func NewDashboardHandler(repo *db.Repo) *DashboardHandler {
-	return &DashboardHandler{Repo: repo}
+func NewDashboardHandler(repo *db.Repo, ts ...*shared.TokenSaverConfig) *DashboardHandler {
+	h := &DashboardHandler{
+		Repo:              repo,
+		PrimaryProbeURL:   DefaultPrimaryProbeURL,
+		SecondaryProbeURL: DefaultSecondaryProbeURL,
+	}
+	if len(ts) > 0 && ts[0] != nil {
+		h.TokenSaver = ts[0]
+	}
+	return h
 }
 
 // getURLParam retrieves a route parameter from Chi URLParam or standard PathValue.
@@ -39,6 +59,8 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/connections/{id}/test", h.HandleTestConnection)
 		r.Post("/providers/{id}/test", h.HandleTestConnection)
 		r.Get("/providers/{id}/models", h.HandleGetConnectionModels)
+		r.Get("/providers/{id}/overrides", h.HandleGetProviderOverrides)
+		r.Put("/providers/{id}/overrides", h.HandleSaveProviderOverrides)
 		r.Post("/providers/validate", h.HandleValidateProvider)
 
 		// Provider Nodes (Custom Endpoints)
@@ -68,6 +90,20 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/keys", h.HandleCreateApiKey)
 		r.Delete("/keys/{id}", h.HandleDeleteApiKey)
 		r.Put("/keys/{id}/toggle", h.HandleToggleApiKey)
+		r.Post("/keys/{id}/rotate", h.HandleRotateApiKey)
+		r.Put("/keys/{id}", h.HandleUpdateApiKey)
+
+		// F-5 Credential vault: status and master-key rotation.
+		r.Get("/vault/status", h.HandleGetVaultStatus)
+		r.Post("/vault/rotate", h.HandleRotateVault)
+		r.Get("/metrics", observ.Handler().ServeHTTP)
+
+		// Guardrails: policy CRUD and the audit log.
+		r.Get("/guardrails/policies", h.HandleGetGuardrailPolicies)
+		r.Post("/guardrails/policies", h.HandleCreateGuardrailPolicy)
+		r.Put("/guardrails/policies/{id}", h.HandleUpdateGuardrailPolicy)
+		r.Delete("/guardrails/policies/{id}", h.HandleDeleteGuardrailPolicy)
+		r.Get("/guardrails/logs", h.HandleListGuardrailLogs)
 
 		// Models
 		r.Get("/models/custom", h.HandleGetCustomModels)
@@ -82,7 +118,14 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Put("/settings", h.HandleUpdateSettings)
 		r.Get("/settings/database", h.HandleExportDatabase)
 		r.Post("/settings/database", h.HandleImportDatabase)
+		r.Get("/settings/database/stats", h.HandleGetDatabaseStats)
+		r.Post("/settings/database/prune", h.HandlePruneDatabase)
+		r.Post("/settings/database/vacuum", h.HandleVacuumDatabase)
 		r.Post("/settings/proxy-test", h.HandleProxyTest)
+
+		// Token Saver Testing Benches
+		r.Post("/tokensaver/rtk/test", h.HandleTestRTK)
+		r.Post("/tokensaver/caveman/test", h.HandleTestCaveman)
 
 		// Tunnel & Tailscale
 		r.Get("/tunnel/status", h.HandleTunnelStatus)
@@ -99,5 +142,14 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		// before-parameter ordering that /usage/providers needs.
 		r.Get("/usage/{connectionId}/reset-credits", h.HandleListCodexResetCredits)
 		r.Post("/usage/{connectionId}/reset-credits/consume", h.HandleConsumeCodexResetCredit)
+
+		// Cache Analytics & Management
+		r.Get("/cache", h.HandleGetCache)
+		r.Delete("/cache", h.HandleDeleteCache)
+		r.Get("/cache/entries", h.HandleGetCacheEntries)
+		r.Delete("/cache/entries", h.HandleDeleteCacheEntry)
+
+		// Compression Analytics
+		r.Get("/analytics/compression", h.HandleGetCompressionAnalytics)
 	})
 }

@@ -15,6 +15,7 @@ import (
 
 	"9router/proxy/internal/app"
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/handlers"
 )
 
 // testAPIKey is the client key seeded into every Env. The engine routes are
@@ -28,13 +29,13 @@ const testAPIKey = "sk-integration-test-key"
 // listener on a random port.
 //
 // It deliberately does NOT boot app.AppModule. That path goes through
-// db.InitGlobalDatabase, a process-wide sync.Once, so only one database could
-// ever exist per test binary and every test would share it. Constructing the
-// router directly keeps each Env's state isolated while still exercising the
-// production wiring — app.ProvideRouter is the same function the binary uses,
-// so a route registered in the wrong place fails here exactly as it would in
-// production. See bootfx/ for the complementary test that boots the real fx
-// graph end to end.
+// db.InitGlobalDatabase, a process-wide singleton, so only one database could
+// ever exist per test binary without resetting it between tests.
+// Constructing the router directly keeps each Env's state isolated while still
+// exercising the production wiring — app.ProvideRouter is the same function the
+// binary uses, so a route registered in the wrong place fails here exactly as it
+// would in production. See bootfx/ for the complementary test that boots the
+// real fx graph end to end.
 //
 // Env holds no *testing.T on purpose. Every helper takes the test that is
 // currently running: calling FailNow through a stored parent would abort the
@@ -49,9 +50,19 @@ type Env struct {
 }
 
 // newEnv starts an isolated gateway. Cleanup stops the HTTP server and closes
-// the database; t.TempDir removes the SQLite file and its WAL siblings.
 func newEnv(t *testing.T) *Env {
 	t.Helper()
+	return newEnvWithTokenSaver(t, nil)
+}
+
+// newEnvWithTokenSaver starts an isolated gateway whose token savers are
+// configured by build, or left at the harness default (every saver pinned off)
+// when build is nil. A test that needs to prove what a saver does to the
+// outbound body has to boot the real router with it on; a request that is
+// rewritten is otherwise indistinguishable from one that is relayed.
+func newEnvWithTokenSaver(t *testing.T, build func(*db.Repo) *handlers.TokenSaverConfig) *Env {
+	t.Helper()
+	t.Setenv("ALLOW_PRIVATE_NETWORKING", "true")
 
 	// DATA_DIR keeps auth.CLIToken() and config.LoadConfig() from reading or
 	// writing the developer's real ~/.9router. JWT_SECRET pins the HS256
@@ -84,14 +95,10 @@ func newEnv(t *testing.T) *Env {
 		t.Fatalf("seed api key: %v", err)
 	}
 
-	// Token savers off with every *Set flag raised: the CLI values then win over
-	// the persisted settings row, so RTK/caveman/ponytail never rewrite the
-	// request body and upstream assertions can compare it byte for byte.
-	ts := app.ProvideTokenSaverConfig(repo, app.CLIParams{
-		RTK: false, RTKSet: true,
-		Caveman: false, CavemanSet: true,
-		Ponytail: false, PonytailSet: true,
-	})
+	ts := defaultTokenSaver(repo)
+	if build != nil {
+		ts = build(repo)
+	}
 
 	srv := httptest.NewServer(app.ProvideRouter(repo, ts))
 	t.Cleanup(srv.Close)
@@ -102,6 +109,18 @@ func newEnv(t *testing.T) *Env {
 		APIKey:  testAPIKey,
 		client:  srv.Client(),
 	}
+}
+
+// defaultTokenSaver configures token savers off with every *Set flag raised:
+// the CLI values then win over the persisted settings row, so
+// RTK/caveman/ponytail never rewrite the request body and upstream assertions
+// can compare it byte for byte.
+func defaultTokenSaver(repo *db.Repo) *handlers.TokenSaverConfig {
+	return app.ProvideTokenSaverConfig(repo, app.CLIParams{
+		RTK: false, RTKSet: true,
+		Caveman: false, CavemanSet: true,
+		Ponytail: false, PonytailSet: true,
+	})
 }
 
 // Result is a completed HTTP exchange with the body already drained.

@@ -99,8 +99,14 @@
     }
   }
 
-  async function handleCreateCustomNode(data: { name: string; prefix: string; baseUrl: string; type: string }) {
-    const node = await api.createProviderNode(data)
+  async function handleCreateCustomNode(data: {
+    name: string
+    prefix: string
+    baseUrl: string
+    type: string
+    urlSuffix?: string
+  }) {
+    const node = await api.createProviderNode({ ...data, urlSuffix: data.urlSuffix || undefined })
     customNodes = [...customNodes, node]
     showCustomModal = false
     onRefresh()
@@ -212,9 +218,10 @@
     {#if isEmbedding && showCustomModal}
       <AddCompatibleNodeModal
         isOpen={showCustomModal}
-        nodeType="custom-embedding"
+        type="custom-embedding"
+        allowedTypes={['custom-embedding']}
         onClose={() => (showCustomModal = false)}
-        onCreated={handleCreateCustomNode}
+        onSubmit={handleCreateCustomNode}
       />
     {/if}
   </div>

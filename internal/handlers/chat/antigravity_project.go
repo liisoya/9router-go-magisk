@@ -4,7 +4,7 @@ import (
 	"9router/proxy/internal/log"
 	"bytes"
 	"context"
-	json "encoding/json/v2"
+	json "9router/proxy/internal/fastjson"
 	"io"
 	"net/http"
 	"os"
@@ -19,6 +19,8 @@ import (
 // (parity with the Next.js reference — see registry/antigravity.js usage config).
 var loadCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 var onboardUserURL = "https://cloudcode-pa.googleapis.com/v1internal:onboardUser"
+
+const antigravityIDEUserAgent = "antigravity/ide/2.11.0 darwin/arm64"
 
 var lcaMetadata = map[string]any{
 	"ideType":    9, // ANTIGRAVITY
@@ -129,15 +131,7 @@ func fetchAntigravityProjectID(ctx context.Context, client *http.Client, accessT
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
-	req.Header.Set("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
-
-	clientMetadata, err := json.Marshal(lcaMetadata)
-	if err != nil {
-		log.Error("antigravity", "marshal metadata failed", "error", err)
-		return "", false, false
-	}
-	req.Header.Set("Client-Metadata", string(clientMetadata))
+	req.Header.Set("User-Agent", antigravityIDEUserAgent)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -217,18 +211,7 @@ func onboardAntigravityUser(ctx context.Context, client *http.Client, accessToke
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
-		req.Header.Set("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
-
-		clientMetadata, err := json.Marshal(lcaMetadata)
-		if err != nil {
-			log.Error("antigravity", "marshal metadata failed", "error", err)
-			if !probeBackoffWait(ctx, attempt) {
-				return "", false, false
-			}
-			continue
-		}
-		req.Header.Set("Client-Metadata", string(clientMetadata))
+		req.Header.Set("User-Agent", antigravityIDEUserAgent)
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -295,6 +278,12 @@ func extractProjectID(val any) string {
 	if m, ok := val.(map[string]any); ok {
 		if id, _ := m["id"].(string); id != "" {
 			return strings.TrimSpace(id)
+		}
+		if pid, _ := m["projectId"].(string); pid != "" {
+			return strings.TrimSpace(pid)
+		}
+		if pid, _ := m["project_id"].(string); pid != "" {
+			return strings.TrimSpace(pid)
 		}
 	}
 	return ""

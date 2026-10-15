@@ -76,14 +76,32 @@ func fastQuotaGate(t *testing.T) {
 	t.Cleanup(func() { quotaFetchGate = prev })
 }
 
-// assertSpaced fails when two upstream reads started closer together than the
-// gate floor — the exact shape that got ten accounts on one IP rate-limited.
+// assertSpaced fails when the reads were not paced — the exact shape that got
+// ten accounts on one IP rate-limited in issue #30.
+//
+// It asserts on the MEAN gap (span / (n-1)), not on each gap in isolation. A
+// per-gap check measures wall-clock wake-ups, and the previous goroutine's
+// wake-up lateness is charged to the next gap: under -race with the rest of the
+// suite loaded, a correctly-behaving gate reads 33ms against a 40ms floor (and
+// 29.77ms against a 30ms one), at indices following no pattern. Averaging
+// cancels that noise instead of buying margin against it.
+//
+// The floor sits between the two outcomes rather than at the configured gap.
+// Measured on this machine with the 40ms gate: paced reads average ~39.8ms
+// apart, unpaced ones ~4.3ms. 20ms clears the unpaced case by ~5x and clears
+// the paced one by ~2x, so the assertion survives a loaded scheduler in either
+// direction. Requiring the exact 40ms would assert the timer fired on time,
+// which is not what the gate promises.
 func assertSpaced(t *testing.T, hits []time.Time, minGap time.Duration) {
 	t.Helper()
-	for i := 1; i < len(hits); i++ {
-		if gap := hits[i].Sub(hits[i-1]); gap < minGap*9/10 {
-			t.Errorf("upstream reads %d and %d were %s apart, want >= %s", i-1, i, gap, minGap)
-		}
+	if len(hits) < 2 {
+		return
+	}
+	gaps := len(hits) - 1
+	mean := hits[len(hits)-1].Sub(hits[0]) / time.Duration(gaps)
+	if floor := minGap / 2; mean < floor {
+		t.Errorf("%d upstream reads averaged %s apart (span %s), want at least %s — the burst was not paced",
+			len(hits), mean, hits[len(hits)-1].Sub(hits[0]), floor)
 	}
 }
 

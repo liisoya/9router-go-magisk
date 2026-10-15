@@ -412,6 +412,21 @@ func (ex *pkceExchange) buildConnectionData(ctx context.Context, tokens *pkceTok
 	return dataMap, email
 }
 
+// validateCodexConnectionData fails a codex login whose id_token carried no
+// ChatGPT account id. The codex backend rejects every request without the
+// chatgpt-account-id header, so persisting such a connection would authorize
+// a login that can never complete a single call.
+func validateCodexConnectionData(provider string, dataMap map[string]any) *exchangeError {
+	if provider != "codex" {
+		return nil
+	}
+	if psd, _ := dataMap["providerSpecificData"].(map[string]any); strVal(psd, "chatgptAccountId") == "" {
+		return exchangeFail(http.StatusBadGateway,
+			"codex login did not return a ChatGPT account id — please try logging in again")
+	}
+	return nil
+}
+
 // completePKCEExchange runs the token swap and persists the resulting
 // connection, returning the outcome shared by the HTTP and proxy paths.
 func (h *OAuthHandler) completePKCEExchange(ctx context.Context, ex *pkceExchange) (pkceExchangeResult, *exchangeError) {
@@ -420,6 +435,9 @@ func (h *OAuthHandler) completePKCEExchange(ctx context.Context, ex *pkceExchang
 		return pkceExchangeResult{}, fail
 	}
 	dataMap, email := ex.buildConnectionData(ctx, tokens)
+	if fail := validateCodexConnectionData(ex.provider, dataMap); fail != nil {
+		return pkceExchangeResult{}, fail
+	}
 	connName := connectionDisplayName(ex.provider, ex.name, email, ex.cfg.display)
 	connID := ex.cfg.connPrefix + shortHash(tokens.AccessToken)
 	if err := h.persistConnection(connID, ex.provider, connName, dataMap, tokens.RefreshToken); err != nil {
@@ -458,9 +476,13 @@ func (h *OAuthHandler) persistConnection(connID, provider, connName string, data
 			connName, string(dataBytes), now, connID,
 		)
 	} else {
+		priority := 1
+		if h.Repo != nil {
+			priority = h.Repo.ResolveDefaultPriority(provider)
+		}
 		_, err = h.Repo.RawDB().Exec(
-			"INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, 1, ?, ?, ?)",
-			connID, provider, connName, string(dataBytes), now, now,
+			"INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, ?, 1, ?, ?, ?)",
+			connID, provider, connName, priority, string(dataBytes), now, now,
 		)
 	}
 	return err

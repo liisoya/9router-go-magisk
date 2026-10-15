@@ -127,7 +127,8 @@ func TestStripCodexUnsupportedTokenParams_KeepsOtherFields(t *testing.T) {
 
 // The unit tests above pin the helper; this one pins the wiring, because a
 // helper that ForwardCodex never calls would leave the 400 exactly as
-// reported. The fake upstream rejects the body the way ChatGPT does.
+// reported. The fake upstream rejects the body the way ChatGPT does, so a
+// parameter missing from this list is one the backend would still 400 on.
 func TestForwardCodex_UpstreamNeverSeesTokenParams(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, _ := io.ReadAll(r.Body)
@@ -137,7 +138,7 @@ func TestForwardCodex_UpstreamNeverSeesTokenParams(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens", "temperature", "top_p"} {
 			if _, ok := m[key]; ok {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"detail":"Unsupported parameter: ` + key + `"}`))
@@ -151,8 +152,7 @@ func TestForwardCodex_UpstreamNeverSeesTokenParams(t *testing.T) {
 
 	cfg := &providers.ProviderConfig{BaseURL: srv.URL, AuthHeader: "Authorization", AuthScheme: "bearer"}
 	rec := httptest.NewRecorder()
-	body := []byte(`{"model":"cx/gpt-5.6-terra","max_tokens":4096,"messages":[{"role":"user","content":"hi"}],"stream":true}`)
-
+	body := []byte(`{"model":"cx/gpt-5.6-terra","max_tokens":4096,"temperature":0.7,"top_p":0.9,"messages":[{"role":"user","content":"hi"}],"stream":true}`)
 	// A 400 here means the parameter still reached the backend — the reported
 	// bug, and the only thing this test exists to catch.
 	if err := ForwardCodex(rec, &Request{
@@ -166,5 +166,29 @@ func TestForwardCodex_UpstreamNeverSeesTokenParams(t *testing.T) {
 	}
 	if rec.Code == http.StatusBadRequest {
 		t.Fatalf("upstream rejected the request as unsupported-parameter: %s", rec.Body.String())
+	}
+}
+
+// The Codex backend's reasoning models answer 400 "Unsupported parameter:
+// temperature" (and the same for top_p). Zed sends temperature on every turn,
+// so both sampling knobs must be dropped on the Codex path.
+func TestStripCodexUnsupportedTokenParams_DropsSamplingParams(t *testing.T) {
+	raw := []byte(`{
+		"model": "gpt-6-astra",
+		"input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+		"temperature": 0.7,
+		"top_p": 0.9,
+		"reasoning": {"effort": "high"}
+	}`)
+
+	parsed := decodeBody(t, stripCodexUnsupportedTokenParams(raw))
+
+	for _, key := range []string{"temperature", "top_p"} {
+		if _, ok := parsed[key]; ok {
+			t.Errorf("expected %q to be stripped for the Codex backend, got %v", key, parsed[key])
+		}
+	}
+	if _, ok := parsed["reasoning"]; !ok {
+		t.Error("reasoning must survive the strip")
 	}
 }

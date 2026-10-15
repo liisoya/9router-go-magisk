@@ -14,13 +14,14 @@ import (
 
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/proxy"
+	"9router/proxy/internal/providers"
 )
 
 // deviceProviders lists providers supporting the device-code family.
 // kimi-coding aliases to kimi (dual-auth merge, like upstream).
 var deviceProviders = []string{
 	"qoder", "qoder-cn", "kilocode", "grok-cli", "github", "kiro", "kimi", "kimi-coding",
-	"codebuddy-cn", "codebuddy-intl",
+	"codebuddy-cn", "codebuddy-intl", "muse", "minimax-code", "minimax-code-global",
 }
 
 func deviceSupported(p string) bool {
@@ -197,6 +198,10 @@ func deviceStart(provider, region, startURL, authMethod string) (map[string]any,
 		return kimiStart()
 	case "codebuddy-cn", "codebuddy-intl":
 		return codebuddyStart(provider)
+	case "muse":
+		return museStart()
+	case "minimax-code", "minimax-code-global":
+		return minimaxCodeStart(provider)
 	default:
 		return nil, fmt.Errorf("unsupported provider")
 	}
@@ -262,7 +267,7 @@ func kilocodeStart() (map[string]any, error) {
 
 // --- grok-cli: standard device flow, referrer=grok-build ---
 
-var grokcliUA = "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)"
+var grokcliUA = providers.GrokCLIPagerUserAgent
 
 func grokcliStart() (map[string]any, error) {
 	form := url.Values{
@@ -463,6 +468,10 @@ func devicePoll(provider, code string, session map[string]any) (deviceTokens, st
 		t, err = kimiPoll(session, code)
 	case "codebuddy-cn", "codebuddy-intl":
 		t, err = codebuddyPoll(provider, code)
+	case "muse":
+		t, err = musePoll(code)
+	case "minimax-code", "minimax-code-global":
+		t, err = minimaxCodePoll(provider, code, session)
 	default:
 		return t, "error", "unsupported provider"
 	}
@@ -491,7 +500,7 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 	}
 	name := connectionDisplayName(provider, t.name, email, map[string]string{
 		"qoder": "Qoder", "qoder-cn": "Qoder CN", "kilocode": "KiloCode", "grok-cli": "Grok CLI",
-		"github": "GitHub", "kiro": "Kiro", "kimi": "Kimi",
+		"github": "GitHub", "kiro": "Kiro", "kimi": "Kimi", "muse": "Muse",
 		"codebuddy-cn": "CodeBuddy", "codebuddy-intl": "CodeBuddy",
 	}[provider])
 	id := provider + "-" + shortHash(t.access)
@@ -517,6 +526,14 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 	}
 	if h.Repo != nil && h.Repo.RawDB() != nil {
 		now := currentTimestamp()
+		if provider == "muse" {
+			// The minted Model API key rotates on every login, so without
+			// this each re-login would pile up another active row for the
+			// same account. Keep only the newest connection active.
+			_, _ = h.Repo.RawDB().Exec(
+				"UPDATE providerConnections SET isActive = 0, updatedAt = ? WHERE provider = ? AND id != ? AND isActive = 1",
+				now, provider, id)
+		}
 		raw, _ := json.Marshal(dataMap)
 		var existing string
 		err := h.Repo.RawDB().QueryRow("SELECT data FROM providerConnections WHERE id = ?", id).Scan(&existing)
@@ -524,9 +541,13 @@ func (h *OAuthHandler) saveDeviceConnection(provider string, t deviceTokens) sav
 			_, _ = h.Repo.RawDB().Exec(
 				"UPDATE providerConnections SET name = ?, data = ?, updatedAt = ? WHERE id = ?", name, string(raw), now, id)
 		} else {
+			priority := 1
+			if h.Repo != nil {
+				priority = h.Repo.ResolveDefaultPriority(provider)
+			}
 			_, _ = h.Repo.RawDB().Exec(
-				"INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, 1, ?, ?, ?)",
-				id, provider, name, string(raw), now, now)
+				"INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, ?, 1, ?, ?, ?)",
+				id, provider, name, priority, string(raw), now, now)
 		}
 	}
 	return savedConn{id, name, email}

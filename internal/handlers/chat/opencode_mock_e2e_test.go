@@ -347,11 +347,14 @@ func TestE2E_Opencode_SpaceBunny_ChatCompletions_Shape(t *testing.T) {
 		if parsed["model"] != "space-bunny-free" {
 			t.Errorf("expected model 'space-bunny-free', got %v", parsed["model"])
 		}
-		// Tools must have .function wrapper (Chat Completions format)
+		// Tools must have .function wrapper (Chat Completions format) and be
+		// the v2 inference gate's read/shell fingerprints — the old quartet
+		// stubs are rejected by the gate (decolua/9router#4842).
 		tools, ok := parsed["tools"].([]any)
-		if !ok || len(tools) != 4 {
-			t.Fatalf("expected 4 fingerprint tools, got %v", tools)
+		if !ok || len(tools) != 2 {
+			t.Fatalf("expected 2 v2 fingerprint tools (read, shell), got %v", tools)
 		}
+		gotNames := map[string]bool{}
 		for _, tool := range tools {
 			tm, ok := tool.(map[string]any)
 			if !ok {
@@ -361,13 +364,26 @@ func TestE2E_Opencode_SpaceBunny_ChatCompletions_Shape(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected .function wrapper in chat completions tool, got %v", tm)
 			}
-			if fn["name"] == "" {
+			name, _ := fn["name"].(string)
+			gotNames[name] = true
+			if name == "" {
 				t.Errorf("expected tool name in function object")
 			}
+			if fn["description"] == "" {
+				t.Errorf("tool %q must carry its exact gate description", name)
+			}
+			params, _ := fn["parameters"].(map[string]any)
+			if params == nil || params["type"] != "object" {
+				t.Errorf("tool %q must carry a real parameter schema, got %v", name, fn["parameters"])
+			}
 		}
-		// tool_choice must be 'none' for tool-less request
-		if parsed["tool_choice"] != "none" {
-			t.Errorf("expected tool_choice 'none', got %v", parsed["tool_choice"])
+		if !gotNames["read"] || !gotNames["shell"] {
+			t.Errorf("expected the read and shell fingerprints, got %v", gotNames)
+		}
+		// tool_choice 'none' is rejected by the gate; a tool-less request
+		// carries no tool_choice at all rather than the forbidden value.
+		if parsed["tool_choice"] == "none" {
+			t.Errorf("tool_choice 'none' must never reach the inference gate, got %v", parsed["tool_choice"])
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")

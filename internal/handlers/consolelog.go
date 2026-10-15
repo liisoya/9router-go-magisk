@@ -17,12 +17,15 @@ import (
 // that idle-out connections keep the SSE stream alive.
 const consolePingInterval = 25 * time.Second
 
-// HandleConsoleLogsGet returns the buffered console logs (translator
-// console-logs GET). Matches Next's { success, logs } shape.
+// HandleConsoleLogsGet returns the buffered console log entries (translator
+// console-logs GET). Each entry carries the level and arrival time known at
+// emit time, so the dashboard can colour and timestamp rows without re-parsing
+// rendered text. Upstream Next returned bare strings here; the Svelte
+// dashboard is the only consumer of this endpoint.
 func HandleConsoleLogsGet(w http.ResponseWriter, r *http.Request) {
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"success": true,
-		"logs":    log.ConsoleLogs(),
+		"logs":    log.ConsoleEntries(),
 	})
 }
 
@@ -91,8 +94,10 @@ func HandleConsoleLogsLevelPut(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleConsoleLogsStream streams live console output over SSE. On connect it
-// sends the buffered logs as an "init" event, then "line" events as they
-// arrive and a "clear" event on buffer clear, with a keepalive ping every 25s.
+// sends the buffered entries as an "init" event, then one "line" event per
+// captured entry as they arrive and a "clear" event on buffer clear, with a
+// keepalive ping every 25s. Every payload carries {time, level, line}, so the
+// dashboard never has to guess a severity from the message text.
 func HandleConsoleLogsStream(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -118,9 +123,9 @@ func HandleConsoleLogsStream(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	// Buffered logs first.
-	if buffered := log.ConsoleLogs(); len(buffered) > 0 {
-		if !send(map[string]any{"type": "init", "logs": buffered}) {
+	// Buffered entries first.
+	if buffered := log.ConsoleEntries(); len(buffered) > 0 {
+		if !send(map[string]any{"type": "init", "entries": buffered}) {
 			return
 		}
 	}
@@ -151,7 +156,7 @@ func HandleConsoleLogsStream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			default:
-				if !send(map[string]any{"type": "line", "line": ev.Line()}) {
+				if !send(map[string]any{"type": "line", "entry": ev.Entry()}) {
 					return
 				}
 			}

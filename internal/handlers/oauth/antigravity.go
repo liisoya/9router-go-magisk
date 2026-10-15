@@ -20,6 +20,8 @@ var (
 	googleOAuthTokenURL = "https://oauth2.googleapis.com/token"
 )
 
+const defaultAntigravityProjectID = "aicode-consumers"
+
 var defaultAntigravityScopes = []string{
 	"https://www.googleapis.com/auth/cloud-platform",
 	"https://www.googleapis.com/auth/userinfo.email",
@@ -220,6 +222,7 @@ func (h *OAuthHandler) HandleAntigravityExchange(w http.ResponseWriter, r *http.
 		"apiKey":      tokenData.AccessToken,
 		"accessToken": tokenData.AccessToken,
 		"tokenType":   tokenData.TokenType,
+		"projectId":   defaultAntigravityProjectID,
 	}
 	if tokenData.RefreshToken != "" {
 		dataMap["refreshToken"] = tokenData.RefreshToken
@@ -247,23 +250,34 @@ func (h *OAuthHandler) HandleAntigravityExchange(w http.ResponseWriter, r *http.
 		var existingDataStr string
 		err := h.Repo.RawDB().QueryRow("SELECT data FROM providerConnections WHERE id = ?", connID).Scan(&existingDataStr)
 		if err == nil && existingDataStr != "" {
-			if tokenData.RefreshToken == "" {
-				var existingData map[string]any
-				if err := json.Unmarshal([]byte(existingDataStr), &existingData); err == nil {
+			var existingData map[string]any
+			if err := json.Unmarshal([]byte(existingDataStr), &existingData); err == nil {
+				if tokenData.RefreshToken == "" {
 					if rt, ok := existingData["refreshToken"].(string); ok && rt != "" {
 						dataMap["refreshToken"] = rt
 					}
 				}
-				dataBytes, _ = json.Marshal(dataMap)
+				if pid, ok := existingData["projectId"].(string); ok && strings.TrimSpace(pid) != "" {
+					dataMap["projectId"] = strings.TrimSpace(pid)
+				} else if psd, ok := existingData["providerSpecificData"].(map[string]any); ok {
+					if pid, ok := psd["projectId"].(string); ok && strings.TrimSpace(pid) != "" {
+						dataMap["projectId"] = strings.TrimSpace(pid)
+					}
+				}
 			}
+			dataBytes, _ = json.Marshal(dataMap)
 			_, err = h.Repo.RawDB().Exec(
 				"UPDATE providerConnections SET name = ?, data = ?, updatedAt = ? WHERE id = ?",
 				connName, string(dataBytes), now, connID,
 			)
 		} else {
+			priority := 1
+			if h.Repo != nil {
+				priority = h.Repo.ResolveDefaultPriority("antigravity")
+			}
 			_, err = h.Repo.RawDB().Exec(
-				"INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, 'antigravity', 'oauth', ?, 1, ?, ?, ?)",
-				connID, connName, string(dataBytes), now, now,
+				"INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES (?, 'antigravity', 'oauth', ?, ?, 1, ?, ?, ?)",
+				connID, connName, priority, string(dataBytes), now, now,
 			)
 		}
 		if err != nil {

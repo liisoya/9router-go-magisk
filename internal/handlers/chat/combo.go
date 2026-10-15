@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -96,33 +97,18 @@ func modelHasCapability(modelEntry string, cap string) bool {
 		provider = modelEntry[:idx]
 	}
 
-	caps := providers.GetCapabilitiesForModel(provider, modelEntry)
-
-	switch cap {
-	case "vision":
-		return caps.Vision
-	case "pdf":
-		return caps.PDF
-	case "audioInput":
-		return caps.AudioInput
-	case "videoInput":
-		return caps.VideoInput
-	case "imageOutput":
-		return caps.ImageOutput
-	case "audioOutput":
-		return caps.AudioOutput
-	case "search":
-		return caps.Search
-	case "tools":
-		return caps.Tools
-	case "reasoning":
-		return caps.Reasoning
-	default:
-		return true
-	}
+	return capabilityFlag(providers.GetCapabilitiesForModel(provider, modelEntry), cap)
 }
 
-// DetectRequiredCapabilities extracts capabilities requested by the client
+// DetectRequiredCapabilities extracts the capabilities a request needs.
+//
+// Modalities (vision/pdf/audioInput/videoInput) are scanned only on the current
+// user turn — the trailing run after the last assistant/model message, which
+// may span several messages. Media in older turns must not pin the combo to a
+// vision model; that history is stripped or placeholdered downstream.
+// "tools" is request-wide because it lives in the top-level tools array.
+//
+// Port of upstream detectRequiredCapabilities (open-sse/services/combo.js).
 func DetectRequiredCapabilities(body []byte) map[string]bool {
 	required := make(map[string]bool)
 
@@ -131,35 +117,34 @@ func DetectRequiredCapabilities(body []byte) map[string]bool {
 		return required
 	}
 
-	// Scan messages (OpenAI / Claude format) - ONLY trailing user turn
-	if msgs, ok := m["messages"].([]any); ok {
-		for i := len(msgs) - 1; i >= 0; i-- {
-			msg, ok := msgs[i].(map[string]any)
-			if ok && msg["role"] == "user" {
-				scanMessageContent(msgs[i], required)
-				break
-			}
+	// OpenAI / Claude / Hermes / Ollama.
+	for _, msg := range trailingUserItems(m["messages"]) {
+		scanMessage(msg, required)
+	}
+	// Responses API.
+	for _, item := range trailingUserItems(m["input"]) {
+		scanContentBlocks(itemContent(item), required)
+	}
+	// Gemini / Antigravity.
+	contents, _ := m["contents"].([]any)
+	if len(contents) == 0 {
+		if req, ok := m["request"].(map[string]any); ok {
+			contents, _ = req["contents"].([]any)
 		}
 	}
-
-	// Scan input (Responses API format) - ONLY trailing user turn
-	if input, ok := m["input"].([]any); ok {
-		for i := len(input) - 1; i >= 0; i-- {
-			msg, ok := input[i].(map[string]any)
-			if ok && msg["role"] == "user" {
-				scanMessageContent(input[i], required)
-				break
-			}
-		}
+	for _, c := range trailingUserItems(contents) {
+		scanContentBlocks(itemParts(c), required)
 	}
 
 	if tools, ok := m["tools"].([]any); ok {
 		for _, t := range tools {
-			if tm, ok := t.(map[string]any); ok {
-				if tm["type"] == "function" || tm["function"] != nil || tm["functionDeclarations"] != nil {
-					required["tools"] = true
-					break
-				}
+			tm, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			if tm["type"] == "function" || tm["function"] != nil || tm["functionDeclarations"] != nil {
+				required["tools"] = true
+				break
 			}
 		}
 	}
@@ -167,24 +152,109 @@ func DetectRequiredCapabilities(body []byte) map[string]bool {
 	return required
 }
 
-// scanMessageContent checks a single message for capability requirements.
-func scanMessageContent(msg any, required map[string]bool) {
+// isAssistantRole reports whether a message is a model turn, which ends the
+// current user run.
+func isAssistantRole(role string) bool {
+	return role == "assistant" || role == "model"
+}
+
+// trailingUserItems returns the trailing run of items after the last
+// assistant/model entry — the current user turn. It may span several messages
+// (text + image split across blocks).
+func trailingUserItems(arr any) []any {
+	list, ok := arr.([]any)
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	i := len(list) - 1
+	for i >= 0 {
+		role := ""
+		if m, ok := list[i].(map[string]any); ok {
+			role, _ = m["role"].(string)
+		}
+		if isAssistantRole(role) {
+			break
+		}
+		i--
+	}
+	return list[i+1:]
+}
+
+// itemParts reads a Gemini content entry's parts field.
+func itemParts(item any) any {
+	if m, ok := item.(map[string]any); ok {
+		return m["parts"]
+	}
+	return nil
+}
+
+// scanMessage checks one message for capability requirements, covering the
+// shapes that carry media outside the standard content array.
+func scanMessage(msg any, required map[string]bool) {
 	m, ok := msg.(map[string]any)
 	if !ok {
 		return
 	}
-	content := m["content"]
-	if content == nil {
-		return
+
+	// Ollama / Hermes images array.
+	if images, ok := m["images"].([]any); ok && len(images) > 0 {
+		required["vision"] = true
 	}
 
-	switch c := content.(type) {
-	case string:
-		// No modality detection from plain text
-	case []any:
-		for _, block := range c {
-			scanContentBlock(block, required)
+	// Vercel AI SDK / Hermes attachments / experimental_attachments.
+	attachments, _ := m["experimental_attachments"].([]any)
+	if len(attachments) == 0 {
+		attachments, _ = m["attachments"].([]any)
+	}
+	for _, raw := range attachments {
+		att, ok := raw.(map[string]any)
+		if !ok {
+			continue
 		}
+		mime := firstString(att, "contentType", "mediaType")
+		if mime == "" {
+			if url, ok := att["url"].(string); ok {
+				mime = dataURIMime(url)
+			}
+		}
+		if mime != "" {
+			addByMime(required, mime)
+		} else if att["url"] != nil || att["data"] != nil {
+			required["vision"] = true
+		}
+	}
+
+	// Direct message-level modality properties.
+	if m["image_url"] != nil || m["image"] != nil {
+		required["vision"] = true
+	}
+	if m["audio_url"] != nil || m["audio"] != nil {
+		required["audioInput"] = true
+	}
+
+	scanContentBlocks(m["content"], required)
+
+	// Data URIs embedded in plain string content.
+	if s, ok := m["content"].(string); ok {
+		switch {
+		case strings.Contains(s, "data:image/"):
+			required["vision"] = true
+		case strings.Contains(s, "data:audio/"):
+			required["audioInput"] = true
+		case strings.Contains(s, "data:application/pdf"):
+			required["pdf"] = true
+		}
+	}
+}
+
+// scanContentBlocks walks a content array.
+func scanContentBlocks(content any, required map[string]bool) {
+	blocks, ok := content.([]any)
+	if !ok {
+		return
+	}
+	for _, b := range blocks {
+		scanContentBlock(b, required)
 	}
 }
 
@@ -198,157 +268,153 @@ func scanContentBlock(block any, required map[string]bool) {
 	switch typ {
 	case "image_url", "image", "input_image":
 		required["vision"] = true
-	case "file", "document", "input_file":
-		required["pdf"] = true
-	case "audio_url", "audio", "input_audio":
+	case "input_audio", "audio_url", "audio":
 		required["audioInput"] = true
-	case "video_url", "video", "input_video":
+	case "input_video", "video_url", "video":
 		required["videoInput"] = true
-	}
-	// Check mime type for inlineData/fileData (Gemini format)
-	if mime, ok := b["mimeType"].(string); ok {
-		if strings.HasPrefix(mime, "image/") {
-			required["vision"] = true
-		} else if strings.HasPrefix(mime, "audio/") {
-			required["audioInput"] = true
-		} else if strings.HasPrefix(mime, "video/") {
-			required["videoInput"] = true
-		} else if mime == "application/pdf" {
+	case "file", "document", "input_file":
+		// Infer the modality from an embedded mime when available; fall back
+		// to pdf for a generic file.
+		if mime := fileBlockMime(b); mime != "" {
+			addByMime(required, mime)
+		} else {
 			required["pdf"] = true
 		}
 	}
-	// Also check nested inlineData / fileData
-	for _, key := range []string{"inlineData", "fileData"} {
-		if fd, ok := b[key].(map[string]any); ok {
-			if mime, ok := fd["mimeType"].(string); ok {
-				if strings.HasPrefix(mime, "image/") {
-					required["vision"] = true
-				} else if strings.HasPrefix(mime, "audio/") {
-					required["audioInput"] = true
-				} else if strings.HasPrefix(mime, "video/") {
-					required["videoInput"] = true
-				} else if mime == "application/pdf" {
-					required["pdf"] = true
-				}
-			}
-		}
+
+	// Gemini parts carry a mime on inlineData / fileData.
+	if inner, ok := b["inlineData"].(map[string]any); ok {
+		addByMime(required, stringOf(inner, "mimeType"))
+	}
+	if inner, ok := b["fileData"].(map[string]any); ok {
+		addByMime(required, stringOf(inner, "mimeType"))
 	}
 }
 
-// ReorderByCapabilities stably floats models satisfying constraints to the front
+// fileBlockMime digs a mime type out of the several shapes a file block uses
+// to carry its payload.
+func fileBlockMime(b map[string]any) string {
+	if ia, ok := b["input_audio"].(map[string]any); ok {
+		if format := stringOf(ia, "format"); format != "" {
+			return "audio/" + format
+		}
+	}
+	if file, ok := b["file"].(map[string]any); ok {
+		if data := stringOf(file, "file_data"); data != "" {
+			return dataURIMime(data)
+		}
+	}
+	if source, ok := b["source"].(map[string]any); ok {
+		if mime := stringOf(source, "media_type"); mime != "" {
+			return mime
+		}
+		if data := stringOf(source, "data"); data != "" {
+			return dataURIMime(data)
+		}
+	}
+	return ""
+}
+
+// addByMime maps a mime type to its capability. An empty or unknown mime is
+// ignored so an unrelated content type does not pin the combo.
+func addByMime(required map[string]bool, mime string) {
+	switch {
+	case mime == "":
+		return
+	case strings.HasPrefix(mime, "image/"):
+		required["vision"] = true
+	case mime == "application/pdf":
+		required["pdf"] = true
+	case strings.HasPrefix(mime, "audio/"):
+		required["audioInput"] = true
+	case strings.HasPrefix(mime, "video/"):
+		required["videoInput"] = true
+	}
+}
+
+// dataURIMime extracts the mime from a "data:<mime>;base64,..." URL.
+func dataURIMime(url string) string {
+	rest, ok := strings.CutPrefix(url, "data:")
+	if !ok {
+		return ""
+	}
+	mime, _, ok := strings.Cut(rest, ",")
+	if !ok {
+		return ""
+	}
+	mime, _, _ = strings.Cut(mime, ";")
+	return mime
+}
+
+// firstString returns the first key that holds a string value.
+func firstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v := stringOf(m, k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// stringOf reads a string field, returning "" when absent or another type.
+func stringOf(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
+}
+
+// ReorderByCapabilities stably floats models satisfying constraints to the
+// front. Never drops a model, so the fallback chain stays intact.
+//
+// Tier 0: satisfies all hard AND all soft capabilities.
+// Tier 1: satisfies every hard capability.
+// Tier 2: the rest.
+//
+// Port of upstream reorderByCapabilities (open-sse/services/combo.js).
 func ReorderByCapabilities(comboModels []string, required map[string]bool) []string {
 	if len(required) == 0 || len(comboModels) <= 1 {
 		return comboModels
 	}
 
-	var tier0, tier1 []string
-	for _, m := range comboModels {
-		allMatch := true
-		for cap := range required {
-			if !modelHasCapability(m, cap) {
-				allMatch = false
-				break
-			}
-		}
-		if allMatch {
-			tier0 = append(tier0, m)
-		} else {
-			tier1 = append(tier1, m)
+	hard := requiredHardCaps(required)
+	soft := make([]string, 0, len(required))
+	for cap := range required {
+		if !slices.Contains(adapterCapabilityKeys, cap) {
+			soft = append(soft, cap)
 		}
 	}
 
-	result := make([]string, 0, len(comboModels))
-	result = append(result, tier0...)
-	result = append(result, tier1...)
-	return result
+	tier := make(map[string]int, len(comboModels))
+	order := make([]string, len(comboModels))
+	for i, m := range comboModels {
+		tier[m] = capabilityTier(m, hard, soft)
+		order[i] = m
+	}
+
+	sort.SliceStable(order, func(i, j int) bool { return tier[order[i]] < tier[order[j]] })
+	return order
 }
 
-// hardCapabilities are input-modality capabilities that trigger the capacity adapter fallback pool.
-var hardCapabilities = []string{"vision", "pdf", "audioInput", "videoInput"}
-
-// AugmentModelsWithCapacityAdapter prepends models from the capacity adapter pool if NONE of the target models satisfy
-// all required hard capabilities (e.g. vision for image inputs).
-func (h *ChatHandler) AugmentModelsWithCapacityAdapter(models []string, required map[string]bool) ([]string, string) {
-	if len(models) == 0 || len(required) == 0 {
-		return models, "fallback"
-	}
-
-	// Filter required to hard capabilities only
-	var hardRequired []string
-	for _, cap := range hardCapabilities {
-		if required[cap] {
-			hardRequired = append(hardRequired, cap)
+// capabilityTier scores one model entry: 0 covers hard+soft, 1 covers hard
+// only, 2 covers neither.
+func capabilityTier(modelEntry string, hard, soft []string) int {
+	caps := modelEntryCaps(modelEntry)
+	for _, c := range hard {
+		if !capabilityFlag(caps, c) {
+			return 2
 		}
 	}
-	if len(hardRequired) == 0 {
-		return models, "fallback"
-	}
-
-	// If any model in the list already satisfies all required hard capabilities, do not augment.
-	for _, m := range models {
-		allMatch := true
-		for _, cap := range hardRequired {
-			if !modelHasCapability(m, cap) {
-				allMatch = false
-				break
-			}
-		}
-		if allMatch {
-			return models, "fallback"
+	for _, c := range soft {
+		if !capabilityFlag(caps, c) {
+			return 1
 		}
 	}
+	return 0
+}
 
-	// None of the target models satisfy the requirements.
-	// Look up capacity adapter settings.
-	strategy := "fallback"
-	var pool []string
-	seen := make(map[string]bool)
-	for _, m := range models {
-		seen[m] = true
-	}
-
-	if h.Repo != nil {
-		settings, err := h.Repo.GetSettings()
-		if err == nil && settings != nil && len(settings.CapacityAdapter) > 0 {
-			for _, cap := range hardRequired {
-				entry, ok := settings.CapacityAdapter[cap]
-				if !ok || !entry.Enabled {
-					continue
-				}
-				if entry.RoundRobin {
-					strategy = "round-robin"
-				}
-				candModels := entry.Models
-				if len(candModels) == 0 {
-					if cap == "vision" {
-						candModels = []string{"ag/gemini-3.8-flash-high"}
-					} else {
-						candModels = []string{"oc/mimo-v2.6-flash-free"}
-					}
-				}
-				for _, m := range candModels {
-					if !seen[m] && modelHasCapability(m, cap) {
-						seen[m] = true
-						pool = append(pool, m)
-					}
-				}
-			}
-		}
-	}
-
-	// Default fallback if pool is still empty and vision is required
-	if len(pool) == 0 && required["vision"] {
-		defaultModel := "ag/gemini-3.8-flash-high"
-		if !seen[defaultModel] {
-			pool = append(pool, defaultModel)
-		}
-	}
-
-	if len(pool) == 0 {
-		return models, "fallback"
-	}
-
-	return append(pool, models...), strategy
+// modelEntryCaps resolves the capability block for a "provider/model" entry.
+func modelEntryCaps(modelEntry string) providers.Capabilities {
+	provider, model, _ := strings.Cut(modelEntry, "/")
+	return providers.GetCapabilitiesForModel(provider, model)
 }
 
 // ApplyComboStrategy rotates the array of models based on the selected strategy.
@@ -429,7 +495,9 @@ func keysString(m map[string]bool) string {
 
 // handleComboFallback iterates through combo model entries, trying each one.
 // Auto-capability-switch: floats vision/pdf-capable models to the front.
-func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWriter, body []byte, comboModels []string, strategy string, isStream bool, translateResponse bool, comboName string, stickyLimit int) {
+// adapterModels holds the capacity-adapter entries injected for this request;
+// their history is trimmed to their context window before forwarding.
+func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWriter, body []byte, comboModels []string, strategy string, isStream bool, translateResponse bool, comboName string, stickyLimit int, adapterModels ...string) {
 	cw := newCommittedResponseWriter(w)
 	var lastErr *upstreamError
 	var retry passRetry
@@ -502,7 +570,7 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 				} else {
 					var cData *ConnectionData
 					var err error
-					picked, cData, err = h.getBestConnection(modelInfo.Provider, modelInfo.ConnectionID, excludeIDs, modelInfo.Model)
+					picked, cData, err = h.getBestConnectionWithContext(ctx, modelInfo.Provider, modelInfo.ConnectionID, excludeIDs, modelInfo.Model)
 					if err != nil {
 						break
 					}
@@ -524,7 +592,7 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 				}
 
 				var upstreamBody map[string]any
-				upstreamBodyJSON := body
+				upstreamBodyJSON := adapterTrimmedBody(body, entry, adapterModels)
 
 				if err := json.Unmarshal(upstreamBodyJSON, &upstreamBody); err != nil {
 					handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to parse request body")
@@ -544,6 +612,7 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 				} else {
 					fwdErr = h.tryForwardWithConnection(forwardRequestParams{
 						Ctx: ctx, W: cw, Provider: modelInfo.Provider, Model: modelInfo.Model,
+						RequestedModel: comboName, ComboName: comboName,
 						ConnectionID: connID, ConnName: connObjName(picked), ConnEmail: connObjEmail(picked),
 						ConnData: connData, Body: upstreamJSON,
 						IsStream: isStream, TranslateResponse: translateResponse,
@@ -556,10 +625,38 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 						lastErr = &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(`{"error":{"message":"client closed request","type":"client_closed_request","code":499}}`)}
 						break
 					}
+					if isGuardrailBlock(fwdErr) {
+						// A policy refusal is final: every other connection and
+						// model in the combo would receive the same prompt and
+						// answer with the same refused content, so continuing
+						// would spread it across every provider the combo names.
+						log.Warn("combo", "guardrail block, stopping turn", "provider", modelInfo.Provider, "conn", connID)
+						var ue *upstreamError
+						errors.As(fwdErr, &ue)
+						lastErr = ue
+						break
+					}
 					var ue *upstreamError
 					if errors.As(fwdErr, &ue) {
+						// A 410 naming a dead model is a routing fact, not an account
+						// fault: every connection to this provider answers the same
+						// way. Record it, then leave this entry for the next combo
+						// model (#179).
+						//
+						// The connection is deliberately NOT added to excludeIDs:
+						// that list spans the whole pass, so excluding it here would
+						// starve every later entry on a single-account provider —
+						// exactly the case the failover exists to rescue. The model
+						// lock recordModelDeprecation writes is per provider/model,
+						// which is the scope that actually matters.
+						if providers.IsModelDeprecation(ue.StatusCode, ue.Body) {
+							h.recordModelDeprecation(ctx, modelInfo.Provider, modelInfo.Model, connID, ue)
+							retry.note(ue)
+							lastErr = ue
+							break
+						}
 						if providers.RetryableStatusCodes[ue.StatusCode] {
-							h.comboLockRetryable(&excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
+							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
 						}
 						if ue.StatusCode == http.StatusServiceUnavailable || ue.StatusCode == http.StatusBadGateway || ue.StatusCode == http.StatusGatewayTimeout {
 							// In combo loops, fail over immediately to the next connection/model without blocking the client turn
@@ -586,6 +683,15 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 			if entrySuccess || ctx.Err() != nil {
 				return
 			}
+			if isGuardrailBlock(lastErr) {
+				// A policy refusal ends the whole turn, not just this entry: the
+				// next model would be sent the same prompt and answer with the
+				// same refused content.
+				break
+			}
+		}
+		if isGuardrailBlock(lastErr) {
+			break
 		}
 
 		// All entries failed. Retry once only if a bounded wait is available;
@@ -611,7 +717,9 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 
 // handleMessagesComboFallback iterates through combo models for the Claude endpoint.
 // Auto-capability-switch: floats vision/pdf-capable models to the front.
-func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.ResponseWriter, translatedReq map[string]any, comboModels []string, strategy string, isStream bool, comboName string, stickyLimit int) {
+// adapterModels holds the capacity-adapter entries injected for this request;
+// their history is trimmed to their context window before forwarding.
+func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.ResponseWriter, translatedReq map[string]any, comboModels []string, strategy string, isStream bool, comboName string, stickyLimit int, adapterModels ...string) {
 	cw := newCommittedResponseWriter(w)
 	var lastErr *upstreamError
 	var retry passRetry
@@ -667,6 +775,7 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 			// Try up to 10 connections for this model entry
 			for connAttempt := 0; connAttempt < 10; connAttempt++ {
 				var connID string
+				var picked *ProviderConnection
 				var connData *ConnectionData
 				isKnownNoAuth := false
 				if cfg, ok := providers.KnownProviders[modelInfo.Provider]; ok && (cfg.NoAuth || cfg.DefaultAPIKey != "") {
@@ -676,11 +785,13 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 						ProxyPoolID: h.ResolveProviderProxyPoolID(modelInfo.Provider),
 					}
 				} else {
-					conn, cData, err := h.getBestConnection(modelInfo.Provider, modelInfo.ConnectionID, excludeIDs, modelInfo.Model)
+					var cData *ConnectionData
+					var err error
+					picked, cData, err = h.getBestConnectionWithContext(ctx, modelInfo.Provider, modelInfo.ConnectionID, excludeIDs, modelInfo.Model)
 					if err != nil {
 						break
 					}
-					connID = conn.ID
+					connID = picked.ID
 					connData = cData
 				}
 				if connID != "" {
@@ -696,20 +807,23 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 					}
 				}
 
-				entryReq := make(map[string]any, len(translatedReq))
-				for k, v := range translatedReq {
-					entryReq[k] = v
+				entryBody, err := adapterTrimmedMap(translatedReq, entry, adapterModels)
+				if err != nil {
+					handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to parse request body")
+					return
 				}
-				entryReq["model"] = modelInfo.Model
+				entryBody["model"] = modelInfo.Model
 
-				upstreamJSON, err := json.Marshal(entryReq)
+				upstreamJSON, err := json.Marshal(entryBody)
 				if err != nil {
 					break
 				}
 
 				fwdErr := h.tryForwardWithConnection(forwardRequestParams{
 					Ctx: ctx, W: cw, Provider: modelInfo.Provider, Model: modelInfo.Model,
-					ConnectionID: connID, ConnData: connData, Body: upstreamJSON,
+					RequestedModel: comboName, ComboName: comboName,
+					ConnectionID: connID, ConnName: connObjName(picked), ConnEmail: connObjEmail(picked),
+					ConnData: connData, Body: upstreamJSON,
 					IsStream: isStream, TranslateResponse: !translator.IsResponsesClient(ctx),
 					Endpoint: forwardEndpoint(ctx, "/v1/messages"),
 				})
@@ -719,10 +833,31 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 						lastErr = &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(`{"error":{"message":"client closed request","type":"client_closed_request","code":499}}`)}
 						break
 					}
+					if isGuardrailBlock(fwdErr) {
+						// See the chat branch above: a policy refusal stops the
+						// turn instead of being replayed against the next model.
+						log.Warn("combo", "guardrail block, stopping turn", "provider", modelInfo.Provider, "conn", connID)
+						var blocked *upstreamError
+						errors.As(fwdErr, &blocked)
+						lastErr = blocked
+						break
+					}
 					var ue *upstreamError
 					if errors.As(fwdErr, &ue) {
+						// Same contract as the OpenAI loop: a 410 naming a dead
+						// model is a provider-wide fact, so it is recorded and
+						// the next combo entry is tried (#179). The connection
+						// stays out of excludeIDs — see the OpenAI loop: that
+						// list spans the pass, and a single-account provider
+						// would have nothing left to fail over to.
+						if providers.IsModelDeprecation(ue.StatusCode, ue.Body) {
+							h.recordModelDeprecation(ctx, modelInfo.Provider, modelInfo.Model, connID, ue)
+							retry.note(ue)
+							lastErr = ue
+							break
+						}
 						if providers.RetryableStatusCodes[ue.StatusCode] {
-							h.comboLockRetryable(&excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
+							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
 						}
 						if ue.StatusCode == http.StatusServiceUnavailable || ue.StatusCode == http.StatusBadGateway || ue.StatusCode == http.StatusGatewayTimeout {
 							// In combo loops, fail over immediately to the next connection/model without blocking the client turn
@@ -749,6 +884,13 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 			if entrySuccess || ctx.Err() != nil {
 				return
 			}
+			if isGuardrailBlock(lastErr) {
+				// See handleComboFallback: a policy refusal ends the turn.
+				break
+			}
+		}
+		if isGuardrailBlock(lastErr) {
+			break
 		}
 
 		// All entries failed. Retry once only if a bounded wait is available;
@@ -779,7 +921,11 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 // combo models on the same account, and Google rate-limited it forever. The
 // connection is also appended to excludeIDs so the remaining combo models in
 // this request skip it instead of re-hitting the same quota bucket.
-func (h *ChatHandler) comboLockRetryable(excludeIDs *[]string, connID, provider, model string, ue *upstreamError) {
+func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]string, connID, provider, model string, ue *upstreamError) {
+	if handlerutil.IsProbeContext(ctx) {
+		*excludeIDs = append(*excludeIDs, connID)
+		return
+	}
 	if connID == "" {
 		return
 	}
@@ -801,9 +947,17 @@ func (h *ChatHandler) comboLockRetryable(excludeIDs *[]string, connID, provider,
 	}
 	// Account-scoped cooldown alongside the per-model locks, so the selector
 	// can skip this account before spending a request (upstream applyErrorState).
-	until := time.Now().UTC().Add(time.Duration(cooldownSec) * time.Second)
-	if err := h.Repo.LockConnectionRateLimit(connID, until, cls.NewBackoffLevel, ue.StatusCode, extractErrorText(ue.Body)); err != nil {
-		log.Warn("combo", "rate limit lock failed", "conn", connID, "error", err)
+	// Only lock if error is account-scoped, not model-scoped (e.g. 401 auth issues),
+	// so unrelated models stay available.
+	if isModelScopedError(ue.StatusCode, extractErrorText(ue.Body), model) {
+		if recErr := h.Repo.RecordConnectionScopedError(connID, model, "chat", ue.StatusCode, extractErrorText(ue.Body), cls.NewBackoffLevel); recErr != nil {
+			log.Warn("combo", "record connection error failed", "conn", connID, "error", recErr)
+		}
+	} else {
+		until := time.Now().UTC().Add(time.Duration(cooldownSec) * time.Second)
+		if err := h.Repo.LockConnectionRateLimit(connID, until, cls.NewBackoffLevel, ue.StatusCode, extractErrorText(ue.Body)); err != nil {
+			log.Warn("combo", "rate limit lock failed", "conn", connID, "error", err)
+		}
 	}
 	*excludeIDs = append(*excludeIDs, connID)
 	log.Warn("combo", "locked on retryable error", "provider", provider, "model", model, "lockKey", lockKey, "conn", connID, "status", ue.StatusCode, "cooldown_s", cooldownSec)

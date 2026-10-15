@@ -144,7 +144,6 @@ describe('pickerData', () => {
       modelAliases: { 'x-alias': 'openai-compatible-chat-xyz/gpt-4o' },
     })
     assert.strictEqual(groups.find((g) => g.id === 'openai-compatible-chat-xyz'), undefined)
-
     const combos: Combo[] = [
       {
         id: 'c-web',
@@ -168,6 +167,46 @@ describe('pickerData', () => {
     const filtered = resolveFilteredCombos(combos, undefined, '', 'combo')
     assert.strictEqual(filtered.length, 1)
     assert.strictEqual(filtered[0].name, 'combo-wombo')
+  })
+
+  // Upstream parity (ModelSelectModal.js 6a1573eb): a local / self-hosted
+  // endpoint does not always need a stored API key, so gating the picker on
+  // connections hid models the user had already added. A compatible node with
+  // registered custom models must be selectable without one; a node with
+  // nothing to show must stay hidden.
+  it('shows an unconnected compatible node that has custom models', () => {
+    const nodes = [
+      {
+        id: 'openai-compatible-local',
+        name: 'Local Relay',
+        type: 'openai-compatible',
+        prefix: 'Or',
+      } as unknown as ProviderNode,
+    ]
+    const groups = resolveModelPickerGroups([], nodes, {
+      customModels: [
+        { providerAlias: 'openai-compatible-local', id: 'qwen3-coder', name: 'Qwen3 Coder', type: 'llm' },
+      ] as never,
+    })
+    const group = groups.find((g) => g.id === 'openai-compatible-local')
+    assert.ok(group, 'an unconnected compatible node with a custom model must be selectable')
+    assert.strictEqual(group.name, 'Local Relay')
+    assert.deepStrictEqual(
+      group.models.map((m) => m.value),
+      ['Or/qwen3-coder'],
+    )
+  })
+
+  it('still hides an unconnected node with no models of its own', () => {
+    const nodes = [
+      {
+        id: 'openai-compatible-empty',
+        name: 'Empty Relay',
+        type: 'openai-compatible',
+      } as unknown as ProviderNode,
+    ]
+    const groups = resolveModelPickerGroups([], nodes, {})
+    assert.strictEqual(groups.find((g) => g.id === 'openai-compatible-empty'), undefined)
   })
 
   it('filters combos correctly', () => {
@@ -237,6 +276,44 @@ describe('pickerData', () => {
     const visionGroups = resolveFilteredGroups(groups, '', 'vision')
     assert.strictEqual(
       visionGroups.every((g) => g.models.every((m) => m.caps.vision === true)),
+      true
+    )
+  })
+
+  it('marks a model the gateway saw refuse with a 410, and leaves the rest unmarked', () => {
+    const groups = resolveModelPickerGroups(
+      [
+        {
+          id: 'conn-ds',
+          provider: 'deepseek',
+          authType: 'apikey',
+          name: null,
+          email: null,
+          priority: null,
+          isActive: 1,
+          data: '{}',
+          createdAt: '',
+          updatedAt: '',
+        },
+      ],
+      [],
+      {
+        deprecations: {
+          // The backend keys every deprecation by a lowercased
+          // "<provider>/<model>" (providers.DeprecationKey), so the picker
+          // looks that up directly rather than re-normalizing per row.
+          'deepseek/deepseek-chat': { status: 'gone', successor: 'deepseek-v4' },
+        },
+      }
+    )
+
+    const dsGroup = groups.find((g) => g.id === 'deepseek')
+    assert.ok(dsGroup)
+    const chat = dsGroup.models.find((m) => m.id === 'deepseek-chat')
+    assert.ok(chat, 'deepseek-chat must still be listed, not hidden')
+    assert.strictEqual(chat.deprecated, true)
+    assert.strictEqual(
+      dsGroup.models.filter((m) => m.id !== 'deepseek-chat').every((m) => !m.deprecated),
       true
     )
   })
