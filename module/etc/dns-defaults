@@ -1,0 +1,13 @@
+# 9router-go · 内置默认上游集（唯一事实源；2026-10-15 架构评审 C3，ADR-0010 后续阶段）
+#
+# 消费者（都从这里派生，不再各写一份）：
+#   · module/lib/lifecycle.sh life_prep        —— dns-upstreams.conf 为空时的兜底内容（原样落盘）
+#   · module/lib/lifecycle.sh life_dns_recover —— 解析自愈的候选腿（注释行被其候选管道剥除）
+#   · tools/dnsfwd.c boot_resolve 的兜底字面量 —— 由 tools/check-dns-defaults.sh 断言一致
+#
+# 只放国内明文解析器：境外公共 DNS（1.1.1.1 / 8.8.8.8 等）会给出与国内不同的 CDN 节点，
+# 而这些节点从国内运营商出去常常握手卡死。真机实测（CMCC 宽带）：www.codebuddy.ai 经
+# 1.1.1.1 解析到 43.17x 段，TLS 握手反复卡 16–20s；经下面任何一条国内解析器都是同一个
+# 43.160.158.125，稳定 0.8s。要加更多上游请用面板的 DNS 优选（它会实测 RTT 与可用率）。
+nameserver 223.5.5.5
+nameserver 119.29.29.29

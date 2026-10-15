@@ -33,6 +33,9 @@ LIFE_SCHEMA="$MODDIR/etc/schema.sql"
 LIFE_BIN="$MODDIR/bin/9router-go"
 LIFE_DNSFWD="$MODDIR/bin/dnsfwd"
 LIFE_UPSTREAMS="$DATA_DIR/dns-upstreams.conf"
+# 内置默认上游集的唯一来源（C3）：life_prep 的兜底文件与 life_dns_recover 的候选腿
+# 共用它；缺失时 life_dns_default_lines 退回硬编码最小集（保底不依赖新文件存在）。
+LIFE_DNS_DEFAULTS="$MODDIR/etc/dns-defaults"
 LIFE_DNS_BIND_FILE="$DATA_DIR/dns-bind"
 LIFE_WATCHDOG="$MODDIR/lib/watchdog.sh"
 LIFE_RUNTIME_ENV="$DATA_DIR/runtime.env"
@@ -510,6 +513,21 @@ life_engine_process_exists() {
   return 1
 }
 
+# 内置默认上游集（C3 单一来源）：文件在 → 原样输出（life_prep 拿它落盘，含 prose）；
+# 文件缺失（dev 直推白名单漏推等不该发生的路径）→ 硬编码最小集，保底不依赖新文件存在。
+# 与 module/etc/dns-defaults 的一致性由 tools/check-dns-defaults.sh 断言缝合。
+# life_prep 的兜底文件与 life_dns_recover 的候选腿共用这一个出口 —— 两者过去是同一
+# 文件内两份字面量，注释自称"同源"却无任何缝合（漂移了离线看不出来）。
+life_dns_default_lines() {
+  if [ -f "$LIFE_DNS_DEFAULTS" ]; then
+    cat "$LIFE_DNS_DEFAULTS" 2>/dev/null && return 0
+  fi
+  printf '%s\n' \
+    '# 9router-go 生成：公共 DNS 兜底（无优选；默认源缺失，仅最小集）' \
+    'nameserver 223.5.5.5' \
+    'nameserver 119.29.29.29'
+}
+
 life_prep() {
   # 引擎启动前必须为真的一切（幂等）：schema 引导、autoUpdate 压回 false、DNS 上游兜底、
   # 初始密码。输出 ok / degraded —— **绝不谎报成功**（schema 没建 = 引擎报 no such table；
@@ -534,16 +552,9 @@ life_prep() {
     fi
   fi
   if [ ! -s "$LIFE_UPSTREAMS" ]; then
-    {
-      echo "# 9router-go 生成：公共 DNS 兜底（无优选）"
-      echo "# 只给国内明文解析器：境外公共 DNS（1.1.1.1 / 8.8.8.8 等）会给出与国内
-      # 不同的 CDN 节点，而这些节点从国内运营商出去常常握手卡死。真机实测
-      # （CMCC 宽带）：www.codebuddy.ai 经 1.1.1.1 解析到 43.17x 段，TLS 握手
-      # 反复卡 16–20s；经下面任何一条国内解析器都是同一个 43.160.158.125，
-      # 稳定 0.8s。要加更多上游请用面板的 DNS 优选（它会实测 RTT 与可用率）。"
-      echo "nameserver 223.5.5.5"
-      echo "nameserver 119.29.29.29"
-    } > "$LIFE_UPSTREAMS.tmp" 2>/dev/null || rm -f "$LIFE_UPSTREAMS.tmp"
+    # 兜底内容 = 内置默认集（唯一来源 module/etc/dns-defaults，C3；原样落盘，
+    # 含"为什么只放国内解析器"的说明）。默认源缺失时才退最小集（见该函数）。
+    life_dns_default_lines > "$LIFE_UPSTREAMS.tmp" 2>/dev/null || rm -f "$LIFE_UPSTREAMS.tmp"
     # 原子落盘（架构审查 S8）：半份 upstreams 会让 dnsfwd 起不来或解析到坏上游
     [ -s "$LIFE_UPSTREAMS.tmp" ] && { mv "$LIFE_UPSTREAMS.tmp" "$LIFE_UPSTREAMS" 2>/dev/null || rm -f "$LIFE_UPSTREAMS.tmp"; }
   fi
@@ -829,14 +840,15 @@ life_dns_health_round1() {
 # I/O：恢复动作（ADR-0010 决策 3）。连续全败后：备份优先 + 可达性硬门槛 + 原子写盘 + 热重载。
 #   选择规则**只做可达性**（保留 ok>0 的上游），不复制面板 page-dns.js 的 RTT/可用率评分优选
 #   （§2.1 单一所有者：紧急恢复 ≠ 手动优选）。完整"优选"待把候选池收敛为单一来源后的后续阶段。
-#   候选 = 当前配置项（用户明示意图优先）∪ 内置默认集（life_prep 同源；不含境外公共解析器，见 L23）。
+#   候选 = 当前配置项（用户明示意图优先）∪ 内置默认集（module/etc/dns-defaults，
+#   C3 单一来源，life_prep 落盘的正是它；不含境外公共解析器，见 L23）。
 #   一条都不可达 → 不改写（保留原配置等人工/下轮）；如实返回成败，由调用方记日志。
 life_dns_recover() {
   life_dns_running || return 1
   _rc_cand="$DATA_DIR/dns-heal-cand.tmp"
   {
     cat "$LIFE_UPSTREAMS" 2>/dev/null
-    printf 'nameserver 223.5.5.5\nnameserver 119.29.29.29\n'
+    life_dns_default_lines
   } | grep -Ev '^[[:space:]]*(#|$)' \
     | grep -Ev '(127\.0\.0\.1|::1)' \
     | awk 'NF>=2 && ($1=="nameserver"||$1=="doh"||$1=="dot")' \

@@ -4,7 +4,8 @@
  *       localhost:53（127.0.0.1 / ::1）。本程序监听回环 53，把查询转发到上游 DNS。
  *       ⇒ 不需要 /etc/resolv.conf、不需要改 hosts、不需要重启。
  *
- * 上游文件（默认 /data/adb/9router/dns-upstreams.conf，由 9rctl 生成）：
+ * 上游文件（默认 /data/adb/9router-go/dns-upstreams.conf，由模块 lifecycle.sh 生成；
+ * 其内置默认集的唯一来源是 module/etc/dns-defaults）：
  *       # 注释；每行一条
  *       nameserver 223.5.5.5            ← IPv4
  *       nameserver 2400:3200::1         ← IPv6
@@ -95,7 +96,7 @@ static struct upstream up[MAXUP];
 static int nup = 0;
 static pthread_mutex_t up_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static const char *g_conf = "/data/adb/9router/dns-upstreams.conf";
+static const char *g_conf = "/data/adb/9router-go/dns-upstreams.conf";
 static const char *g_iface = NULL;      /* -i：上游 socket 绑定的网卡（绕 TUN） */
 static int g_verbose = 0;
 static volatile sig_atomic_t g_reload = 0;
@@ -862,6 +863,9 @@ static int boot_resolve(const char *host, struct upstream *out)
             if (list[i].type != UP_UDP || list[i].len == 0) continue;
             t = list[i];
         } else if (!parse_upstream("223.5.5.5", &t)) {
+            /* 最后防线的自举字面量：与模块内置默认集（module/etc/dns-defaults，C3
+               单一来源）的一致性由 tools/check-dns-defaults.sh 断言缝合。改这里
+               必须同步改那个文件，否则离线门禁会红。 */
             return 0;
         }
         long ms = 0;

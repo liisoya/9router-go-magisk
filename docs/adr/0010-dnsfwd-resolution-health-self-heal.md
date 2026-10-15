@@ -71,3 +71,21 @@
 
 离线覆盖扩到 `tools/test-lifecycle-lib.sh` L24h/L24i（纯函数）+ **L25（fixture 库，验证 SQL 取主机 /
 代理排除 / 去重）**；dash+bash 124/124。产物 `dist/9router-go-1.9.7-r3-magisk.zip`。
+
+## 修订（2026-10-15，C3 后续阶段）：内置默认集收敛为单一来源
+
+决策 3 挂账的"把候选池收敛为单一来源"分两步，本轮完成第一步（也是唯一有活跃
+消费者的那一步）：
+
+1. **内置默认集（223.5.5.5 + 119.29.29.29）收敛到 `module/etc/dns-defaults`**。
+   它曾有四份拷贝：`life_prep` 的兜底文件、`life_dns_recover` 的候选腿（同一文件内
+   两份字面量，注释自称"同源"却无任何缝合）、`dnsfwd.c` 的 `boot_resolve` 自举兜底、
+   `page-dns.js` 候选池的一条腿。现在 lifecycle 两侧共用 `life_dns_default_lines()`
+   （文件缺失时退硬编码最小集——保底不依赖新文件存在）；`tools/check-dns-defaults.sh`
+   （DNSSRC 门禁）缝合文件形状 / fallback / dnsfwd.c 字面量 / 默认路径（顺手修 B10：
+   g_conf 默认路径曾少 `-go`）。测试：L26（5 断言，行为打法同 L23）。
+2. **候选池（page-dns.js 的 15 条菜单）仍留在 JS**：它与默认集是不同概念（更广的
+   优选菜单 vs "解析全挂时信任谁"），今天没有第二个消费者；完整的 RTT 评分优选
+   （需要候选池收敛的那步）维持挂账，直到该功能真正立项——不为假想的未来消费者
+   提前付重构成本。若未来 shell 侧要消费候选池，届时把它迁入 `dns-defaults`
+   （加 `pool` 段）即可，门禁与测试模式都已就绪。

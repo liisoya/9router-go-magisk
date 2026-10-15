@@ -210,6 +210,13 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/test-log-rotate.sh ]; then
       run "LOGROTATE 日志轮转 copytruncate（O_APPEND fd 不断流）" sh tools/test-log-rotate.sh
     fi
+    # DNSSRC：DNS 内置默认集的单一事实源与三处字面量缝合（2026-10-15 架构评审 C3）。
+    # 默认集曾有四份拷贝（life_prep 兜底 / life_dns_recover 候选腿 / dnsfwd.c 自举 /
+    # page-dns.js 候选池一条腿），现在唯一来源是 module/etc/dns-defaults；本闸门验
+    # 文件形状 + lifecycle fallback + dnsfwd.c 字面量三者不漂移 + 默认路径带 -go（B10）。
+    if [ -f tools/check-dns-defaults.sh ]; then
+      run "DNSSRC DNS 默认集单一来源与三处字面量缝合" sh tools/check-dns-defaults.sh
+    fi
     # WATCHDOG：守护判定核（去抖 / S3 记账 / S4 位保持 / 死因取证）——
     # 起因：2026-10-01 架构走查候选 3，主循环 336 行此前离线零覆盖，
     # A2/A3/S3/S4 四条审查规则的"测试"是真机档 + 注释

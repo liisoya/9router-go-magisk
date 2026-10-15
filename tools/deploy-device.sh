@@ -9,7 +9,8 @@
 # 用法：tools/deploy-device.sh [设备序列号]
 #   设备序列号缺省取 `adb devices` 中第一台 usb 设备。
 # 推送内容：module.prop、lib/*.sh、service.sh、
-#           webroot/*.{js,html}（glob；清单唯一来源 = index.html 的 <script src>）、etc/engine-version
+#           webroot/*.{js,html}（glob；清单唯一来源 = index.html 的 <script src>）、etc/engine-version、
+#           etc/dns-defaults（DNS 内置默认集唯一来源，C3）
 # 自检：注入后占位符计数必须为 0；远端执行 ops.sh panel 显示 engine=up 且 watchdog=up。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -39,6 +40,9 @@ cp module/webroot/*.js module/webroot/*.html "$STAGING/webroot/"
 cp module/lib/*.sh "$STAGING/lib/"
 cp module/service.sh "$STAGING/"
 cp module/etc/engine-version "$STAGING/etc/" 2>/dev/null || true
+# DNS 内置默认集（C3 单一来源）：漏推的后果是 lifecycle 退到硬编码最小集——功能不坏，
+# 但 dev 直推通道与打包通道的内容不一致，排查"为什么设备上行为不同"时会看错方向。
+cp module/etc/dns-defaults "$STAGING/etc/" 2>/dev/null || true
 # module.prop 也要推：版本号是 ops.sh status / 面板「模块版本」的唯一来源。
 # 漏推的后果很隐蔽 —— **代码是新版、版本号停在旧版**（2026-10-04：推完 r2 的 webroot，
 # 面板仍显示 v1.9.7-r1），排查时第一眼就会怀疑部署没生效。
@@ -62,6 +66,7 @@ cp /data/local/tmp/d-service.sh \$M/service.sh
 cp /data/local/tmp/d-webroot/* \$M/webroot/
 for _f in \$M/webroot/*.js; do [ -f /data/local/tmp/d-webroot/\$(basename \$_f) ] || rm -f \$_f; done
 [ -f /data/local/tmp/d-etc/engine-version ] && cp /data/local/tmp/d-etc/engine-version \$M/etc/engine-version
+[ -f /data/local/tmp/d-etc/dns-defaults ] && cp /data/local/tmp/d-etc/dns-defaults \$M/etc/dns-defaults
 cp /data/local/tmp/d-module.prop \$M/module.prop
 chmod 0755 \$M/*.sh \$M/lib/*.sh
 rm -rf /data/local/tmp/d-lib /data/local/tmp/d-service.sh /data/local/tmp/d-webroot /data/local/tmp/d-etc /data/local/tmp/d-module.prop

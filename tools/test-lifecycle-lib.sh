@@ -600,6 +600,47 @@ _L25N="$(life_dns_probe_hosts | grep -c 'developer.amd.com.cn')"
 [ "$_L25N" = "1" ] && ok "L25e 同主机去重（c1/c7 → 1 次）" || no "L25e 主机重复（$_L25N 次）"
 LIFE_DB="$_OLD_DB25"
 
+echo "== L26 内置默认上游集：单一来源 module/etc/dns-defaults（2026-10-15 架构评审 C3）=="
+# 过去：life_prep 的兜底文件与 life_dns_recover 的候选腿是同一文件内两份字面量（注释
+# 自称"同源"却无任何缝合），dnsfwd.c 另有自举兜底，page-dns.js 候选池还有一条腿。
+# 现在唯一来源是 module/etc/dns-defaults，三处仍需保留的字面量由
+# tools/check-dns-defaults.sh 缝合（D1–D4）。这里验**行为**（同 L23 打法：真调用、
+# 读产出，不 grep 源码）：默认源在 → 输出它；缺失 → 最小集；life_prep 落盘的就是它。
+_L26D="$_TMPD/l26"; mkdir -p "$_L26D"
+_OLD_DEF26="$LIFE_DNS_DEFAULTS"
+cat > "$_L26D/defaults" <<'EOF'
+# 测试夹具：默认源（C3）
+nameserver 192.0.2.1
+nameserver 192.0.2.2
+EOF
+LIFE_DNS_DEFAULTS="$_L26D/defaults"
+_out26="$(life_dns_default_lines)"
+case "$_out26" in *"nameserver 192.0.2.1"*) ok "L26a 默认源在 → 原样输出（life_prep 拿它落盘）" ;; *) no "L26a 默认源内容没被输出" ;; esac
+case "$_out26" in *"nameserver 223.5.5.5"*) no "L26a2 输出里混进硬编码腿（应完全来自文件）" ;; *) ok "L26a2 输出完全来自文件（无硬编码腿）" ;; esac
+LIFE_DNS_DEFAULTS="$_L26D/nonexistent"
+_fb26="$(life_dns_default_lines)"
+case "$_fb26" in *"nameserver 223.5.5.5"*|*"nameserver 119.29.29.29"*) ok "L26b 默认源缺失 → 退最小集（保底不依赖新文件存在）" ;; *) no "L26b 缺失时没有最小集兜底：[$_fb26]" ;; esac
+# life_prep 落盘内容 = 默认源内容（与 L23 同样显式重设派生路径）
+_OLD_DATA26="$DATA_DIR"; _OLD_ENV26="${LIFE_RUNTIME_ENV:-}"; _OLD_UP26="$LIFE_UPSTREAMS"
+DATA_DIR="$_L26D/data"; mkdir -p "$_L26D/data"; LIFE_RUNTIME_ENV="$_L26D/runtime.env"; LIFE_UPSTREAMS="$_L26D/data/dns-upstreams.conf"
+LIFE_DNS_DEFAULTS="$_L26D/defaults"
+life_prep >/dev/null 2>&1
+if [ -s "$_L26D/data/dns-upstreams.conf" ]; then
+  grep -q '192.0.2.1' "$_L26D/data/dns-upstreams.conf" \
+    && ok "L26c life_prep 落盘的内容来自默认源（夹具 IP 在文件里）" \
+    || no "L26c life_prep 没写默认源内容（兜底与单一来源脱钩）"
+else
+  no "L26c life_prep 没有生成上游文件"
+fi
+# 默认源缺失时 life_prep 仍落最小集（L23c 的 fallback 路径版：保底不能空）
+DATA_DIR="$_L26D/data2"; mkdir -p "$_L26D/data2"; LIFE_UPSTREAMS="$_L26D/data2/dns-upstreams.conf"
+LIFE_DNS_DEFAULTS="$_L26D/nonexistent"
+life_prep >/dev/null 2>&1
+_ns26="$(grep -c '^[[:space:]]*nameserver[[:space:]]' "$_L26D/data2/dns-upstreams.conf" 2>/dev/null | tr -d ' ')"
+[ "${_ns26:-0}" -ge 1 ] && ok "L26d 默认源缺失时 life_prep 仍落最小集（$_ns26 条明文）" \
+  || no "L26d 默认源缺失时 life_prep 没生成兜底——首启即解析失败"
+DATA_DIR="$_OLD_DATA26"; LIFE_RUNTIME_ENV="$_OLD_ENV26"; LIFE_UPSTREAMS="$_OLD_UP26"; LIFE_DNS_DEFAULTS="$_OLD_DEF26"
+
 echo "== 结果：通过 $PASS / 失败 $FAIL / 跳过 $SKIP =="
 [ "$FAIL" = 0 ] || exit 1
 exit 0
