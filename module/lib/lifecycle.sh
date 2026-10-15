@@ -711,6 +711,23 @@ life_reload_dns() {
   fi
 }
 
+# ── 上游清单的回滚点（备份语义的唯一实现；2026-10-15 架构评审 C4）──────────
+# .prev   ：每次改写前刷新。必须先删再备——"目标已存在就跳过"式备份会让「回滚上一版」
+#           永远回到首版（page-dns.js 的 DNS_STORE.refreshPrev 同款次序，已下沉到此）。
+# .initial：首次改写前留档（「恢复初始默认」的点；已存在不覆盖）。
+# 过去这份语义有两处：page-dns.js 的 DNS_STORE 与 life_dns_recover 各写一遍；现在 shell 侧
+# 只此一处，ops.sh write-upstreams（WebUI 写入的 seam）与自愈都走它。
+life_upstreams_backup_prev() {
+  [ -f "$LIFE_UPSTREAMS" ] || return 0          # 没有原配置可备 = 首写，不算失败
+  rm -f "$LIFE_UPSTREAMS.prev" 2>/dev/null
+  cp "$LIFE_UPSTREAMS" "$LIFE_UPSTREAMS.prev" 2>/dev/null
+}
+life_upstreams_backup_initial() {
+  [ -f "$LIFE_UPSTREAMS.initial" ] && return 0  # 已有留档不覆盖
+  [ -f "$LIFE_UPSTREAMS" ] || return 0
+  cp "$LIFE_UPSTREAMS" "$LIFE_UPSTREAMS.initial" 2>/dev/null
+}
+
 # ── DNS 解析健康自愈（ADR-0010）──────────────────
 # 背景：引擎只认 127.0.0.1:53（dnsfwd），而守护（ADR-0004）只判进程存活、不判解析健康 ——
 # "进程活着但上游全不可达 → 一律 SERVFAIL"的半死态能长期潜伏（2026-10-15 真机：5 个上游全亡，
@@ -873,9 +890,10 @@ life_dns_recover() {
   rm -f "$_rc_cand"
   [ -n "$_rc_good" ] || return 1                       # 可达性硬门槛
 
-  # 备份优先：.prev 每次刷新、.initial 首次（与 page-dns.js 的 DNS_STORE 回滚点同语义）
-  [ -f "$LIFE_UPSTREAMS" ] && { rm -f "$LIFE_UPSTREAMS.prev"; cp "$LIFE_UPSTREAMS" "$LIFE_UPSTREAMS.prev" 2>/dev/null; }
-  [ -f "$LIFE_UPSTREAMS.initial" ] || cp "$LIFE_UPSTREAMS" "$LIFE_UPSTREAMS.initial" 2>/dev/null
+  # 备份优先：.prev 每次刷新、.initial 首次（回滚点语义的唯一实现，与 ops.sh
+  # write-upstreams 共用；C4 收敛前这里曾内联一份同款次序）
+  life_upstreams_backup_prev
+  life_upstreams_backup_initial
 
   # 原子写盘 + 热重载（SIGHUP；dnsfwd 另有 5s mtime 自检双保险）
   _rc_new="$DATA_DIR/dns-heal.new.tmp"

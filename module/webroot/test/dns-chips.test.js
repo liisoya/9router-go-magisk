@@ -2,7 +2,8 @@
  *   ① 变绿后再点一次必须能取消 —— 且**自动写盘生效**，不再要求手动「保存」；
  *   ② 旧判定是 includes 子串，'dot 223.5.5.5' 被 doh URL 误判已加入（纯函数侧已在
  *      parsers.test.js 锁定）—— 这里走**真实装配层**：toggleCandidate（芯片点击体）
- *      → DNS_STORE 备份 → writeFile → reload-dns，命令经 bridge 桩回答，与真机同路径。
+ *      → DNS_STORE.write（C4 起 = ops.sh write-upstreams：备份→原子写→热重载都在
+ *      seam 里），命令经 bridge 桩回答，与真机同路径。
  * 芯片是 innerHTML 字符串，桩 DOM 的 querySelectorAll 驱动不了 → 经 harness 暴露的
  * lastWin（vm 全局）直接调用顶层 toggleCandidate。
  */
@@ -23,13 +24,15 @@ function boot(opts = {}) {
   const h = createHarness({
     execHandler: cmd => {
       cmds.push(cmd);
-      // writeFile（dns-upstreams）：顺手解出内容供断言
-      if (cmd.includes('dns-upstreams.conf') && cmd.includes('base64 -d')) {
-        const m = cmd.match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d/);
+      // C4：上游写入经 seam（ops.sh write-upstreams），内容 base64 过 stdin；顺手解出供断言
+      // （尾换行由 seam 的 printf '%s\n' 负责，所以解出的内容不带它）
+      if (cmd.includes('write-upstreams')) {
+        const m = cmd.match(/printf '%s' '([A-Za-z0-9+/=]+)'/);
         if (m) writes.push(Buffer.from(m[1], 'base64').toString('utf8'));
-        return opts.write === false ? '' : 'write-ok';
+        if (opts.write === false) return 'write-failed-write';
+        if (opts.reload === 'fail') return 'write-ok-reload-failed';
+        return 'write-ok-reloaded';
       }
-      if (cmd.includes('no-src')) return 'exists';        // KB.backupOnce（命令里含字面量分支）
       if (cmd.includes('reload-dns')) return opts.reload === undefined ? 'reloaded' : opts.reload;
       if (cmd.includes('panel')) return PANEL_OK;
       if (cmd.includes('rm -f')) return 'rm-ok';
@@ -50,8 +53,8 @@ test('芯片点击自动生效：加入 → 备份 + 写盘 + 热重载，无需
   await win.toggleCandidate('dot 223.5.5.5');
   await tick();
   assert.strictEqual(els.get('upstreams').value, 'dot 223.5.5.5');
-  assert.deepStrictEqual(writes, ['dot 223.5.5.5\n'], '落盘内容必须与切换结果一致');
-  assert.ok(cmds.some(c => c.includes('reload-dns')), '写盘后必须热重载');
+  assert.deepStrictEqual(writes, ['dot 223.5.5.5'], '落盘内容必须与切换结果一致（尾换行由 seam 负责）');
+  assert.ok(cmds.some(c => c.includes('write-upstreams')), '写入必须经 seam');
   assert.ok(els.get('toast').textContent.includes('已加入并生效'));
 });
 
@@ -62,7 +65,7 @@ test('再点一次 = 取消：写盘内容移除该行，其它行原样保留',
   await win.toggleCandidate('dot 223.5.5.5');
   await tick();
   assert.strictEqual(els.get('upstreams').value, 'nameserver 119.29.29.29');
-  assert.deepStrictEqual(writes, ['nameserver 119.29.29.29\n']);
+  assert.deepStrictEqual(writes, ['nameserver 119.29.29.29']);
   assert.ok(els.get('toast').textContent.includes('已移除并生效'));
 });
 
@@ -74,7 +77,7 @@ test('移除最后一条上游必须被拦（dnsfwd 拿空配置 = 解析全挂�
   await tick();
   assert.strictEqual(els.get('upstreams').value, 'dot 223.5.5.5', '缓冲区必须原样保留');
   assert.strictEqual(writes.length, 0, '不得写盘');
-  assert.ok(!cmds.some(c => c.includes('reload-dns')), '不得热重载');
+  assert.ok(!cmds.some(c => c.includes('write-upstreams')), '不得下发写入命令（seam 也不该被惊动）');
   assert.ok(els.get('toast').textContent.includes('至少保留一条'));
 });
 
@@ -94,7 +97,7 @@ test('热重载失败：配置已写入（缓冲区不还原），但不得谎�
   await settle();
   await win.toggleCandidate('dot 223.5.5.5');
   await tick();
-  assert.deepStrictEqual(writes, ['dot 223.5.5.5\n'], '写盘已发生');
+  assert.deepStrictEqual(writes, ['dot 223.5.5.5'], '写盘已发生（seam 判 write-ok-reload-failed）');
   assert.strictEqual(els.get('upstreams').value, 'dot 223.5.5.5');
   assert.ok(!els.get('toast').textContent.includes('已加入并生效'), '不得谎报生效');
 });

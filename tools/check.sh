@@ -217,6 +217,13 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/check-dns-defaults.sh ]; then
       run "DNSSRC DNS 默认集单一来源与三处字面量缝合" sh tools/check-dns-defaults.sh
     fi
+    # OPSUP：上游清单写入口（ops.sh write-upstreams / restore-upstreams）的行为自证（C4）。
+    # WebUI 过去经 ksu.exec 直写 dns-upstreams.conf（绕过 ops.sh），"备份→原子写→热重载"
+    # 的纪律整个在 JS 里；现在只 seam 一份实现，本门禁钉住它的失败语义：备份优先拒写、
+    # .prev 每写必刷、成败分开回报、空/环回拒绝、恢复与 restore-none。
+    if [ -f tools/test-ops-upstreams.sh ]; then
+      run "OPSUP 上游清单写入口（seam：备份优先/原子写/如实 verdict）" sh tools/test-ops-upstreams.sh
+    fi
     # WATCHDOG：守护判定核（去抖 / S3 记账 / S4 位保持 / 死因取证）——
     # 起因：2026-10-01 架构走查候选 3，主循环 336 行此前离线零覆盖，
     # A2/A3/S3/S4 四条审查规则的"测试"是真机档 + 注释

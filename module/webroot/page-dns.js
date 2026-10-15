@@ -7,37 +7,43 @@
 
 const UPSTREAMS = CFG.DATA_DIR + '/dns-upstreams.conf';
 
-// ── DNS 上游存储：备份点语义 + 「写前必备份、备份失败不改写、写后必热重载」的次序 ──
-// 为什么收成一处（2026-10-01 架构评审 #7）：这套次序原先散在 save / optimize / restoreInit /
-// rollback 四个动作里各写一遍，其中「.prev 必须先删再备份」只由一条**源码顺序扫描**守着
-// （page-flows.test.js 的 B1b）—— 正是"真 bug 藏在调用方式里"的形态。
-// 现在四个动作只说"我要做什么"，次序与两个回滚点的语义都在这里。
-const DNS_INITIAL = UPSTREAMS + '.initial';   // 首次修改前的初始默认（「恢复初始默认」的回滚点）
-const DNS_PREV = UPSTREAMS + '.prev';         // 每次改写前的上一版（「回滚上一版」的回滚点）
+// ── DNS 上游存储：写入/恢复的唯一出口 = ops.sh seam（2026-10-15 架构评审 C4）──
+// 为什么收成一处：这套纪律原先整个在 JS 里（备份→原子写→热重载四步，本文件内四个动作
+// 各写一遍），WebUI 经 ksu.exec 直写文件——绕过 ops.sh（AGENT-CONVENTIONS §3 运维动作
+// 唯一入口），于是"备份→写→reload"在 JS 与 life_dns_recover 各有一份，adb/action 路径
+// 想改上游也无门可入。现在改写只经 seam：ops.sh write-upstreams / restore-upstreams
+// （备份用 lifecycle 的唯一实现 life_upstreams_backup_*，回滚点语义两侧同源）。
+// 本文件只剩"要做什么 + verdict 怎么翻译成 UI"——次序与失败语义都在 seam 内。
+// （回滚点路径 .initial / .prev 的知识随写入一起住在 seam：lifecycle.sh 的
+//   life_upstreams_backup_* / ops.sh write-upstreams，页面不再知道文件名。）
 const DNS_STORE = {
-  /** 「恢复初始默认」的回滚点：backupOnce 语义 = **目标已存在就跳过**。返回是否可用。 */
-  ensureInitial: () => KB.backupOnce(UPSTREAMS, DNS_INITIAL),
-  /** 「回滚上一版」的回滚点：**必须每次刷新**。
-   *  为什么不能直接复用 backupOnce：它是"目标已存在就跳过"，.prev 会永远停在
-   *  "第一次优选前"那份，而界面承诺的是「上一版存 .prev 可回滚」——
-   *  于是「回滚上一版」实际回到首版，用户丢掉最近一次优选前的状态。
-   *  优选是自动应用的，回滚正是它唯一的安全网。先删旧的，backupOnce 才会真正写入本版。 */
-  async refreshPrev() { await KB.remove(DNS_PREV); return KB.backupOnce(UPSTREAMS, DNS_PREV); },
-  /** 写入 + **必热重载**。前置：回滚点已由调用方确认可用（ensureInitial / refreshPrev）。
-   *  返回：false=写盘失败；{ reload:bool }=已写入（reload=false 表示热重载没生效 —— 
-   *  reloadDns 已如实警告，调用方不得再报"已生效"（双 toast 互相打脸，2026-10-02）。 */
+  /** 写入 + 备份 + 热重载（seam：ops.sh write-upstreams）。
+   *  备份（.prev 每写必刷、.initial 首次）与原子写、热重载都在 seam 内；备份建不起来时
+   *  seam **拒绝改写**（write-failed-no-backup）——用户配置不会被置于无回滚点的状态。
+   *  返回：{ ok:false, verdict }=未写入（原因见 verdict）；
+   *        { ok:true, reload }=已写入（reload=false 表示热重载没生效——调用方不得再报
+   *        "已生效"，双 toast 互相打脸，2026-10-02）。 */
   async write(body) {
-    if (!await KB.writeFile(UPSTREAMS, body + '\n')) return false;
-    const reload = await reloadDns(true);
-    return { ok: true, reload };
+    const r = await KB.writeUpstreams(body);
+    if (!r.ok) return { ok: false, verdict: r.verdict };
+    return { ok: true, reload: r.reload };
   },
-  /** 从某个回滚点恢复 + **必热重载** */
-  async restore(from) {
-    const ok = await KB.restoreBackup(from, UPSTREAMS);
-    if (ok) await reloadDns(true);
-    return ok;
+  /** 从回滚点恢复 + 必热重载（seam：ops.sh restore-upstreams）。which = 'initial' | 'prev'。 */
+  async restore(which) {
+    const r = await KB.restoreUpstreams(which);
+    if (!r.ok) return { ok: false, verdict: r.verdict };
+    return { ok: true, reload: r.reload };
   }
 };
+// 备份/热重载失败的 UI 翻译（verdict → 人话）：一处，四个动作共用。
+// 为什么不再有 reloadDns()：热重载原是写之后 JS 再补一次 KB.ops('reload-dns')，四个调用点
+// 全传 silent=true 让失败提示变成死代码（2026-09-29 诊断）；现在 reload 是 seam 写流程的
+// 一步，成败由 verdict 带回（write-ok-reload-failed），UI 只认 verdict、不猜。
+function dnsVerdictToast(w, okMsg) {
+  if (!w.reload) { toast('⚠️ 配置已写入，但热重载失败（dnsfwd 未生效，详见 DNS 日志）', 4200); return false; }
+  if (okMsg) toast(okMsg, 2400);
+  return true;
+}
 // 候选池：旧版实测可达清单（国内明文 + 国内 DoH/DoT）。
 // 2026-09-30：改为按**三大类**（明文 / DoH / DoT）分组展示，标签只留最短的区分词 ——
 // 原来九个芯片平铺、每个还带一句括号备注，一屏读不出结构（用户反馈"很乱"）。
@@ -87,28 +93,17 @@ async function saveUpstreams() {
     const text = $id('upstreams').value;
     if (/127\.0\.0\.1|::1/.test(text)) { toast('❌ 禁止包含 127.0.0.1 / ::1（自我循环）', 3000); return; }
     if (!text.trim()) { toast('上游不能为空'); return; }
-    // 前置：回滚点可用才改写（A6）。次序知识在 DNS_STORE，这里只说"要做什么"。
-    if (!await DNS_STORE.ensureInitial()) {
-      toast('⚠️ 备份失败（没有回滚点，不改写配置）', 3600);
+    // 写入经 seam（ops.sh write-upstreams）：备份/原子写/热重载都在里面；备份建不起来时
+    // seam 拒绝改写（A6 的保护从"JS 预检"升级为"seam fail-closed"）。
+    const w = await DNS_STORE.write(text);
+    if (!w.ok) {
+      toast(w.verdict === 'write-failed-no-backup'
+        ? '⚠️ 备份失败（没有回滚点，不改写配置）' : '❌ 写入失败', 3600);
       return;
     }
-    if (!await DNS_STORE.write(text)) { toast('❌ 写入失败'); return; }
     loadCurrentUpstreams();
+    dnsVerdictToast(w);
   });
-}
-async function reloadDns(silent) {
-  // dnsfwd 进程活性判断在 ops.sh（seam）内：pid 不在则返回 fail
-  const r = await KB.ops('reload-dns');
-  const ok = r.out.trim() === 'reloaded';
-  // 失败**永远要报**（2026-09-29 诊断）：失败提示原本写在 `if (!silent)` 里，而四个调用点
-  // （保存/优选/恢复/回滚）**全部**传 true → 那是死代码 → 配置已写盘但 dnsfwd 没生效时，
-  // 界面照样报「✅ 已恢复 / 已回滚 / 已自动应用」。silent 的语义收窄成"成功时不打扰"。
-  if (!ok) {
-    toast('⚠️ 配置已写入，但热重载失败（dnsfwd 未生效，详见 DNS 日志）', 4200);
-    return false;
-  }
-  if (!silent) toast('✅ 已热重载');
-  return true;
 }
 async function probe() {
   return withBusy($id('btn-probe'), '探测中…', async () => {
@@ -121,9 +116,9 @@ async function probe() {
 }
 async function restoreInit() {
   return withBusy($id('btn-restore-init'), '恢复中…', async () => {
-    const ok = await DNS_STORE.restore(DNS_INITIAL);
-    if (ok) { toast('✅ 已恢复初始默认'); refresh(); }
-    else toast('没有初始默认备份（从未修改过）');
+    const w = await DNS_STORE.restore('initial');
+    if (!w.ok) { toast('没有初始默认备份（从未修改过）'); return; }
+    if (dnsVerdictToast(w, '✅ 已恢复初始默认')) refresh();
   });
 }
 // ── 优选排序契约（2026-10-01：此前"按推荐还是按实测"没有明文）─────────────
@@ -170,26 +165,26 @@ async function optimize() {
     '<div class="hint">✅ 已自动应用：手写的自定义项（保留在最前）+ 上方 Top5（按本机实测评分降序）。不满意可「回滚上一版」或「恢复初始默认」。</div>';
   // 自动应用：自定义项在前 + Top5，原子写入后热重载
   const merged = [...new Set([...custom, ...top.map(x => KP.normUpstream(x.upstream))])].join('\n');
-  // 门禁②：先留回滚点；回滚点不可用就**不改写**（backupOnce 诚实返回，不再是永远 true）
-  const okInitial = await DNS_STORE.ensureInitial();
-  const okPrev = await DNS_STORE.refreshPrev();
-  const gBackup = { ok: okInitial && okPrev, reason: '备份失败（没有回滚点，不改写配置）' };
-  if (!KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'backup-gate', gBackup).ok) {
-    toast(`⚠️ ${gBackup.reason}`, 3200);
+  // 备份→原子写→热重载都在 seam（ops.sh write-upstreams；C4）：备份建不起来时 seam
+  // 拒绝改写——"先门禁后动作"的 backup-gate 从 JS 预检升级为 seam fail-closed，
+  // 纪律从此只有一份实现（lifecycle 的 life_upstreams_backup_*）。
+  const w = await DNS_STORE.write('# 优选自动生成（自定义项在前）' + new Date().toLocaleString() + '\n' + merged);
+  if (!w.ok) {
+    toast(w.verdict === 'write-failed-no-backup'
+      ? '⚠️ 备份失败（没有回滚点，不改写配置）'
+      : '❌ 配置写入失败，原配置未动（备份仍在）', 3600);
     return;
-  }
-  if (!await DNS_STORE.write('# 优选自动生成（自定义项在前）' + new Date().toLocaleString() + '\n' + merged)) {
-    toast('❌ 配置写入失败，原配置未动（备份仍在）', 3600); return;
   }
   loadCurrentUpstreams();
   loadUpstreamEditor();
+  dnsVerdictToast(w);
   });
 }
 async function rollback() {
   return withBusy($id('btn-rollback'), '回滚中…', async () => {
-    const ok = await DNS_STORE.restore(DNS_PREV);
-    if (ok) { toast('✅ 已回滚上一版'); refresh(); }
-    else toast('没有可回滚的备份');
+    const w = await DNS_STORE.restore('prev');
+    if (!w.ok) { toast('没有可回滚的备份'); return; }
+    if (dnsVerdictToast(w, '✅ 已回滚上一版')) refresh();
   });
 }
 // （setBind/setBindUI/restartDns 已删除：index.html 无绑定范围按钮，死代码按 deletion test 清除）
@@ -231,19 +226,17 @@ async function toggleCandidate(v) {
     }
     ta.value = r.text;
     renderCandChips();
-    if (!await DNS_STORE.ensureInitial()) {
-      toast('⚠️ 备份失败（没有回滚点，未改写配置）', 3600);
-      return;
-    }
+    // 备份→写→热重载都在 seam（C4）；备份失败 seam 拒写（与 saveUpstreams 同一条纪律）
     const w = await DNS_STORE.write(r.text);
-    if (!w) {
+    if (!w.ok) {
       ta.value = prev; renderCandChips();
-      toast('❌ 写入失败，已还原', 3200);
+      toast(w.verdict === 'write-failed-no-backup'
+        ? '⚠️ 备份失败（没有回滚点，未改写配置）' : '❌ 写入失败，已还原', 3200);
       return;
     }
     loadCurrentUpstreams();
-    // 热重载失败时 reloadDns 已警告过（配置确实已写入，界面跟着配置走）——不再报"已生效"
-    if (w.reload) toast(r.removed ? '✅ 已移除并生效' : '✅ 已加入并生效', 2400);
+    // 热重载失败时只警告、不报"已生效"（配置确实已写入，界面跟着配置走）
+    dnsVerdictToast(w, r.removed ? '✅ 已移除并生效' : '✅ 已加入并生效');
   } finally {
     _toggleBusy = false;
   }

@@ -266,16 +266,14 @@
     // 删除自报成败（rm-ok = 删了或本来就没有）：promise 形态下 rm 失败对 exec 层不可见，
     // 不自报 remove 就"永远 true" —— 与 backupOnce 曾经的病同族（写族必须自报，见上）。
     remove: p => `rm -f ${shq(p)} && echo rm-ok`,
-    // 备份一次（dst 存在即跳过）——"恢复初始默认"的回滚点
-    // 备份一次（dst 已存在则不覆盖）→ 回滚点是否可用**由输出回答**（不再是"永远 true"）：
-    //   ok=刚备份成功 / exists=已有备份 / no-src=没有原配置（没有可丢的东西）→ 都算可用
-    //   fail=cp 失败 → 调用方据此拒绝改写："备份失败还继续写"会把用户配置置于无回滚点的状态
-    backupOnce: (src, dst) =>
-      `if [ ! -f ${shq(src)} ]; then echo no-src; elif [ -f ${shq(dst)} ]; then echo exists; ` +
-      `elif cp ${shq(src)} ${shq(dst)} 2>/dev/null; then echo ok; else echo fail; fi`,
-    // 从备份恢复 → true/false
-    restoreBackup: (src, dst) =>
-      `[ -f ${shq(src)} ] && cp ${shq(src)} ${shq(dst)} && echo ok || echo none`,
+    // 上游清单的写/恢复：走 ops.sh seam（2026-10-15 架构评审 C4；AGENT-CONVENTIONS §3
+    // 运维动作唯一入口）。写内容 base64 过 stdin（任意字符安全，包括换行与引号）；
+    // 备份→原子写→热重载的纪律全在 seam，页面不再内联文件操作。判据是一词，
+    // 运行层只认词（见 KB.writeUpstreams / KB.restoreUpstreams）。
+    writeUpstreams: content =>
+      `printf '%s' ${shq(b64Encode(content))} | ${_cmds.ops('write-upstreams')}`,
+    restoreUpstreams: which =>
+      _cmds.ops(`restore-upstreams ${which}`),
     probeDns: configFile =>
       `${cfg().MODDIR}/bin/dnsfwd -f ${shq(configFile)} -P -j 8 2>&1`,
     // 批量测速（A5）：**并发放在 shell 内部** —— 单次 exec 里对每个节点起一个后台子 shell，
@@ -376,15 +374,24 @@
     const r = await sh(_cmds.remove(path), 15000);
     return !r.err && r.out.includes('rm-ok');
   }
-  // 诚实返回：只有 shell 明确回了 ok / exists / no-src 才算"回滚点可用"
-  async function backupOnce(src, dst) {
-    const r = await sh(_cmds.backupOnce(src, dst), 30000);
-    const v = r.out.trim();
-    return v === 'ok' || v === 'exists' || v === 'no-src';
+  // 上游清单写入（seam：ops.sh write-upstreams）。只认判据词，不猜：
+  //   { ok:true, reload:true }  已写入且热重载生效
+  //   { ok:true, reload:false } 已写入但热重载没生效——调用方不得再报"已生效"
+  //   { ok:false, verdict }     未写入（no-backup / empty / loopback / write）
+  async function writeUpstreams(content) {
+    const r = await sh(_cmds.writeUpstreams(content), 30000);
+    const v = (r.out || '').trim();
+    if (v === 'write-ok-reloaded') return { ok: true, reload: true };
+    if (v === 'write-ok-reload-failed') return { ok: true, reload: false };
+    return { ok: false, verdict: v };
   }
-  async function restoreBackup(src, dst) {
-    const r = await sh(_cmds.restoreBackup(src, dst), 30000);
-    return r.out.trim() === 'ok';
+  // 从回滚点恢复（'initial' | 'prev'）+ 热重载，同上只认判据词
+  async function restoreUpstreams(which) {
+    const r = await sh(_cmds.restoreUpstreams(which), 30000);
+    const v = (r.out || '').trim();
+    if (v === 'restore-ok-reloaded') return { ok: true, reload: true };
+    if (v === 'restore-ok-reload-failed') return { ok: true, reload: false };
+    return { ok: false, verdict: v };
   }
   function probeDns(configFile, tmo) { return sh(_cmds.probeDns(configFile), tmo || 60000); }
   // 批量测速：只回**原始输出**，解析交给纯函数（parsers.parseCurlTimings）——
@@ -442,7 +449,8 @@
   // test/bridge-commands.test.js，不要从页面伸手进来。
   const api = {
     sh, sqlFile, ops, openUrl, detectMode, db, diag,
-    readFile, writeFile, appendLine, remove, backupOnce, restoreBackup,
+    readFile, writeFile, appendLine, remove,
+    writeUpstreams, restoreUpstreams,
     probeDns, curlTimingBatch, fetch, download, sha256, zipList, sqlSnapshot,
     fileSize, elfMagic,
     b64Decode

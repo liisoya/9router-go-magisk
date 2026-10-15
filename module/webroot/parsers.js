@@ -347,10 +347,10 @@
   const DNS_OPTIMIZE_PLAN = [
     { id: 'probe' },                   // 跑测速（有副作用：写临时候选文件）
     { id: 'rows-gate', gate: true },   // 没有任何可用上游 → 不得改写配置
-    { id: 'backup' },                  // 写配置前留回滚点
-    { id: 'backup-gate', gate: true }, // 回滚点不可用 → 不得改写（否则用户配置无可回滚）
-    { id: 'write' },                   // 原子写入新配置
-    { id: 'reload' },                  // 热重载 dnsfwd
+    // 写配置 = ops.sh write-upstreams（2026-10-15 架构评审 C4 seam）：备份（回滚点建不起来
+    // 即拒写）→ 原子写 → 热重载全在 seam 内。backup-gate 的执行点从"JS 预检"搬进了 seam
+    // （fail-closed），纪律从此只有一份实现（lifecycle 的 life_upstreams_backup_*）。
+    { id: 'write' },
   ];
 
   // facts[id] = { ok, reason? }

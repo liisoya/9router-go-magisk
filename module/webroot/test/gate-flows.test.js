@@ -42,6 +42,7 @@ const h = createHarness({ execHandler: cmd => {
   // ── 通用 ──
   if (/ops\.sh' 'panel'|ops\.sh panel/.test(cmd)) return PANEL_LINE;
   if (/ops\.sh' 'reload-dns'/.test(cmd)) return 'reloaded';
+  if (cmd.includes('write-upstreams')) return 'write-ok-reloaded';   // C4：上游写入 seam 判据
   // **写命令必须排在读命令前面判断**：写 github-accel 的命令里也含 'github-accel' 这个路径，
   // 把"含 github-accel"当成读会让自动选中被静默判成写失败（这个用例正是为此而加，第一次跑就抓到）。
   if (cmd.includes('base64 -d')) return 'write-ok';                  // writeFile
@@ -52,7 +53,6 @@ const h = createHarness({ execHandler: cmd => {
   }
   if (cmd.includes('version.json')) return '{"latestVersion":"1.9.4"}';
   if (cmd.includes('__READ_OK__')) return '__READ_OK__';            // readFile（内容可为空）
-  if (cmd.includes('.initial') || cmd.includes('.prev')) return 'ok';// backupOnce
   // ── optimize ──
   if (mode === 'optimize' && cmd.includes('bin/dnsfwd')) return PROBE_OUT;
   // ── engUpdate ──
@@ -67,23 +67,27 @@ const h = createHarness({ execHandler: cmd => {
   return '';
 }});
 
-test('DNS 优选全链可达：探测 → Top5 → 备份 → 写配置 → 热重载（bug A 回归）', async () => {
+test('DNS 优选全链可达：探测 → Top5 → 写配置（备份+热重载在 seam；bug A 回归）', async () => {
   mode = 'optimize'; captured = [];
   const els = h.loadApp();
   await els.get('btn-opt').onclick();
 
   const tbl = els.get('opt-table').innerHTML;
   assert.ok(tbl.includes('<table>'), '探测结果表没有渲染（rows-gate 假拦？）');
-  const finalWrite = captured.find(c => c.includes('dns-upstreams.conf') && c.includes('base64 -d'));
-  assert.ok(finalWrite, '最终配置写入不可达 —— 优选在备份门禁处被假拦（bug A）');
-  assert.ok(finalWrite.includes('base64 -d >') && captured.some(c => /ops\.sh' 'reload-dns'/.test(c)),
-    '写完配置必须热重载生效');
-  // C1：**顺序**断言（此前只断言"可达"，把顺序写反不会有门禁变红）。
-  // DNS_OPTIMIZE_PLAN 要求"先留回滚点、再改写"（用户配置不能被置于无回滚点的状态）。
-  const iBackup = captured.findIndex(c => c.includes('.prev') && c.includes('cp '));
-  const iWrite = captured.findIndex(c => c.includes('dns-upstreams.conf') && c.includes('base64 -d'));
-  assert.ok(iBackup >= 0 && iBackup < iWrite,
-    `回滚点必须早于改写（备份#${iBackup} / 写入#${iWrite}）—— 顺序反了等于用户配置没有回滚点`);
+  // C4：最终配置写入 = 经 seam 下发 ops.sh write-upstreams（备份→原子写→热重载都在里面）
+  const finalWrite = captured.find(c => c.includes('write-upstreams'));
+  assert.ok(finalWrite, '最终配置写入不可达 —— 优选在门禁处被假拦（bug A）');
+  // 内容随命令走（base64 过 stdin）：Top5 必须真的进了 seam 命令
+  const m = finalWrite.match(/printf '%s' '([A-Za-z0-9+/=]+)'/);
+  const body = m ? Buffer.from(m[1], 'base64').toString('utf8') : '';
+  assert.ok(body.includes('119.29.29.29'), `写入内容里缺上游：${body}`);
+  // 备份与热重载的执行点已搬进 seam：页面不再自发 '.prev'/'reload-dns' 命令 ——
+  // 纪律只有一份实现（lifecycle 的 life_upstreams_backup_* + ops.sh write-upstreams），
+  // 其次序（先删 .prev 再备、备份失败拒写、写后必 reload）由 tools/test-ops-upstreams.sh 钉住。
+  assert.ok(!captured.some(c => c.includes('.prev') && c.includes('cp ')),
+    '页面又在自发备份（备份纪律应只在 seam，两份实现必然漂）');
+  assert.ok(!captured.some(c => /ops\.sh' 'reload-dns'/.test(c)),
+    '页面又在自发热重载（reload 是 seam 写流程的一步，成败由 verdict 带回）');
 });
 
 test('引擎更新全链可达：门禁 → 校验和 → install-engine（bug B 回归）', async () => {

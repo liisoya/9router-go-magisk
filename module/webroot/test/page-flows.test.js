@@ -3,10 +3,12 @@
  * 为什么单独有它：这两条 bug 是同一件事的两面。
  *   A5 page-overview.savePort     : 丢弃 restart-engine 的返回值，却无条件 toast「✅ 已重启」
  *                                   （新端口被占用 / 引擎起不来时照样报成功）
- *   A6 page-dns.saveUpstreams     : 丢弃 backupOnce 的返回值，仍改写配置
+ *   A6 page-dns.saveUpstreams     : 丢弃备份结果，仍改写配置
  *                                   （备份失败 → 用户配置被覆盖且没有 .initial 可回滚）
+ * 2026-10-15 C4 起 A6 的保护搬进 seam：写入只经 ops.sh write-upstreams，备份失败由
+ * seam 拒绝（write-failed-no-backup）——本文件相应断言"seam 拒写时 UI 不谎报成功"。
  * 它们各自的邻居（restartAll / optimize）**一直是在判的** —— 同一份安全知识只对了一半。
- * 所以这里断言的是行为而非实现：成败文案必须跟着真实结果走；回滚点不可用时**不得下发写入命令**。
+ * 所以这里断言的是行为而非实现：成败文案必须跟着真实结果走；seam 拒写时**不得报成功**。
  * 走真实入口（btn-* 的 onclick），命令经 bridge 的桩回答 —— 与真机同一套代码路径。
  */
 'use strict';
@@ -26,12 +28,20 @@ function boot(opts) {
   const h = createHarness({
     execHandler: cmd => {
       cmds.push(cmd);
-      if (cmd.includes('no-src')) return opts.backup === false ? 'fail' : 'ok';   // KB.backupOnce
       if (cmd.includes('write-ok')) return opts.write === false ? '' : 'write-ok'; // KB.writeFile
       if (cmd.includes('restart-engine')) return opts.restart || 'engine=up';      // KB.ops
       if (cmd.includes('start-user')) return opts.start || 'engine=up';            // KB.ops
       if (cmd.includes('stop-user')) return opts.stop || 'stopped';                // KB.ops
       if (cmd.includes('reload-dns')) return opts.reload === undefined ? 'reloaded' : opts.reload;
+      // C4：上游清单的写/恢复只经 seam（ops.sh write-upstreams / restore-upstreams）。
+      // 备份→原子写→热重载都在 seam 内，页面只认判据词——这里按用例注入各失败形态。
+      if (cmd.includes('write-upstreams')) {
+        if (opts.backup === false) return 'write-failed-no-backup';
+        if (opts.write === false) return 'write-failed-write';
+        if (opts.reload === false) return 'write-ok-reload-failed';
+        return 'write-ok-reloaded';
+      }
+      if (cmd.includes('restore-upstreams')) return opts.restore === false ? 'restore-none' : 'restore-ok-reloaded';
       // refresh()：opts.panel 让用例能注入"面板带回来的字段"（例：验证 mod_url 不被采纳）
       if (cmd.includes('panel')) return opts.panel || PANEL_OK;
       if (cmd.includes('-P -j 8')) return opts.probe || '';   // dnsfwd 探测输出（优选用）
@@ -46,7 +56,8 @@ function boot(opts) {
   return { els: h.loadApp(), cmds };
 }
 
-const wroteConfig = cmds => cmds.some(c => c.includes('write-ok'));
+// C4 起，"写配置"= 经 seam 下发 ops.sh write-upstreams（备份/原子写/热重载都在里面）
+const wroteConfig = cmds => cmds.some(c => c.includes('write-upstreams'));
 // 让一串微任务/定时器跑完：`renderAccelCur()` 是 async 且调用点不 await 它，
 // 断言若不等一拍就会跑在它前面 —— 那样连"渲染成了故障文案"都抓不到（本轮真的踩了一次假绿）。
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -60,7 +71,7 @@ test('A5 savePort：引擎没起来必须报失败，不得谎报成功', async 
   assert.ok(!msg.includes('已重启'), `不得谎报成功，实际文案：「${msg}」`);
 });
 
-test('A5 savePort：引擎起来了才报成功（对照，防“永远报失败”）', async () => {
+test('A5 savePort：引擎起来了才报成功（对照，防"永远报失败"）', async () => {
   const { els } = boot({ restart: 'engine=up' });
   els.get('in-port').value = '20131';
   await els.get('btn-port').onclick();
@@ -68,23 +79,28 @@ test('A5 savePort：引擎起来了才报成功（对照，防“永远报失败
     `应报成功，实际文案：「${els.get('toast').textContent}」`);
 });
 
-test('A6 saveUpstreams：回滚点建不起来时不得改写配置', async () => {
+test('A6 saveUpstreams：回滚点建不起来时 seam 拒写、界面不谎报成功', async () => {
   const { els, cmds } = boot({ backup: false });
   els.get('upstreams').value = '223.5.5.5\n119.29.29.29';
   await els.get('btn-save').onclick();
-  assert.ok(!wroteConfig(cmds), '备份失败却仍下发了写入配置的命令（用户将失去唯一回滚点）');
-  assert.ok(els.get('toast').textContent.includes('回滚点'),
-    `应提示回滚点不可用，实际文案：「${els.get('toast').textContent}」`);
+  // C4：写入只经 seam；"备份失败就不改写"的保证从"JS 预检"升级为"seam fail-closed"
+  // （ops.sh write-upstreams 判 write-failed-no-backup 并拒绝落盘）。
+  assert.ok(cmds.some(c => c.includes('write-upstreams')), '写入没走 seam（ops.sh write-upstreams）');
+  assert.ok(!cmds.some(c => c.includes('.prev') && c.includes('cp ')),
+    '页面又在自发备份——纪律应只在 seam（两份实现必然漂）');
+  const msg = els.get('toast').textContent;
+  assert.ok(msg.includes('回滚点'), `应提示回滚点不可用，实际文案：「${msg}」`);
+  assert.ok(!msg.includes('✅'), `拒写不得报成功，实际文案：「${msg}」`);
 });
 
-test('A6 saveUpstreams：备份可用时照常改写（对照，防“永远不写”）', async () => {
+test('A6 saveUpstreams：备份可用时照常改写（对照，防"永远不写"）', async () => {
   const { els, cmds } = boot({ backup: true });
   els.get('upstreams').value = '223.5.5.5';
   await els.get('btn-save').onclick();
   assert.ok(wroteConfig(cmds), '回滚点可用却没写配置（保存功能被误伤）');
 });
 
-test('A6 对照：写入失败时文案也必须说失败', async () => {
+test('A6 对照：seam 报写入失败时文案也必须说失败', async () => {
   const { els } = boot({ backup: true, write: false });
   els.get('upstreams').value = '223.5.5.5';
   await els.get('btn-save').onclick();
@@ -120,15 +136,15 @@ test('A5b startSvc：引擎没起来必须报失败，不得谎报成功', async
   assert.ok(!msg.includes('已启动'), `不得谎报成功，实际文案：「${msg}」`);
 });
 
-test('A5b startSvc：起来了才报成功（对照，防“永远报失败”）', async () => {
+test('A5b startSvc：起来了才报成功（对照，防"永远报失败"）', async () => {
   const { els } = boot({ start: 'engine=up' });
   await els.get('btn-start-svc').onclick();
   assert.ok(els.get('toast').textContent.includes('✅'),
     `应报成功，实际文案：「${els.get('toast').textContent}」`);
 });
 
-test('A5c reloadDns：热重载失败必须报出来（四个调用点全传 silent，过去是死代码）', async () => {
-  const { els } = boot({ backup: true, reload: '' });   // '' !== 'reloaded'
+test('A5c 热重载失败必须报出来（seam verdict：write-ok-reload-failed；"四个调用点全传 silent"的旧病由此绝根）', async () => {
+  const { els } = boot({ backup: true, reload: false });   // seam 判"写了但热重载没生效"
   els.get('upstreams').value = '223.5.5.5';
   await els.get('btn-save').onclick();
   assert.ok(els.get('toast').textContent.includes('热重载'),
@@ -167,21 +183,26 @@ test('B5b 清除选中：必须显示「直连 GitHub」，不得渲染成「未
     '清除选中后应显示「直连 GitHub」；无参去读刚被删掉的文件会渲染成「未知（读取失败）」');
 });
 
-test('B1b 源码顺序：DNS_STORE.refreshPrev 必须先删旧 .prev 再备份（否则“回滚上一版”永远回到首版）', () => {
+test('B1b 备份次序的唯一所有者已随写入搬进 seam：life_upstreams_backup_prev 先删 .prev 再备，页面不得自发备份', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'page-dns.js'), 'utf8');
-  // 2026-10-01 架构评审 #7：这条次序知识从 optimize 的体内搬进了 DNS_STORE.refreshPrev ——
-  // **断言跟着 seam 走**：守的仍是同一条不变量，只是它的家换了地方。
-  const at = src.indexOf('const DNS_STORE');
-  assert.ok(at > 0, '找不到 DNS_STORE（次序的唯一所有者）');
-  const store = src.slice(at, src.indexOf('};', at));
-  const iRemove = store.indexOf('KB.remove(DNS_PREV)');
-  const iBackup = store.indexOf('KB.backupOnce(UPSTREAMS, DNS_PREV)');
-  assert.ok(iRemove > 0, '没有找到「删旧 .prev」这一步（backupOnce 对已存在的目标会跳过 cp）');
+  // 2026-10-01 架构评审 #7：次序知识从 optimize 体内搬进 JS 的 DNS_STORE.refreshPrev；
+  // 2026-10-15 C4：随"写入"一起搬进 shell（ops.sh write-upstreams → lifecycle 的
+  // life_upstreams_backup_prev）。守的还是同一条不变量：先删旧 .prev 再备份，
+  // 否则"回滚上一版"永远回到首版。断言跟着 seam 走，只是家又换了一次。
+  const life = fs.readFileSync(path.join(__dirname, '..', '..', 'lib', 'lifecycle.sh'), 'utf8');
+  const at = life.indexOf('life_upstreams_backup_prev() {');
+  assert.ok(at > 0, '找不到 life_upstreams_backup_prev（备份次序的唯一实现）');
+  const fn = life.slice(at, life.indexOf('life_upstreams_backup_initial'));
+  const iRemove = fn.indexOf('rm -f "$LIFE_UPSTREAMS.prev"');
+  const iBackup = fn.indexOf('cp "$LIFE_UPSTREAMS" "$LIFE_UPSTREAMS.prev"');
+  assert.ok(iRemove > 0, '没有找到「删旧 .prev」这一步（跳过式备份会让回滚永远回到首版）');
   assert.ok(iBackup > iRemove, `顺序反了：删(${iRemove}) 必须在备份(${iBackup}) 之前`);
-  // 而且这条次序真的在优选路径上 —— 模块写对了却没人用等于没有
-  assert.ok(src.includes('await DNS_STORE.refreshPrev()'), 'optimize 必须走 DNS_STORE.refreshPrev');
+  // 而且写配置真的走 seam —— 模块写对了却没人用等于没有
+  const page = fs.readFileSync(path.join(__dirname, '..', 'page-dns.js'), 'utf8');
+  assert.ok(page.includes('KB.writeUpstreams('), 'page-dns 必须经 KB.writeUpstreams 走 seam');
+  assert.ok(!/KB\.writeFile\(UPSTREAMS/.test(page), 'page-dns 又在直写上游文件（绕过 ops.sh，C4 要消灭的正是这个）');
+  assert.ok(!/KB\.backupOnce\(UPSTREAMS/.test(page), 'page-dns 又在自发备份（纪律应只在 seam）');
 });
 
 // ── 优选排序契约（2026-10-01）：以本机实测为准，而不是"推荐顺序" ──────────
@@ -192,11 +213,12 @@ const PROBE_FAST_ALI = [
   '  119.29.29.29                       v4  www.baidu.com              300ms  2/2  1.2.3.4',
   '  223.6.6.6                          v4  www.baidu.com                8ms  2/2  1.2.3.4'
 ].join('\n');
-// 候选清单与最终配置都经 KB.writeFile，取最后一条 = 真正落盘的那份。
-// 内容是 base64 过 shell 的（printf '%s' '<b64>' | base64 -d），断言顺序必须先解出来 ——
+// 候选清单经 KB.writeFile（临时文件），最终配置经 seam（KB.writeUpstreams）——
+// 取最后一条 write-upstreams = 真正落盘的那份。内容是 base64 过 stdin 的
+// （printf '%s' '<b64>' | ops.sh write-upstreams），断言顺序必须先解出来 ——
 // 否则比的是编码串，顺序断言等于没断言。
 const lastWrite = cmds => {
-  const c = cmds.filter(c => c.includes('write-ok')).pop() || '';
+  const c = cmds.filter(c => c.includes('write-upstreams')).pop() || '';
   const m = c.match(/printf '%s' '([A-Za-z0-9+/=]+)'/);
   return m ? Buffer.from(m[1], 'base64').toString('utf8') : c;
 };

@@ -6,7 +6,7 @@
 #   生命周期 = lib/lifecycle.sh（进程启停、用户意图、状态文件、cgroup 脱组）。本文件只 source 它，
 #              **绝不自己读写任何 lifecycle 状态文件**（否则"状态无主"的老毛病会立刻回来）。
 # 输出约定：机器可读的 key=value 行（WebUI 解析）；部分子命令输出状态词。
-USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port|export-logs>"
+USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|write-upstreams|restore-upstreams <initial|prev>|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port|export-logs>"
 # 环境变量: DATA_DIR（默认 /data/adb/9router-go）、PORT（显式覆盖端口）
 
 # PATH 显式声明（架构审查 S2）：本脚本被 WebUI(ksu.exec)/管理器/Termux 多上下文执行，
@@ -547,6 +547,64 @@ cmd_seed_key() {
   fi
 }
 
+# ── 上游清单的写入口（AGENT-CONVENTIONS §3：运维动作唯一入口；2026-10-15 架构评审 C4）──
+# WebUI 过去经 ksu.exec 直写 dns-upstreams.conf（bridge 的通用文件原语）——绕过本 seam，
+# 于是"备份→原子写→热重载"的纪律在 JS 与 life_dns_recover 各有一份，adb/action 路径想改
+# 上游也无门可入。现在改写只走这里；回滚点语义用 lifecycle 的唯一实现（life_upstreams_backup_*）。
+# 内容走 stdin（base64）：任意字符安全，绕开 ksu.exec 的命令行 quoting。
+# 判据（stdout 一词；promise 形态下退出码不可见，调用方只认词）：
+#   write-ok-reloaded        已写入且热重载生效
+#   write-ok-reload-failed   已写入但热重载没生效（配置在盘上、dnsfwd 未换）
+#   write-failed-no-backup   回滚点建不起来 → 拒绝改写（用户配置不被置于无回滚点状态）
+#   write-failed-empty       内容为空
+#   write-failed-loopback    含 127.0.0.1 / ::1（自我循环，与面板同一条规则）
+#   write-failed-write       落盘失败
+cmd_write_upstreams() {
+  _b64="$(cat 2>/dev/null)"
+  _new="$(printf '%s' "$_b64" | base64 -d 2>/dev/null)"
+  if [ -z "$(printf '%s' "$_new" | tr -d '[:space:]')" ]; then
+    echo "write-failed-empty"; return 0
+  fi
+  if printf '%s' "$_new" | grep -Eq '^[[:space:]]*(nameserver|doh|dot)[[:space:]]+[^#]*(127\.0\.0\.1|::1)'; then
+    echo "write-failed-loopback"; return 0
+  fi
+  # 备份优先：任一回滚点建不起来 → 不改写（与面板"备份失败就不改配置"同一条纪律）
+  if ! life_upstreams_backup_prev || ! life_upstreams_backup_initial; then
+    echo "write-failed-no-backup"; return 0
+  fi
+  # 原子写盘（tmp + mv；半份 upstreams 会让 dnsfwd 起不来或解析到坏上游）
+  printf '%s\n' "$_new" > "$LIFE_UPSTREAMS.tmp" 2>/dev/null \
+    || { rm -f "$LIFE_UPSTREAMS.tmp" 2>/dev/null; echo "write-failed-write"; return 0; }
+  mv "$LIFE_UPSTREAMS.tmp" "$LIFE_UPSTREAMS" 2>/dev/null \
+    || { rm -f "$LIFE_UPSTREAMS.tmp" 2>/dev/null; echo "write-failed-write"; return 0; }
+  # 热重载成败分开回报：调用方不得把"写成功"当成"已生效"
+  if [ "$(life_reload_dns 2>/dev/null)" = "reloaded" ]; then
+    echo "write-ok-reloaded"
+  else
+    echo "write-ok-reload-failed"
+  fi
+}
+
+# 从回滚点恢复上游清单（initial|prev）+ 热重载。判据：restore-ok-reloaded /
+# restore-ok-reload-failed / restore-none（没有该回滚点）/ restore-failed。
+cmd_restore_upstreams() {
+  case "${1:-}" in
+    initial) _src="$LIFE_UPSTREAMS.initial" ;;
+    prev)    _src="$LIFE_UPSTREAMS.prev" ;;
+    *)       echo "restore-none"; return 0 ;;
+  esac
+  [ -f "$_src" ] || { echo "restore-none"; return 0; }
+  printf '%s\n' "$(cat "$_src" 2>/dev/null)" > "$LIFE_UPSTREAMS.tmp" 2>/dev/null \
+    || { rm -f "$LIFE_UPSTREAMS.tmp" 2>/dev/null; echo "restore-failed"; return 0; }
+  mv "$LIFE_UPSTREAMS.tmp" "$LIFE_UPSTREAMS" 2>/dev/null \
+    || { rm -f "$LIFE_UPSTREAMS.tmp" 2>/dev/null; echo "restore-failed"; return 0; }
+  if [ "$(life_reload_dns 2>/dev/null)" = "reloaded" ]; then
+    echo "restore-ok-reloaded"
+  else
+    echo "restore-ok-reload-failed"
+  fi
+}
+
 # ── 只加载模式（测试专用）────────────────────────────────────────────
 # `OPS_LIB_ONLY=1` 时只取本文件的函数定义、不跑下面的 dispatch。存在的理由：本文件的编排逻辑
 # （install-engine / install-module）是全仓最安全敏感的动作，而它过去**无法被 source**
@@ -568,6 +626,8 @@ case "${1:-}" in
   start-user)      life_start_user ;;
   restart-engine)  life_restart_engine ;;
   reload-dns)      life_reload_dns ;;
+  write-upstreams) cmd_write_upstreams ;;
+  restore-upstreams) shift; cmd_restore_upstreams "${1:-}" ;;
   watchdog-start)  life_wd_start ;;
   hold)            shift; life_wd_hold "${1:-180}"; echo "held" ;;
   install-engine)  shift; cmd_install_engine "$@" ;;

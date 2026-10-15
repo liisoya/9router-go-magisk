@@ -407,7 +407,10 @@ test('计划门禁：每个 planGate 调用点的阶段名都必须真的在对�
       if (!plan.some(s => s.id === m[2])) bad.push(`${f}:${i + 1} 阶段「${m[2]}」不在 ${m[1]} 里`);
     });
   }
-  assert.ok(sites >= 8, `只扫到 ${sites} 个 planGate 调用点，扫描规则该更新了`);
+  // 下限 7：2026-10-15 C4 起 DNS 优选的 backup-gate 调用点随写入搬进 ops.sh seam
+  // （fail-closed 在 shell 里判），JS 侧少一个调用点是**故意的**——floor 跟着降，
+  // 理由写在这里，后来者别把它当扫描器腐烂又调回去。
+  assert.ok(sites >= 7, `只扫到 ${sites} 个 planGate 调用点，扫描规则该更新了`);
   assert.deepStrictEqual(bad, [], `这些调用点的阶段名对不上计划：${bad.join('；')}`);
 });
 
@@ -417,11 +420,13 @@ test('计划结构：ENGINE_UPDATE_PLAN 的 install 之前必须有两个门禁'
   assert.deepStrictEqual(KP.ENGINE_UPDATE_PLAN.slice(0, idx).filter(s => s.gate).map(s => s.id),
     ['file-gate', 'sum-gate']);
 });
-test('计划结构：DNS_OPTIMIZE_PLAN 的 write 之前必须有 rows-gate 与 backup-gate', () => {
+test('计划结构：DNS_OPTIMIZE_PLAN 的 write 之前必须有 rows-gate（backup-gate 已随写入搬进 seam）', () => {
   const idx = KP.DNS_OPTIMIZE_PLAN.findIndex(s => s.id === 'write');
   assert.ok(idx > 0, 'DNS_OPTIMIZE_PLAN 里没有 write 步骤');
+  // 2026-10-15 C4：备份/热重载的执行点搬进 ops.sh write-upstreams（fail-closed），
+  // JS 侧只剩 rows-gate 一道门禁；backup-gate 的次序由 tools/test-ops-upstreams.sh 钉住。
   assert.deepStrictEqual(KP.DNS_OPTIMIZE_PLAN.slice(0, idx).filter(s => s.gate).map(s => s.id),
-    ['rows-gate', 'backup-gate']);
+    ['rows-gate']);
 });
 test('计划结构：ORPHAN_CLEAN_PLAN 的 snapshot 是门禁且排在 delete 之前', () => {
   const ids = KP.ORPHAN_CLEAN_PLAN.map(s => s.id);

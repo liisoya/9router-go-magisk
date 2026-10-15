@@ -12,8 +12,13 @@ global.window = { CFG: { MODDIR: '/data/adb/modules/ninerouter-go', DATA_DIR: '/
 global.localStorage = { getItem: k => (k === '__kmod_exec_mode' ? 'cb3' : null), setItem() {}, removeItem() {} };
 global.ksu = {
   exec(cmd, opts, cb) {
-    // 伪造真机行为：命令自己吐自报标记才算成功；否则只有哨兵（旧实现下 sqlite 报错的形态）
-    const marker = ['snap-ok', 'write-ok', 'append-ok', '__SQL_OK__', '__READ_OK__'].find(m => cmd.includes(m));
+    // 伪造真机行为：命令自己吐自报标记才算成功；否则只有哨兵（旧实现下 sqlite 报错的形态）。
+    // C4 起上游写入经 ops.sh seam，判据词是 write-ok-reloaded 等——**长的必须排前面**：
+    // 'write-ok' 是 'write-ok-reloaded' 的子串，顺序反了会把 seam 判据截成旧词。
+    const marker = ['write-ok-reloaded', 'write-ok-reload-failed', 'write-failed-no-backup',
+      'write-failed-empty', 'write-failed-loopback', 'write-failed-write',
+      'restore-ok-reloaded', 'restore-ok-reload-failed', 'restore-none', 'restore-failed',
+      'snap-ok', 'write-ok', 'append-ok', '__SQL_OK__', '__READ_OK__'].find(m => cmd.includes(m));
     const out = marker ? marker + '\n' : '';
     setTimeout(() => global.window[cb](out + '__KMOD_DONE__0'), 0);
   }
@@ -132,6 +137,38 @@ test('writeFile / appendLine 运行层只认标记（无标记 = 失败，不得
   assert.strictEqual(await KB.writeFile('/d/f', 'x'), true);
   assert.strictEqual(await KB.appendLine('/d/f', 'x'), true);
 });
+// ── C4：上游清单的写/恢复走 ops.sh seam（页面不再直写文件）──
+test('writeUpstreams：内容 base64 过 stdin 进 ops.sh write-upstreams（不再直落文件）', () => {
+  const cmd = C.writeUpstreams('nameserver 223.5.5.5\n');
+  assert.ok(cmd.includes('write-upstreams'), cmd);
+  assert.ok(!cmd.includes('base64 -d'), '内容不应 base64 -d 直落文件——那正是绕过 seam 的旧形状');
+  assert.ok(!cmd.includes('dns-upstreams.conf'), '页面不应再知道上游文件路径（路径知识在 seam）');
+  const m = cmd.match(/printf '%s' '([A-Za-z0-9+/=]+)'/);
+  assert.ok(m, `没走 base64 stdin 通道：${cmd}`);
+  assert.strictEqual(Buffer.from(m[1], 'base64').toString('utf8'), 'nameserver 223.5.5.5\n');
+});
+test('restoreUpstreams：ops.sh restore-upstreams <which>（initial|prev）', () => {
+  assert.ok(C.restoreUpstreams('prev').includes('restore-upstreams'), C.restoreUpstreams('prev'));
+  assert.ok(C.restoreUpstreams('initial').includes("'initial'"), C.restoreUpstreams('initial'));
+});
+test('writeUpstreams / restoreUpstreams 运行层只认判据词（无词 = 失败，不得谎报成功）', async () => {
+  // 用默认桩（按判据词回吐）：构造器换成 'echo <判据词>' 即精确控制 wrapper 看到的输出
+  const origW = C.writeUpstreams, origR = C.restoreUpstreams;
+  try {
+    C.writeUpstreams = () => 'true';                     // 无判据词 = 失败
+    C.restoreUpstreams = () => 'true';
+    assert.deepStrictEqual(await KB.writeUpstreams('x'), { ok: false, verdict: '' });
+    assert.deepStrictEqual(await KB.restoreUpstreams('prev'), { ok: false, verdict: '' });
+    C.writeUpstreams = () => 'echo write-ok-reloaded';
+    C.restoreUpstreams = () => 'echo restore-ok-reload-failed';
+    assert.deepStrictEqual(await KB.writeUpstreams('x'), { ok: true, reload: true });
+    assert.deepStrictEqual(await KB.restoreUpstreams('prev'), { ok: true, reload: false });
+    C.writeUpstreams = () => 'echo write-failed-no-backup';   // seam 拒写：ok:false + verdict 带回
+    assert.deepStrictEqual(await KB.writeUpstreams('x'), { ok: false, verdict: 'write-failed-no-backup' });
+  } finally {
+    C.writeUpstreams = origW; C.restoreUpstreams = origR;
+  }
+});
 test('sqlFile 命令自吐 __SQL_OK__（读失败凭 r.ok 可辨，空结果不再冒充成功）', async () => {
   let sent = '';
   const orig = global.ksu.exec;
@@ -140,21 +177,6 @@ test('sqlFile 命令自吐 __SQL_OK__（读失败凭 r.ok 可辨，空结果不�
   global.ksu.exec = orig;
   assert.ok(sent.includes("< /data/adb/9router-go/cc.sql && echo __SQL_OK__"), sent);
   assert.strictEqual(r.ok, true, '命令自吐标记时 r.ok 必须为 true');
-});
-
-// ── 备份/恢复 ──
-test('backupOnce：四种结局都有明确标记（不再是「永远 true」）', () => {
-  const cmd = C.backupOnce('/d/up', '/d/up.initial');
-  for (const marker of ['no-src', 'exists', 'ok', 'fail']) {
-    assert.ok(cmd.includes(`echo ${marker}`), `缺标记 ${marker}：${cmd}`);
-  }
-  assert.ok(!cmd.trim().endsWith('; true'),
-    '不允许再拿 `; true` 吞掉结果 —— 那会让"备份失败就不改写"的门禁永远通过');
-  assert.ok(cmd.includes("cp '/d/up' '/d/up.initial'"), cmd);
-});
-test('restoreBackup：ok/none 语义', () => {
-  assert.strictEqual(C.restoreBackup('/d/a', '/d/b'),
-    "[ -f '/d/a' ] && cp '/d/a' '/d/b' && echo ok || echo none");
 });
 
 // ── 网络 ──
