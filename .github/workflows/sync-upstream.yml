@@ -1,17 +1,28 @@
-name: Sync upstream
+name: Sync upstream (notify-only)
 
-# ADR-0008：每日检测上游 Release，自动「合并基线 → bump → build.sh 全部门禁 → commit+tag」。
-# 发布本体由该 tag 触发的 release.yml（binaries + magisk）完成。
-# 冲突/失败即熔断：main 保持上一基线，开 sync-failed issue 转人工；
-# 不做机械补丁重放——"能打上但语义错"的包在无人复核模式下最危险。
+# ADR-0008 起初设计为「检测上游 Release → 自动合并基线 → bump → build.sh 全部门禁 → commit+tag」，
+# 发布本体由该 tag 触发的 release.yml 完成。
+#
+# 现实（2026-10-15 调研，docs/INVESTIGATION-20261015-dns-and-upstream-sync.md）：
+#   本仓从 v1.9.7 重度分叉，上游已到 v1.9.13，`git merge --no-ff <tag>` 每天撞 13 个冲突文件
+#   → 熔断步（原第 7 步）每天 exit 1；更糟的是熔断本应开的 sync-failed issue 因**标签不存在**
+#   而从未开出（`gh issue create --label sync-failed` 报错）→ 一片红但零通知。
+#
+# 结论（ADR-0009）：自动合并在当前定制深度下结构性走不通。改为 **detect + notify**——
+#   只检测上游新 Release 并开/更新一个 issue 提醒人工按 AGENT-CONVENTIONS §7 合并；
+#   合并 / 构建 / tag / 推送全部交回人工可控流程。
+#
+# ⏸  自动运行已暂停：下面的 schedule 已注掉（原每日 UTC 22:00 = 北京 06:00）。
+#    它现在**只会开 issue 提醒**，不会再尝试合并/构建/推送——所以恢复每日提醒是安全的：
+#    取消 schedule 那行的注释即可。手动跑一次：Actions → Sync upstream → Run workflow。
 
 on:
-  schedule:
-    - cron: "0 22 * * *" # UTC 22:00 = 北京 06:00
+  # schedule:
+  #   - cron: "0 22 * * *"   # 暂停中；恢复"每日提醒器"时取消本行注释（纯通知，不再合并）
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read      # 不再需要写：合并/构建/tag/推送都交给人工
   issues: write
 
 concurrency:
@@ -20,19 +31,15 @@ concurrency:
 
 env:
   UPSTREAM_REPO: luqman-v1/9router-go
+  NOTIFY_LABEL: upstream-sync     # 提醒 issue 用的标签（不存在则本流程自动创建）
 
 jobs:
-  sync:
+  notify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Configure git (github-actions bot)
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Detect upstream release
         id: detect
@@ -49,83 +56,45 @@ jobs:
             echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Bun
+      # 标签不存在 → `gh issue create --label` 会失败。这正是旧熔断步静默失败、从不开口子的根因，
+      # 所以先幂等建标签，保证后面一定能开出 issue（已存在则创建命令非零，忽略即可）。
+      - name: Ensure notify label exists
         if: steps.detect.outputs.changed == 'true'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-
-      - name: Set up Go
-        if: steps.detect.outputs.changed == 'true'
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.27"
-          cache: true
-
-      # 24h 内上游发多个版本时，latest release 永远是最新——中间版本天然跳过
-      - name: Merge upstream baseline
-        if: steps.detect.outputs.changed == 'true'
-        run: |
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch upstream --tags
-          TAG="${{ steps.detect.outputs.tag }}"
-          if ! git merge --no-ff "${TAG}" -m "chore(sync): 引擎基线 $(cat VERSION) → ${TAG#v}"; then
-            git merge --abort || true
-            echo "::error::merge conflict — 熔断转人工（ADR-0008）"
-            exit 1
-          fi
-
-      - name: Bump release version
-        if: steps.detect.outputs.changed == 'true'
-        run: |
-          TAG="${{ steps.detect.outputs.tag }}"
-          ./scripts/bump-version.sh "${TAG#v}"
-
-      - name: Build module zip (all gates)
-        if: steps.detect.outputs.changed == 'true'
-        run: ./build.sh
-
-      - name: Commit and tag release
-        if: steps.detect.outputs.changed == 'true'
-        run: |
-          TAG="${{ steps.detect.outputs.tag }}"
-          REL="v${TAG#v}-r1"
-          if git rev-parse -q --verify "refs/tags/${REL}" >/dev/null; then
-            echo "::error::tag ${REL} 已存在 — 同基线重建请手动递增 -rN"
-            exit 1
-          fi
-          git add -A
-          git diff --cached --quiet || git commit -m "chore(release): ${REL}"
-          git push origin HEAD:main
-          git tag "${REL}"
-          git push origin "${REL}"
-
-      - name: Close resolved sync-failed issues
-        if: steps.detect.outputs.changed == 'true' && success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh issue list --label sync-failed --state open --json number --jq '.[].number' |
-            while read -r n; do
-              gh issue close "$n" -c "同步已成功（${{ steps.detect.outputs.tag }}），自动关闭。"
-            done
+          gh label create "$NOTIFY_LABEL" \
+            --description "上游 9router-go 发布新版本，待人工按 AGENT-CONVENTIONS §7 合并（ADR-0009）" \
+            --color "0e8a16" 2>/dev/null || echo "标签已存在，跳过创建"
 
-      # 熔断出口：任何一步失败 → 开 issue（已有未关闭的则不重复开）
-      - name: Open sync-failed issue (fuse)
-        if: failure()
+      - name: Open / refresh upstream-sync issue
+        if: steps.detect.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TAG: ${{ steps.detect.outputs.tag }}
         run: |
-          OPEN="$(gh issue list --label sync-failed --state open --json number --jq length)"
-          if [ "${OPEN}" != "0" ]; then
-            echo "已有未关闭的 sync-failed issue，不重复开"
-            exit 0
-          fi
-          gh issue create --label sync-failed \
-            --title "上游同步失败：${TAG:-检测阶段}" \
-            --body "自动同步流水线熔断（ADR-0008）。
+          LOCAL="v$(cat VERSION)"
+          EXISTING="$(gh issue list --label "$NOTIFY_LABEL" --state open --json number --jq '.[0].number')"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "仍待同步：上游 ${TAG}（本地 ${LOCAL}）。运行：${RUN_URL}"
+            echo "已更新既有 issue #${EXISTING}"
+          else
+            BODY="$(cat <<EOF
+          自动同步已改为 detect+notify（ADR-0009）：检测到上游 ${UPSTREAM_REPO} 发布 **${TAG}**，本仓在 **${LOCAL}**。
+
+          请按 AGENT-CONVENTIONS.md §7「上游同步流程（引擎发新版时）」人工合并：
+          1. \`git fetch origin --tags\`；以本地 \`git log --oneline ${LOCAL}..${TAG}\` + \`git diff --stat\` 为准（不只读 release notes）
+          2. 逐条裁决 \`tools/patches/*\`（被上游吸收→撤；未吸收→留）
+          3. 冲突按 §10.2 共享文件清单核对；合并后复跑 \`tools/check.sh --all\`
+          4. \`bash build.sh\` → 真机验证 → \`scripts/bump-version.sh ${TAG#v}\` → tag \`v${TAG#v}-r1\` → 推送触发 release.yml
+
+          已知本次合并基线 v1.9.7 → v1.9.13 撞 13 个冲突文件，逐文件裁定见
+          docs/INVESTIGATION-20261015-dns-and-upstream-sync.md。
+
           - 运行日志：${RUN_URL}
-          - 上游 tag：${TAG:-未知}
-          请按 AGENT-CONVENTIONS.md §10.2 台账人工同步；解决后本 issue 由下次成功同步自动关闭。"
+          合并发版完成后请手动关闭本 issue。
+          EOF
+          )"
+            gh issue create --label "$NOTIFY_LABEL" --title "上游新版本 ${TAG} 待人工同步（当前 ${LOCAL}）" --body "$BODY"
+          fi
