@@ -481,9 +481,16 @@ fi
 kill "$_b22" 2>/dev/null
 # (d) 回潮扫描：守护里 ensure **只许直调** —— 任何一处 `$(life_ensure` 都是子 shell 收养回归
 # （排除注释行：反例文本写在 wd_ensure 的说明注释里，第一次跑就被它误红了）
-_n22="$(grep '\$(life_ensure' module/lib/watchdog.sh | grep -cv '^[[:space:]]*#')"
-[ "$_n22" = "0" ] && ok "L22d 守护里 \$() 调 ensure 残留 = 0（直调纪律）" \
-                 || no "L22d 出现 $_n22 处 \$(life_ensure…（CHLD 会再次不可达）"
+# (d) 直调纪律的**全仓**守卫：$() 包 ensure/restart 会把进程启动放进短命子 shell
+# （L22：引擎被 init 收养 → CHLD 永久不可达、死因恒 127、自愈退化成 60s 轮询）。
+# 2026-10-15 C6：守卫从"只扫 watchdog.sh"扩到全 module、动词从 life_ensure 扩到
+# life_restart —— ops.sh 的 install-engine/install-module 各有一处同形调用，只因
+# "守护通常在场所以走委托分支"而未爆；无守护时（首次安装/守护未武装）那就是 L22 本体。
+# 注释行不算（watchdog.sh:126 与 lifecycle:571 的警告文字里含这个形状）。
+_n22="$(grep -rn '\$(life_ensure\|\$(life_restart' module --include='*.sh' 2>/dev/null \
+  | grep -v ':[[:space:]]*#' | wc -l | tr -d ' ')"
+[ "$_n22" = "0" ] && ok "L22d 全 module \$() 包 ensure/restart 残留 = 0（直调纪律）" \
+                 || no "L22d 出现 $_n22 处 \$(life_ensure/restart…（进程会被 init 收养）"
 # (e) 行为断言：wd_bring_up 必须**消费**判定词记账（S3：只有亲手拉起的才 eng_ours）
 # 变异自证：把 wd_bring_up 改回 \$() 后，_bu_ee 恒空 → eng_ours 不记账 → 此条精确变红
 _p22() { echo 5551; }

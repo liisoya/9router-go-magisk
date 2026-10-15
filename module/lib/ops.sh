@@ -362,7 +362,12 @@ cmd_install_engine() {
   rm -f "$_prev"
   engine_src_ok "$MODDIR/bin/9router-go" && cp "$MODDIR/bin/9router-go" "$_prev" 2>/dev/null
   if mv "$1" "$MODDIR/bin/9router-go" && chmod 0755 "$MODDIR/bin/9router-go"; then
-    if [ "$(life_restart_engine)" = "engine=up" ]; then
+    # 直调 + stdout 落文件（**不能 $()**：那会把 ensure 放进短命子 shell，无守护时引擎
+    # 成了子 shell 的孩子、子 shell 一退出即被 init 收养 —— L22 花一轮真机代价修掉的病；
+    # 2026-10-15 C6 把守卫从"只扫 watchdog.sh"扩到全 module 并清掉这里两处同形调用）
+    _rv_f="$DATA_DIR/restart-verdict.tmp"
+    life_restart_engine > "$_rv_f" 2>/dev/null
+    if [ "$(cat "$_rv_f" 2>/dev/null)" = "engine=up" ]; then
       # 版本号只在新引擎**真的起来**之后才写（旧实现在替换后立即写 → 谎报）
       if [ -n "${2:-}" ]; then
         printf '%s\n' "$2" > "$DATA_DIR/engine-version"
@@ -382,7 +387,7 @@ cmd_install_engine() {
       life_wd_hold_release
       echo "install-failed"
     fi
-    rm -f "$_prev"
+    rm -f "$_prev" "$_rv_f"
   else
     life_wd_hold_release
     echo "install-failed"
@@ -468,13 +473,17 @@ cmd_install_module() {
     engine_version_sync --from-package
   fi
   rm -f "$1"
-  # 与 install-engine 同一语义：只有新引擎**真的起来**才把恢复点刷成这一份（已验证可用）
-  if [ "$(life_restart_engine)" = "engine=up" ]; then
+  # 与 install-engine 同一语义：只有新引擎**真的起来**才把恢复点刷成这一份（已验证可用）。
+  # 直调 + stdout 落文件——同 install-engine：$() 会把引擎孤儿化（L22/C6）
+  _rv_f="$DATA_DIR/restart-verdict.tmp"
+  life_restart_engine > "$_rv_f" 2>/dev/null
+  if [ "$(cat "$_rv_f" 2>/dev/null)" = "engine=up" ]; then
     cp "$MODDIR/bin/9router-go" "$MODDIR/bin/9router-go.bak" 2>/dev/null
     echo "engine=up"
   else
     echo "engine=down"
   fi
+  rm -f "$_rv_f"
 }
 
 CLEAN_KEEP_BACKUPS="${CLEAN_KEEP_BACKUPS:-5}"   # 备份快照保留份数（新的在前）
