@@ -39,7 +39,8 @@ mkdir -p "$STAGING/webroot" "$STAGING/lib" "$STAGING/etc"
 cp module/webroot/*.js module/webroot/*.html "$STAGING/webroot/"
 cp module/lib/*.sh "$STAGING/lib/"
 cp module/service.sh "$STAGING/"
-cp module/etc/engine-version "$STAGING/etc/" 2>/dev/null || true
+cp module/etc/engine-version "$STAGING/etc/" 2>/dev/null \
+  || echo "⚠️ module/etc/engine-version 缺失（干净 checkout / 未跑过 build.sh）—— 本次不推，设备上的引擎版本记账保持旧值（面板可能显示旧版本号）。dev 直推通道与打包通道的差异要看得见，不能静默跳过。"
 # DNS 内置默认集（C3 单一来源）：漏推的后果是 lifecycle 退到硬编码最小集——功能不坏，
 # 但 dev 直推通道与打包通道的内容不一致，排查"为什么设备上行为不同"时会看错方向。
 cp module/etc/dns-defaults "$STAGING/etc/" 2>/dev/null || true
