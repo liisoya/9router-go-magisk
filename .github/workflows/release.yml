@@ -77,6 +77,14 @@ jobs:
           go-version: "1.27"
           cache: true
 
+      # 离线门禁（LIFECYCLE L25 系 / INSTALLFLOW）会执行 module/bin/sqlite3 ——
+      # 它是 aarch64 静态 ELF（与真实发货二进制同一份，跑它才保真）。runner 无
+      # aarch64 binfmt 时 exec 失败，且建 fixture 库的 stderr 被 2>/dev/null 吞掉，
+      # 表现为 L25 系"探活主机为空"误红（2026-10-16 首次 tag 发版实测）。
+      # qemu-user-static 的 postinst 会注册 binfmt 处理器。
+      - name: Install qemu-user-static (run aarch64 module binaries in offline gates)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
+
       # build.sh 七步含全部门禁（web 构建、离线回归、schema 断言、arm64 交叉编译、zip 校验），
       # 任一步失败即熔断；node/python3 由 runner 预装
       - name: Build module zip
