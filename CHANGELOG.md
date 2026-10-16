@@ -1,5 +1,22 @@
 # Changelog
 
+## [v1.9.13-r1] - 2026-10-16
+
+模块版本：同步上游 v1.9.13 引擎 + 架构评审修复。**引擎**：1.9.13 全量（含 OpenCode 免费层 /inference/v1 迁移、请求确定性序列化等上游修复）。**面板**：由合并后源码重建（非旧预构建），带 1.9.13 全部新面板能力（可观测性设置、数据库统计与清理等）。
+
+### 模块特性修复
+- **DNS 自愈如实化**：修复 `dns-upstreams.conf` 时 verdict 如实回报（`recovered` / `recovered-reload-failed` / `stale-config` 等），不再谎报成功；自愈与用户编辑并发时让位（cksum 快照比对），不再覆盖手工配置。
+- **DNS 上游写入收编**：WebUI 保存/恢复默认上游统一走模块 `ops.sh write-upstreams`（备份 → 原子写 → reload），前端不再直接写配置文件。
+- **内置默认上游单一来源**：`module/etc/dns-defaults` 一处定义，脚本 fallback 与 dnsfwd 内置值全部对齐（修复 dnsfwd 内置默认路径少 `-go` 的漂移）。
+
+### 模块基础设施
+- **修复日志轮转断流**：轮转从 `mv` 改 copytruncate——此前引擎/dnsfwd 的 O_APPEND fd 在轮转后写进已删除的 inode，日志静默冻结、磁盘无界增长。
+- **发布清单闸门**：新增 UPDATEJSON 一致性门禁（update.json 落后于 module.prop 即红）——本次修复前 update.json 仍指向 109071，低于该版本号的设备将永远收不到更新。
+- `ops.sh status` 改为纯读（不再因查询创建 0 字节数据库）；service.sh 日志路径统一走 log.sh 唯一声明；清除 `$()` 包 restart 的子 shell 反模式。
+
+### 已知事项
+- `dnsfwd` 二进制已用 GCC 15 (aarch64) 重新交叉编译，与修复后的 `dnsfwd.c` 同步。
+
 ## [v1.9.13] - 2026-10-15
 
 ### OpenCode: append the exact fingerprint even when caller tools collide

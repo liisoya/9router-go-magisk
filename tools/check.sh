@@ -103,7 +103,7 @@ if [ "$OFFLINE" = 1 ]; then
       else
         sh -n "$f" 2>/dev/null || _bad="$_bad $f"
       fi
-    done < <(find module tools -name '*.sh' -type f 2>/dev/null | sort)
+    done < <(find module tools -name '*.sh' -type f -not -path 'tools/third_party/*' 2>/dev/null | sort)
     if [ -z "$_bad" ]; then ok "JS-SYNTAX 全部 shell 脚本语法正确"; else bad "JS-SYNTAX 语法错误：$_bad"; fi
   else
     skip "JS-SYNTAX" "缺少 sh"

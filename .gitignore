@@ -47,3 +47,7 @@ module/bin/9router-go
 module/etc/engine-version
 # IDE local data
 .workbuddy-ai/
+
+# build-dnsfwd.sh 的第三方源码缓存（mbedTLS 解包树，勿入库）
+tools/third_party/
+tools/dnsfwd
