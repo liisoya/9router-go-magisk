@@ -191,6 +191,14 @@ static int load_file(const char *path)
         int n1 = 0, n2 = 0;
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '#' || *p == '\n' || *p == '\r' || *p == 0) continue;
+        /* 候选池元数据（module/etc/dns-candidates，ADR-0010 完整优选）：行首是
+         * "cat=<类> label=<词>" 时跳过这两个 token —— 评审同款格式让候选池文件
+         * 既能进面板芯片，也能被本程序 -f 直接读（不用 shell 先剥一遍）。 */
+        while (strncmp(p, "cat=", 4) == 0 || strncmp(p, "label=", 6) == 0) {
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+            while (*p == ' ' || *p == '\t') p++;
+        }
+        if (*p == '#' || *p == '\n' || *p == '\r' || *p == 0) continue;
         while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' && n1 < (int)sizeof(w1) - 1)
             w1[n1++] = *p++;
         w1[n1] = 0;

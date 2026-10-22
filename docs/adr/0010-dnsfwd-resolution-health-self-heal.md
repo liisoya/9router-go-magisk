@@ -96,10 +96,28 @@
 4. **转发态端到端沉底**（dnsfwd 转发路径）：对锚点主机的每次成功解析异步 TCP 握手一次，
    失败计 `tcpfails`（健康排序权重 ×3，成功查询减压）——自动优选之间的空窗里，坏上游
    也会在分钟级沉到队尾。dnsfwd 重编（GCC 15 aarch64 静态，WITH_DOH=1），与源码同步。
-5. **离线覆盖**：`tools/test-dns-optimize.sh`（O1–O6，23 断言：评分对纯函数 / Top-N /
-   候选池剥元数据 / reoptimize 全链桩测——双确认、让位、写盘形状、strike 清零）；
-   DNSPOOL 门禁 8 断言。真机待验：3 天周期首轮 `beaten-strike=1` → 次轮 `reoptimized`
-   的台账、以及换网后 Top5 实际变化。
+5. **离线覆盖**：`tools/test-dns-optimize.sh`（O1–O7，27 断言：评分对纯函数 / Top-N /
+   候选池剥元数据 / reoptimize 全链桩测——双确认、让位、写盘形状、strike 清零 /
+   TUN 绕行参数）；DNSPOOL 门禁 8 断言。
+6. **真机验收（2026-10-22，Wi-Fi adb 192.168.10.10:5555，CMCC + mihomo TUN）**：
+   两处只会在真机暴露的缺陷被当场抓到并修复——
+   - **dnsfwd 读不了候选池**：`load_file` 把 `cat=明文` 当未知动词跳过，候选池文件
+     直接 `-f` = "没有可用上游"（`none-viable` 根因）。修复：load_file 跳过
+     `cat=`/`label=` token（评审同款格式因此成立：一份文件同时喂面板与 dnsfwd）。
+   - **TUN 劫持探测**：mihomo `dns-hijack any:53` + auto-route 下，dnsfwd 探测的
+     上游 socket 全部经 TUN → 死地址（TEST-NET 192.0.2.99）也答 2/2 100 分——
+     自愈判"ok"、优选判"not-beaten"，整套判据失真（假阴性）。修复：
+     `life_dns_tun_iface` 识别路由表里的 TUN 网卡（`meta`/`utun*`/`tun*`，从
+     `ip route show table all` 的 `dev` 字段取——Android 的 default 散在
+     per-network 表，main 表常常没有 default 行），探测自动追加
+     `-i <物理网卡>`（SO_BINDTODEVICE 绕 TUN）；无 TUN 行为零变化。
+   - 验收链路：装包 1.9.14-r1 → panel 109140/engine 1.9.14 → 注入死上游 →
+     `life_dns_reoptimize` 返回 `reoptimized`（候选池评分 Top5 写盘 + 自定义项
+     保留 + SIGHUP 重载 6 个上游 + 解析恢复）；`-i wlan0` 下候选池分层清晰
+     （明文 100 分 / 域名型 DoT 需自举 0 分），探测数据恢复判别力。
+   - 遗留观察项：mihomo 常驻场景下 TUN 期间"上游全死"的真实自愈（探测绕行后
+     判据已真实，但 mihomo 本身也在兜底解析——两种健康的边界有待一次真实的
+     上游全灭来标定）。
 
 ## 修订（2026-10-15，C3 后续阶段）：内置默认集收敛为单一来源
 

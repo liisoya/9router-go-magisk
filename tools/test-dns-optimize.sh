@@ -145,3 +145,34 @@ _v="$(life_dns_reoptimize)"
 echo
 echo "结果：通过 $PASS / 失败 $FAIL"
 [ "$FAIL" = 0 ]
+
+echo "== O7 TUN 绕行：探测判据在默认路由被 TUN 接管时绑物理网卡（真机 2026-10-22 教训）=="
+# 伪造 ip：default 落 meta（mihomo TUN），wlan0 有次路由
+_tun_dir="$_TMPD/tunbin"
+mkdir -p "$_tun_dir"
+cat > "$_tun_dir/ip" <<IPSTUB
+#!/bin/sh
+# 真机形状（Android/mihomo，2026-10-22）：main 表无 default；default 散在
+# per-network 表 —— table wlan0（物理）在前、table 2022（mihomo TUN）在后。
+case "\$*" in
+  "route show table all"*)
+    printf 'default via 192.168.10.1 dev wlan0 table wlan0 proto static\n'
+    printf 'default dev meta table 2022 metric 1024 pref medium\n' ;;
+  *) : ;;
+esac
+IPSTUB
+chmod 0755 "$_tun_dir/ip"
+PATH="$_tun_dir:$PATH"
+_tun_if="$(life_dns_tun_iface)" && [ "$_tun_if" = "meta" ] \
+  && ok "O7a 默认路由落 meta → 识别为 TUN" || no "O7a 未识别 TUN（got=$_tun_if）"
+_tun_args="$(life_dns_probe_iface_args)"
+[ "$_tun_args" = "-i wlan0" ] \
+  && ok "O7b 绕行参数 = -i wlan0（table all 里非 TUN 的 default）" || no "O7b 绕行参数错误：$_tun_args"
+# 无 TUN（直连默认路由）→ 不追加参数（行为同旧版）
+cat > "$_tun_dir/ip" <<IPSTUB2
+#!/bin/sh
+echo "default via 192.168.10.1 dev wlan0"
+IPSTUB2
+life_dns_tun_iface >/dev/null 2>&1 && no "O7c 直连被误判 TUN" || ok "O7c 直连不判 TUN"
+[ -z "$(life_dns_probe_iface_args)" ] \
+  && ok "O7d 直连时无 -i 参数（行为同旧版）" || no "O7d 直连却带了参数"

@@ -11,6 +11,9 @@
 - **转发态端到端沉底**：dnsfwd 转发路径对锚点主机（= 用户配置的真实供应商域名）的查询做异步 TCP 握手，失败计 `tcpfails`（权重 ×3，成功查询减压）——"答得出但对你的供应商连不通"的上游在健康排序里持续下沉，TLS 失败的连接自动换上游。
 - **手动优选收编**：面板「候选池测速」改走 `ops.sh optimize-dns`（同一 life_dns_reoptimize 实现），页面不再自己编排写盘；probeDns 固定 `--tsv`（加列不再破坏解析）；PROBE_RE 兼容 TSV（rtt 无 ms 后缀）。
 - **修探测判据死角**：fake-ip 上游从写盘候选中显式剔除（此前只罚分，可能仍混入 Top5）；负分排序改为整数毫分 + 正偏移 + LC_ALL=C（浮点负分字符串在 locale 排序下会排到最前，真机/CI 都可能踩）。
+- **TUN 环境探测绕行（真机验收发现）**：mihomo 等 TUN 开启时（`dns-hijack any:53` + auto-route），dnsfwd 探测的上游 socket 被劫持——连 TEST-NET 死地址都答 2/2 100 分，自愈/优选判据整体失真（死上游判活）。lifecycle 探测现在自动识别路由表里的 TUN 网卡（meta/utun*，含 Android per-network table 散布的 default 行），自动 `-i <物理网卡>`（SO_BINDTODEVICE）绕行；无 TUN 时行为同旧版。
+- **dnsfwd 读候选池直读（真机验收发现）**：`load_file` 跳过 `cat=`/`label=` 元数据 token——此前候选池文件直接 `-f` 会报"没有可用上游"（none-viable 根因）；dnsfwd 已重编同步。
+- **真机端到端验收**：Wi-Fi adb 实测（1.9.14-r1 装包 → panel 109140/engine 1.9.14 → 死上游注入 → `reoptimized` 判据词 + 候选池评分 Top5 写盘 + SIGHUP 重载 + 解析恢复；TUN 开/关两种网络形态）。
 
 ### 引擎测试环境修复
 - `TestHandleAudioVoices_elevenlabs` 改 hermetic：`elevenVoicesURL` const → var（同 edgeVoicesURL 桩先例），测试不再打真网 api.elevenlabs.io（§5.4"测试不许碰网络"；此前国内网络必红）；并修正 handler 构造（HandleAudioVoices 挂在 MediaHandler 上，此前构造 ChatHandler 导致桩 transport 永远打不进去）。

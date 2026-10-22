@@ -829,6 +829,35 @@ life_dns_heal_due() {
   [ "$_hd_f" -ge "$LIFE_DNS_HEAL_MIN_FAILS" ] || return 1
   [ $((_hd_n - _hd_a)) -ge "$LIFE_DNS_HEAL_COOLDOWN" ]
 }
+# 纯判定：默认路由是否落在 TUN/代理网卡上（mihomo 等的 meta/utun/fd:: 接口）。
+#   命中返回 0 并把网卡名 echo 出来；未命中返回 1。真机 2026-10-22（CMCC + mihomo TUN）：
+#   TUN 开启时 dnsfwd 的上游 socket 被劫持（dns-hijack any:53 + auto-route）——
+#   连 TEST-NET 死地址都答 2/2 100 分，探测/自愈/优选的判据整体失真（假阴性：
+#   死上游判活、全挂判 ok）。探测必须绕 TUN（-i 绑物理网卡）才说真话。
+life_dns_tun_iface() {
+  # 主表 default 不在（Android 的 default 散在 per-network 表：table wlan0 / table 2022…），
+  # 真机 2026-10-22：`ip route`（main）里根本没有 default 行 —— 只看 main 会漏判。
+  # 判据 = **所有路由表的 default 网卡**里出现 TUN 特征名（mihomo=meta，其他常见 utun/tun）。
+  # 网卡名用 "dev <name>" 定位（default 行形如 "default dev meta table 2022"，$5 是 table 号）。
+  _ti_all="$(ip route show table all 2>/dev/null | awk '$1=="default" { for (i=2;i<NF;i++) if ($i=="dev") { print $(i+1); break } }' | awk '!s[$0]++')"
+  for _ti_if in $_ti_all; do
+    case "$_ti_if" in meta|utun*|tun*|fd::*) echo "$_ti_if"; return 0 ;; esac
+  done
+  return 1
+}
+# I/O：探测侧参数拼装 —— default 路由集里有 TUN 网卡时自动追加 -i <物理网卡>（绕 TUN）。
+#   物理网卡 = 所有表 default 里第一个非 TUN、非 lo/dummy 的网卡（wlan0/rmnet…）。失败不追加（行为同旧版）。
+life_dns_probe_iface_args() {
+  _pi_tun="$(life_dns_tun_iface)" || return 0
+  _pi_all="$(ip route show table all 2>/dev/null | awk '$1=="default" { for (i=2;i<NF;i++) if ($i=="dev") { print $(i+1); break } }' | awk '!s[$0]++')"
+  _pi_phy=""
+  for _pi_if in $_pi_all; do
+    case "$_pi_if" in "$_pi_tun"|lo|dummy0) continue ;; esac
+    _pi_phy="$_pi_if"; break
+  done
+  [ -n "$_pi_phy" ] && echo "-i $_pi_phy"
+  return 0
+}
 # I/O：跑一次上游可达性探测（dnsfwd -P --tsv），对给定真实主机各加一个 -d（≤4）。无主机返回 1。
 #   只读，不改任何状态。-P 模式不绑端口（main 里探测分支在 bind 之前返回），与在跑的守护不冲突；
 #   内置超时（1.5s 明文 / 5s TLS）自限耗时。
@@ -840,8 +869,9 @@ life_dns_probe_output() {
     _po_d="$_po_d -d $_po_h"
   done
   [ -n "$_po_d" ] || return 1
-  # shellcheck disable=SC2086   # _po_d 内主机已过域名形状校验，无空白/特殊字符
-  "$LIFE_DNSFWD" -f "$LIFE_UPSTREAMS" -P --tsv $_po_d 2>/dev/null
+  _po_if="$(life_dns_probe_iface_args)"
+  # shellcheck disable=SC2086   # _po_d 主机已过域名形状校验；_po_if 是固定两词
+  "$LIFE_DNSFWD" $_po_if -f "$LIFE_UPSTREAMS" -P --tsv $_po_d 2>/dev/null
 }
 # 编排：取真实主机 → 首轮（代表，前 LIFE_DNS_ROUND 个）探当前上游 → 判死活。
 #   输出 dead / ok / none（无真实主机可探=无兼容节点或全走远端代理解析 → 不判 DNS，交可达性诊断）。
@@ -939,8 +969,9 @@ life_dns_probe_candidates() {
     _po_d="$_po_d -d $_po_h"
     _po_i=$((_po_i + 1)); [ "$_po_i" -ge "$LIFE_DNS_ROUND" ] && break
   done
-  # shellcheck disable=SC2086  # 主机已过域形状校验
-  "$LIFE_DNSFWD" -f "$_pf" -P --tsv $_po_d 2>/dev/null
+  _po_if="$(life_dns_probe_iface_args)"
+  # shellcheck disable=SC2086  # 主机已过域形状校验；_po_if 是固定两词
+  "$LIFE_DNSFWD" $_po_if -f "$_pf" -P --tsv $_po_d 2>/dev/null
 }
 # 纯判定（离线可断言）：TSV 输出 → 当前配置里会被外部候选击败的最高分（无有效行 → 空）。
 life_dns_best_score_of() { life_dns_scored_pairs | head -n 1 | cut -f1; }
