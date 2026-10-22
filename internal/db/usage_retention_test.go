@@ -94,9 +94,9 @@ func TestPruneRequestDetails_KeepsRecentDropsOld(t *testing.T) {
 	}
 }
 
-// usageHistory is the billing ledger and must survive pruning, whatever its age.
-// The `all` usage period reads it directly, so trimming it would silently change
-// what the dashboard reports as total lifetime spend.
+// Pruning requestDetails must never touch usageHistory: the two have separate
+// retention policies and separate controls. An operator trimming diagnostic
+// records cannot accidentally delete billing rows.
 func TestPruneRequestDetails_NeverTouchesTheLedger(t *testing.T) {
 	repo := retentionTestRepo(t)
 

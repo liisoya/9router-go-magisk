@@ -104,6 +104,13 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 		}
 	}
 
+	// Feature Visibility stores sidebar ids, so the payload is normalized here:
+	// the sidebar must never receive an id it cannot address (navvisibility.go).
+	applyNavVisibilityUpdate(updates)
+	// Display currency stores a code plus a rate table, so the payload is
+	// normalized here: a cost surface must never read a NaN rate (currency.go).
+	applyDisplayCurrencyUpdate(updates)
+
 	if err := h.Repo.UpdateSettingsRaw(updates); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -259,8 +266,7 @@ func (h *DashboardHandler) HandleProxyTest(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	tr := proxy.NewSafeTransport()
-	tr.Proxy = http.ProxyURL(parsed)
+	tr := proxy.NewSafeTransportForProxy(parsed.String())
 	client := &http.Client{
 		Transport: tr,
 		Timeout:   timeout,
@@ -386,6 +392,8 @@ func sanitizeSettings(raw map[string]any) map[string]any {
 	for _, key := range secretSettingKeys {
 		delete(out, key)
 	}
+	sanitizeNavVisibility(out)
+	sanitizeDisplayCurrency(out)
 	out["hasPassword"] = hasPassword
 	return out
 }

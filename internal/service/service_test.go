@@ -8,14 +8,12 @@ import (
 	"testing"
 )
 
-// svcCall records one supervisor invocation intercepted by stubRun.
 type svcCall struct {
 	name string
 	args []string
 }
 
-// stubRun swaps the package command runner for a recorder so tests can assert
-// supervisor ordering without invoking the real init system.
+// stubRun records supervisor calls instead of invoking the real init system.
 func stubRun(t *testing.T) *[]svcCall {
 	t.Helper()
 	previous := run
@@ -45,7 +43,7 @@ func TestRenderSystemdUnit(t *testing.T) {
 			"ExecStart=/usr/local/bin/9router-go --rtk=true",
 			"WantedBy=default.target",
 			"Restart=always",
-			`WorkingDirectory="/usr/local/bin"`,
+			"WorkingDirectory=/usr/local/bin",
 		} {
 			if !strings.Contains(unit, want) {
 				t.Errorf("unit missing %q:\n%s", want, unit)
@@ -72,56 +70,33 @@ func TestRenderSystemdUnit(t *testing.T) {
 		}
 	})
 
-	// ExecStart already went through commandLine, so the same class of path
-	// escaped WorkingDirectory until it was routed through quoteSystemdValue:
-	// systemd unquotes the assignment rather than splitting on whitespace, so
-	// a raw spaced path silently truncated at the space and the unit failed to
-	// parse.
-	t.Run("spaced working directory is quoted", func(t *testing.T) {
+	// WorkingDirectory must stay unquoted: systemd reads the value raw, and a
+	// spaced path needs no quoting because whitespace is not a separator there.
+	t.Run("spaced working directory is written verbatim", func(t *testing.T) {
 		t.Setenv("DATA_DIR", "")
 		unit := renderSystemdUnit("/opt/my apps/9router-go", nil)
-		if !strings.Contains(unit, `WorkingDirectory="/opt/my apps"`) {
-			t.Errorf("WorkingDirectory must quote spaced paths:\n%s", unit)
+		if !strings.Contains(unit, "WorkingDirectory=/opt/my apps\n") {
+			t.Errorf("WorkingDirectory must carry the whole spaced path unquoted:\n%s", unit)
 		}
 	})
 
-	// Two escapes systemd applies that a shell does not: `%` is a specifier
-	// prefix, and a quote inside the value would otherwise close the quoted
-	// string early and truncate the directory.
-	t.Run("working directory escapes systemd syntax", func(t *testing.T) {
-		t.Setenv("DATA_DIR", "")
-		unit := renderSystemdUnit(`/opt/100%"win"/9router-go`, nil)
-		if !strings.Contains(unit, `WorkingDirectory="/opt/100%%\"win\""`) {
-			t.Errorf("WorkingDirectory must escape %% and quotes:\n%s", unit)
+	t.Run("escapeSystemdPath only doubles percent", func(t *testing.T) {
+		tests := []struct{ in, want string }{
+			{"/usr/local/bin", "/usr/local/bin"},
+			{"/opt/my apps", "/opt/my apps"},
+			{`/opt/app\`, `/opt/app\`},
+			{`/opt/a"b`, `/opt/a"b`},
+			{"/opt/100%win", "/opt/100%%win"},
+		}
+		for _, tt := range tests {
+			if got := escapeSystemdPath(tt.in); got != tt.want {
+				t.Errorf("escapeSystemdPath(%q) = %q, want %q", tt.in, got, tt.want)
+			}
 		}
 	})
 
-	// A trailing backslash is the case plain escaping gets wrong: inside double
-	// quotes systemd treats a backslash as starting an escape, so an unescaped
-	// one before the closing quote eats it and the line runs on. This pins the
-	// escaper directly — filepath.Dir cannot produce a trailing separator
-	// without also swallowing the file name.
-	t.Run("quoteSystemdValue escapes a trailing backslash", func(t *testing.T) {
-		if got := quoteSystemdValue(`/opt/app\`); got != `"/opt/app\\"` {
-			t.Errorf("quoteSystemdValue() = %s, want a doubled trailing backslash", got)
-		}
-	})
-
-	// A plain path is quoted too: systemd only unquotes the value rather than
-	// splitting it, so quoting unconditionally is safe and keeps the escaping
-	// uniform.
-	t.Run("quoteSystemdValue quotes a plain path", func(t *testing.T) {
-		if got := quoteSystemdValue("/usr/local/bin"); got != `"/usr/local/bin"` {
-			t.Errorf("quoteSystemdValue() = %s, want the quoted path", got)
-		}
-	})
-
-	// The unit is written for systemd, so its directory must be a POSIX path on
-	// every runner. filepath.Dir returns backslashes on Windows, and without
-	// filepath.ToSlash the rendered unit carried `\usr\local\bin` — a path
-	// systemd cannot resolve. Asserting the absence of a backslash states the
-	// contract instead of a literal only one platform can produce, which is how
-	// this subtest passed on Windows and failed on Linux.
+	// WorkingDirectory must be slash-separated: filepath.Dir yields
+	// backslashes on Windows, which systemd cannot resolve.
 	t.Run("working directory carries no backslash on any runner", func(t *testing.T) {
 		t.Setenv("DATA_DIR", "")
 		unit := renderSystemdUnit("/usr/local/bin/9router-go", nil)
@@ -264,10 +239,8 @@ func TestQuoteArg(t *testing.T) {
 	}
 }
 
-// TestUninstallSystemdUserScopesEveryCall guards the regression that shipped
-// when uninstallSystemd ran `systemctl disable/stop/daemon-reload` without
-// --user: the calls hit the system manager, prompted for root, and left the
-// user unit enabled.
+// TestUninstallSystemdUserScopesEveryCall guards the regression where the
+// uninstall calls omitted --user and hit the system manager instead.
 func TestUninstallSystemdUserScopesEveryCall(t *testing.T) {
 	home := setHome(t)
 	unit := filepath.Join(home, ".config", "systemd", "user", unitName)
@@ -304,8 +277,8 @@ func TestUninstallSystemdUserScopesEveryCall(t *testing.T) {
 	}
 }
 
-// TestUninstallLaunchdUnloadsBeforeRemove pins the cross-backend contract:
-// stop the supervisor before deleting its entry.
+// TestUninstallLaunchdUnloadsBeforeRemove: stop the supervisor before deleting
+// its entry.
 func TestUninstallLaunchdUnloadsBeforeRemove(t *testing.T) {
 	home := setHome(t)
 	plist := filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
@@ -332,8 +305,8 @@ func TestUninstallLaunchdUnloadsBeforeRemove(t *testing.T) {
 	}
 }
 
-// TestUninstallLaunchdReportsFailureWhenRemovalFails ensures a failed delete
-// is not swallowed as success.
+// TestUninstallLaunchdReportsFailureWhenRemovalFails: a failed delete must not
+// be reported as success.
 func TestUninstallLaunchdReportsFailureWhenRemovalFails(t *testing.T) {
 	home := setHome(t)
 	plist := filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")

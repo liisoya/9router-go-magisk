@@ -178,7 +178,7 @@ func (h *OAuthHandler) HandleFreebuffSessionSwitch(w http.ResponseWriter, r *htt
 	if h.Repo != nil {
 		store = h.Repo
 	}
-	result, err := executor.SwitchFreebuffModelWithStore(ctx, store, nil, freebuffAPIBaseURL, token, instanceID, model)
+	result, err := executor.SwitchFreebuffModelWithStore(ctx, store, nil, freebuffAPIBaseURL, token, instanceID, model, nil)
 	if err != nil {
 		// The held seat survives a failed switch, so nothing is lost: the user
 		log.Error("oauth", "freebuff model switch failed", "conn", conn.ID, "model", model, "error", err)

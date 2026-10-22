@@ -79,6 +79,7 @@ const codexUsageHistorySchema = `CREATE TABLE usageHistory (
 	model TEXT,
 	connectionId TEXT,
 	apiKey TEXT,
+	clientKey TEXT,
 	endpoint TEXT,
 	promptTokens INTEGER DEFAULT 0,
 	completionTokens INTEGER DEFAULT 0,

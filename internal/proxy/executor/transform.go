@@ -311,8 +311,13 @@ func buildResponsesBody(body []byte) ([]byte, string, error) {
 	for i, msg := range messages {
 		switch msg.Role {
 		case "system", "developer":
-			if instructions == "" {
-				instructions = ExtractSimpleText(msg.Content)
+			txt := ExtractSimpleText(msg.Content)
+			if txt != "" {
+				if instructions == "" {
+					instructions = txt
+				} else {
+					instructions = instructions + "\n\n" + txt
+				}
 			}
 		case "user":
 			inputItems = append(inputItems, convertUserContent(msg.Content))

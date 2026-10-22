@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
 	"strings"
@@ -79,6 +80,64 @@ type CustomModel struct {
 	Caps          map[string]bool `json:"caps"`
 	ContextWindow int             `json:"contextWindow,omitempty"`
 	MaxOutput     int             `json:"maxOutput,omitempty"`
+}
+
+// UnmarshalJSON reads a customModels row without letting one unusable `caps`
+// value discard the row's limits.
+//
+// `caps` is a map of flags, but rows written by other builds and by hand carry
+// non-boolean metadata in it — a bridge-added row with
+// "thinkingFormat":"effort" is the real-world case. Decoding straight into
+// map[string]bool fails on that value, and because encoding/json/v2 stops at
+// the failing member, every field *after* caps (contextWindow, maxOutput) is
+// left zero. The row then reads as "no limits declared", the substring table
+// takes over, and /v1/models publishes 128000/4096 for an endpoint that
+// declared 1M/64k.
+//
+// Non-boolean capability values are dropped, which is the policy upstream's
+// sanitizeCaps already applies on write: only boolean flags are capabilities.
+// The row itself — ids, name, declared limits — always survives.
+func (cm *CustomModel) UnmarshalJSON(data []byte) error {
+	type row struct {
+		ProviderAlias string         `json:"providerAlias"`
+		ID            string         `json:"id"`
+		Type          string         `json:"type"`
+		Name          string         `json:"name"`
+		Caps          jsontext.Value `json:"caps"`
+		ContextWindow int            `json:"contextWindow,omitempty"`
+		MaxOutput     int            `json:"maxOutput,omitempty"`
+	}
+	var r row
+	if err := json.Unmarshal(data, &r); err != nil {
+		return err
+	}
+	cm.ProviderAlias = r.ProviderAlias
+	cm.ID = r.ID
+	cm.Type = r.Type
+	cm.Name = r.Name
+	cm.ContextWindow = r.ContextWindow
+	cm.MaxOutput = r.MaxOutput
+	cm.Caps = nil
+	if len(r.Caps) == 0 || string(r.Caps) == "null" {
+		return nil
+	}
+	var raw map[string]jsontext.Value
+	if err := json.Unmarshal(r.Caps, &raw); err != nil {
+		// A caps block that is not an object at all is metadata we cannot use,
+		// not a reason to drop the row.
+		return nil
+	}
+	caps := make(map[string]bool, len(raw))
+	for key, value := range raw {
+		var flag bool
+		if err := json.Unmarshal(value, &flag); err == nil {
+			caps[key] = flag
+		}
+	}
+	if len(caps) > 0 {
+		cm.Caps = caps
+	}
+	return nil
 }
 
 // GetCustomModels returns all custom models from kv scope customModels.

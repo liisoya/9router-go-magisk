@@ -137,11 +137,18 @@ func (h *ChatHandler) resolveLiveCatalog(ctx context.Context, conn *models.Provi
 		if cached, ok := liveCatalogCached(cacheKey); ok {
 			return cached, nil
 		}
-		discovered := fetch(ctx, accessToken)
+		// The flight is shared across callers, so the work inside it must not
+		// inherit the leader's cancellation: one client disconnecting would
+		// otherwise cancel the fetch for every waiter, and an empty result
+		// caches nothing, so the next dashboard poll repeats the whole call.
+		// Detaching leaves each fetch's own liveCatalogFastHTTP timeout as the
+		// only bound on the request.
+		flightCtx := context.WithoutCancel(ctx)
+		discovered := fetch(flightCtx, accessToken)
 		if len(discovered) == 0 && liveCatalogRefreshToken(conn) != "" {
 			// Upstream refreshes the credential on 401/403 and retries once.
 			if refreshed, _, rErr := h.forceRefreshOAuthToken(conn.ID); rErr == nil && refreshed != "" {
-				discovered = fetch(ctx, refreshed)
+				discovered = fetch(flightCtx, refreshed)
 			} else if rErr != nil {
 				log.Warn("models", "live catalog token refresh failed", "provider", providerID, "conn", conn.ID, "error", rErr)
 			}

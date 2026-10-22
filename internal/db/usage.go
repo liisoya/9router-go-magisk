@@ -5,6 +5,33 @@ import (
 	"time"
 )
 
+// usageHistoryColumns is the projection every usageHistory reader shares.
+const usageHistoryColumns = `SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
+	       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
+	       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(status, 'ok'), COALESCE(tokens, '{}')
+		FROM usageHistory`
+
+// The three usageHistory reads are named constants because
+// usage_query_plan_test.go runs EXPLAIN QUERY PLAN against them. The plan is the
+// contract: ordering by rowid forces a full scan that grows with the table and
+// runs on the dashboard's 5-second poll, while `timestamp` is covered by
+// idx_uh_ts. Keeping the SQL here means that test pins what these functions
+// execute rather than a copy that could drift (#138).
+const (
+	usageHistorySinceQuery = usageHistoryColumns + `
+		WHERE timestamp >= ?
+		ORDER BY timestamp DESC
+	`
+	usageHistoryBetweenQuery = usageHistoryColumns + `
+		WHERE timestamp > ? AND timestamp <= ?
+		ORDER BY timestamp ASC
+	`
+	usageHistoryRecentQuery = usageHistoryColumns + `
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`
+)
+
 // GetUsageDaily returns the daily usage JSON data for a given date key.
 func (r *Repo) GetUsageDaily(dateKey string) (string, error) {
 	var data string
@@ -16,12 +43,21 @@ func (r *Repo) GetUsageDaily(dateKey string) (string, error) {
 }
 
 // InsertUsageHistory logs a single request's token usage to the usageHistory table.
-func (r *Repo) InsertUsageHistory(provider, model, connectionID, apiKey, endpoint string, promptTokens, completionTokens int, cost float64, status string, totalTokens int, meta string, tokensJSON string) error {
+//
+// clientKey is the CLIENT key that sent the request, masked, and it is what a
+// per-key token budget is measured from (#365). It is a trailing variadic so the
+// call sites that have no client attribution (migrations, fixtures) keep
+// compiling unchanged: only the live request path knows the caller.
+func (r *Repo) InsertUsageHistory(provider, model, connectionID, apiKey, endpoint string, promptTokens, completionTokens int, cost float64, status string, totalTokens int, meta string, tokensJSON string, clientKey ...string) error {
+	attributedTo := ""
+	if len(clientKey) > 0 {
+		attributedTo = clientKey[0]
+	}
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	_, err := r.db.Exec(
-		`INSERT INTO usageHistory (timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		timestamp, provider, model, connectionID, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokensJSON, meta,
+		`INSERT INTO usageHistory (timestamp, provider, model, connectionId, apiKey, clientKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		timestamp, provider, model, connectionID, apiKey, attributedTo, endpoint, promptTokens, completionTokens, cost, status, tokensJSON, meta,
 	)
 	if err != nil {
 		return fmt.Errorf("insert usage history: %w", err)
@@ -75,6 +111,7 @@ type UsageHistoryRow struct {
 }
 
 // GetUsageDailyRecent returns the most recent daily usage records up to limit.
+
 func (r *Repo) GetUsageDailyRecent(limit int) ([]string, error) {
 	rows, err := r.db.Query(`SELECT data FROM usageDaily ORDER BY dateKey DESC LIMIT ?`, limit)
 	if err != nil {
@@ -96,16 +133,140 @@ func (r *Repo) GetUsageDailyRecent(limit int) ([]string, error) {
 	return res, nil
 }
 
+// UsageDailyRow is one usageDaily row: the local date key plus its aggregate
+// payload. The chart endpoint needs the key (the existing
+// GetUsageDailyRecent drops it), so this keeps both.
+type UsageDailyRow struct {
+	DateKey string
+	Data    string
+}
+
+// GetUsageDailyRange returns the most recent daily usage rows up to limit,
+// newest first, each with its dateKey.
+func (r *Repo) GetUsageDailyRange(limit int) ([]UsageDailyRow, error) {
+	rows, err := r.db.Query(`SELECT dateKey, data FROM usageDaily ORDER BY dateKey DESC LIMIT ?`, limit) //nolint:noctx
+	if err != nil {
+		return nil, fmt.Errorf("query usageDaily range: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var res []UsageDailyRow
+	for rows.Next() {
+		var row UsageDailyRow
+		if err := rows.Scan(&row.DateKey, &row.Data); err != nil {
+			return nil, fmt.Errorf("scan usageDaily range: %w", err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usageDaily range: %w", err)
+	}
+	return res, nil
+}
+
+// UsageGroupRow is one provider (or provider+model) aggregate over a time
+// window, used by the usage dashboard's node-health table.
+type UsageGroupRow struct {
+	Provider         string
+	Model            string
+	Requests         int
+	Errors           int
+	PromptTokens     int
+	CompletionTokens int
+	Cost             float64
+	LastUsed         string
+}
+
+const usageGroupStats = `
+	COUNT(*) AS requests,
+	SUM(CASE WHEN status NOT IN ('ok', 'success') THEN 1 ELSE 0 END) AS errors,
+	COALESCE(SUM(promptTokens), 0) AS promptTokens,
+	COALESCE(SUM(completionTokens), 0) AS completionTokens,
+	COALESCE(SUM(cost), 0) AS cost,
+	MAX(timestamp) AS lastUsed
+`
+
+func scanUsageGroupRows(rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}, op string) ([]UsageGroupRow, error) {
+	var res []UsageGroupRow
+	for rows.Next() {
+		var row UsageGroupRow
+		if err := rows.Scan(
+			&row.Provider, &row.Model, &row.Requests, &row.Errors,
+			&row.PromptTokens, &row.CompletionTokens, &row.Cost, &row.LastUsed,
+		); err != nil {
+			return nil, fmt.Errorf("scan usage group %s: %w", op, err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usage group %s: %w", op, err)
+	}
+	return res, nil
+}
+
+// GetUsageGroupByProviderSince aggregates usageHistory per provider since the
+// cutoff. The model column is a constant empty string: provider rows have no
+// single model, and the shared scanner expects both key columns.
+func (r *Repo) GetUsageGroupByProviderSince(since string) ([]UsageGroupRow, error) {
+	rows, err := r.db.Query( //nolint:noctx,rowserrcheck
+		`SELECT COALESCE(provider, ''), '', `+usageGroupStats+`
+		   FROM usageHistory WHERE timestamp >= ? GROUP BY COALESCE(provider, '')`, since)
+	if err != nil {
+		return nil, fmt.Errorf("query usage group by provider: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanUsageGroupRows(rows, "provider")
+}
+
+// GetUsageGroupByModelSince aggregates usageHistory per provider+model since
+// the cutoff.
+func (r *Repo) GetUsageGroupByModelSince(since string) ([]UsageGroupRow, error) {
+	rows, err := r.db.Query( //nolint:noctx,rowserrcheck
+		`SELECT COALESCE(provider, ''), COALESCE(model, ''), `+usageGroupStats+`
+		   FROM usageHistory WHERE timestamp >= ? GROUP BY COALESCE(provider, ''), COALESCE(model, '')`, since)
+	if err != nil {
+		return nil, fmt.Errorf("query usage group by model: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanUsageGroupRows(rows, "model")
+}
+
+// RequestDetailPerfRow is one latency observation from the requestDetails ring.
+type RequestDetailPerfRow struct {
+	Provider string
+	Model    string
+	Data     string
+}
+
+// GetRequestDetailPerf returns the stored payload of every request detail.
+// The ring is retention-bounded, so this stays cheap; it is the gateway's only
+// source of per-request latency for the node-health table.
+func (r *Repo) GetRequestDetailPerf() ([]RequestDetailPerfRow, error) {
+	rows, err := r.db.Query(`SELECT COALESCE(provider, ''), COALESCE(model, ''), data FROM requestDetails`) //nolint:noctx
+	if err != nil {
+		return nil, fmt.Errorf("query request detail perf: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var res []RequestDetailPerfRow
+	for rows.Next() {
+		var row RequestDetailPerfRow
+		if err := rows.Scan(&row.Provider, &row.Model, &row.Data); err != nil {
+			return nil, fmt.Errorf("scan request detail perf: %w", err)
+		}
+		res = append(res, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate request detail perf: %w", err)
+	}
+	return res, nil
+}
+
 // GetUsageHistorySince returns usage history records since the cutoff timestamp.
 func (r *Repo) GetUsageHistorySince(cutoff string) ([]UsageHistoryRow, error) {
-	rows, err := r.db.Query(`
-		SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
-		       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
-		       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(status, 'ok'), COALESCE(tokens, '{}')
-		FROM usageHistory
-		WHERE timestamp >= ?
-		ORDER BY rowid DESC
-	`, cutoff)
+	rows, err := r.db.Query(usageHistorySinceQuery, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query usageHistory since %s: %w", cutoff, err)
 	}
@@ -145,14 +306,7 @@ func (r *Repo) GetUsageHistoryWatermark() (string, error) {
 // window aggregate has yet to fold in. The bounds are exclusive on the low end
 // so a row already folded in at the watermark is never counted twice.
 func (r *Repo) GetUsageHistoryBetween(since, until string) ([]UsageHistoryRow, error) {
-	rows, err := r.db.Query(`
-		SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
-		       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
-		       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(status, 'ok'), COALESCE(tokens, '{}')
-		FROM usageHistory
-		WHERE timestamp > ? AND timestamp <= ?
-		ORDER BY rowid ASC
-	`, since, until)
+	rows, err := r.db.Query(usageHistoryBetweenQuery, since, until)
 	if err != nil {
 		return nil, fmt.Errorf("query usageHistory between %s and %s: %w", since, until, err)
 	}
@@ -176,14 +330,7 @@ func (r *Repo) GetUsageHistoryBetween(since, until string) ([]UsageHistoryRow, e
 
 // GetRecentUsageHistory returns the latest N usage history records.
 func (r *Repo) GetRecentUsageHistory(limit int) ([]UsageHistoryRow, error) {
-	rows, err := r.db.Query(`
-		SELECT timestamp, COALESCE(provider, ''), COALESCE(model, ''), COALESCE(connectionId, ''),
-		       COALESCE(apiKey, ''), COALESCE(endpoint, ''), COALESCE(promptTokens, 0),
-		       COALESCE(completionTokens, 0), COALESCE(cost, 0.0), COALESCE(status, 'ok'), COALESCE(tokens, '{}')
-		FROM usageHistory
-		ORDER BY rowid DESC
-		LIMIT ?
-	`, limit)
+	rows, err := r.db.Query(usageHistoryRecentQuery, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query recent usageHistory: %w", err)
 	}

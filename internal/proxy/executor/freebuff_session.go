@@ -188,7 +188,7 @@ func dropFreebuffLease(store LeaseStore, token, model, instanceID string) {
 // one model per session, so a switch has to release the held instance before
 // admitting a new one. A 404 means the row is already gone — the slot is free,
 // which is the outcome the caller wanted, so it is not an error.
-func releaseFreebuffSession(ctx context.Context, client *http.Client, baseURL, token, instanceID string) (int64, error) {
+func releaseFreebuffSession(ctx context.Context, client *http.Client, baseURL, token, instanceID string, headers map[string]string) (int64, error) {
 	if instanceID == "" {
 		return 0, errors.New("freebuff session release requires an instance id")
 	}
@@ -200,6 +200,7 @@ func releaseFreebuffSession(ctx context.Context, client *http.Client, baseURL, t
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", freebuffCLIUserAgent)
 	req.Header.Set(freebuffInstanceHeader, instanceID)
+	applyRelayHeaders(req, headers, freebuffSessionPath)
 
 	resp, err := DoFreebuffHTTP(ctx, client, req)
 	if err != nil {
@@ -246,22 +247,22 @@ type FreebuffModelSwitch struct {
 // releasing the held slot is the only way to change models without waiting for
 // it to expire. Callers must only invoke this for a deliberate user action:
 // the CLI reverts background requests instead of releasing the slot.
-func SwitchFreebuffModel(ctx context.Context, client *http.Client, baseURL, token, instanceID, newModel string) (*FreebuffModelSwitch, error) {
-	return SwitchFreebuffModelWithStore(ctx, nil, client, baseURL, token, instanceID, newModel)
+func SwitchFreebuffModel(ctx context.Context, client *http.Client, baseURL, token, instanceID, newModel string, headers map[string]string) (*FreebuffModelSwitch, error) {
+	return SwitchFreebuffModelWithStore(ctx, nil, client, baseURL, token, instanceID, newModel, headers)
 }
 
 // SwitchFreebuffModelWithStore is the coordinated variant: after releasing,
 // the old rows are dropped from memory AND the lease table (compare-and-
 // delete per row is impossible without values, so memory is cleared by
 // token while leases expire naturally or are overwritten on re-admit).
-func SwitchFreebuffModelWithStore(ctx context.Context, store LeaseStore, client *http.Client, baseURL, token, instanceID, newModel string) (*FreebuffModelSwitch, error) {
+func SwitchFreebuffModelWithStore(ctx context.Context, store LeaseStore, client *http.Client, baseURL, token, instanceID, newModel string, headers map[string]string) (*FreebuffModelSwitch, error) {
 	if newModel == "" {
 		return nil, errors.New("freebuff model switch requires a model")
 	}
 
 	refund := int64(0)
 	if instanceID != "" {
-		r, err := releaseFreebuffSession(ctx, client, baseURL, token, instanceID)
+		r, err := releaseFreebuffSession(ctx, client, baseURL, token, instanceID, headers)
 		if err != nil {
 			return nil, err
 		}
@@ -272,7 +273,7 @@ func SwitchFreebuffModelWithStore(ctx context.Context, store LeaseStore, client 
 	}
 	clearFreebuffSessionsForToken(token)
 
-	sess, err := requestFreebuffSessionWithStore(ctx, store, client, baseURL, token, newModel)
+	sess, err := requestFreebuffSessionWithStore(ctx, store, client, baseURL, token, newModel, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -358,8 +359,8 @@ func newCountryBlockedError(w http.ResponseWriter, countryCode, reason string) *
 	}
 }
 
-func requestFreebuffSession(ctx context.Context, client *http.Client, baseURL, token, model string) (*freebuffSession, error) {
-	return requestFreebuffSessionWithStore(ctx, nil, client, baseURL, token, model)
+func requestFreebuffSession(ctx context.Context, client *http.Client, baseURL, token, model string, headers map[string]string) (*freebuffSession, error) {
+	return requestFreebuffSessionWithStore(ctx, nil, client, baseURL, token, model, headers)
 }
 
 // requestFreebuffSessionWithStore admits exactly one session per token+model
@@ -372,7 +373,7 @@ func requestFreebuffSession(ctx context.Context, client *http.Client, baseURL, t
 //     No — the server keeps the LAST admitted instance, so the loser must
 //     re-read and follow the winner instead of using its own instanceId.
 //  3. With a nil store the lease steps are skipped (single-process mode).
-func requestFreebuffSessionWithStore(ctx context.Context, store LeaseStore, client *http.Client, baseURL, token, model string) (*freebuffSession, error) {
+func requestFreebuffSessionWithStore(ctx context.Context, store LeaseStore, client *http.Client, baseURL, token, model string, headers map[string]string) (*freebuffSession, error) {
 	if store != nil {
 		freebuffClaimMu.Lock()
 		defer freebuffClaimMu.Unlock()
@@ -380,7 +381,7 @@ func requestFreebuffSessionWithStore(ctx context.Context, store LeaseStore, clie
 			return sess, nil
 		}
 	}
-	sess, err := postFreebuffSession(ctx, client, baseURL, token, model)
+	sess, err := postFreebuffSession(ctx, client, baseURL, token, model, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +399,7 @@ func requestFreebuffSessionWithStore(ctx context.Context, store LeaseStore, clie
 	return sess, nil
 }
 
-func postFreebuffSession(ctx context.Context, client *http.Client, baseURL, token, model string) (*freebuffSession, error) {
+func postFreebuffSession(ctx context.Context, client *http.Client, baseURL, token, model string, headers map[string]string) (*freebuffSession, error) {
 	origin := freebuffOrigin(baseURL)
 	reqURL := origin + freebuffSessionPath
 
@@ -409,6 +410,7 @@ func postFreebuffSession(ctx context.Context, client *http.Client, baseURL, toke
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", freebuffCLIUserAgent)
+	applyRelayHeaders(req, headers, freebuffSessionPath)
 	req.Header.Set("x-freebuff-model", model)
 
 	resp, err := DoFreebuffHTTP(ctx, client, req)

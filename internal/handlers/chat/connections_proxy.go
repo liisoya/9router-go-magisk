@@ -100,6 +100,17 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 		// Name the pool for the log line. The lookup already happened, so this
 		// costs nothing, and "Vercel Relay" answers a question a UUID cannot.
 		connData.ResolvedProxyPool = pool.Name
+
+		if pool.IsEdgeRelay() {
+			// A relay is an HTTPS endpoint that forwards on x-relay-target /
+			// x-relay-path, not a CONNECT proxy. Dialing it with http.ProxyURL
+			// answers "malformed HTTP status code" (see db.ProxyPool.IsEdgeRelay).
+			// getProviderConfig rewrites the base URL to the relay and injects
+			// those headers, so the plain client is the correct transport here —
+			// the request still leaves through the relay, just not as a tunnel.
+			logProxyOnce(connData.ProxyPoolID, proxyURLStr, proxyType)
+			return h.Client, nil
+		}
 	}
 
 	// 2. Fallback to legacy connection proxy
@@ -187,8 +198,7 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) (*http.Cl
 			}
 		}
 
-		baseTransport := internalproxy.NewSafeTransport()
-		baseTransport.Proxy = http.ProxyURL(parsedURL)
+		baseTransport := internalproxy.NewSafeTransportForProxy(parsedURL.String())
 		client = &http.Client{
 			Transport: baseTransport,
 			Timeout:   h.Client.Timeout,

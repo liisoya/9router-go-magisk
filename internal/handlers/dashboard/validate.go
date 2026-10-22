@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +26,31 @@ import (
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/proxy/executor"
 )
+
+// ClassifyUpstreamNetworkError classifies network errors during probe/models fetch.
+// Parity with decolua/9router#4843.
+func ClassifyUpstreamNetworkError(err error) (int, string, string) {
+	if err == nil {
+		return http.StatusOK, "", ""
+	}
+	var netErr net.Error
+	if (errors.As(err, &netErr) && netErr.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout, "UPSTREAM_TIMEOUT", "Request timeout - provider node not responding"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return http.StatusBadGateway, "UPSTREAM_UNREACHABLE", "DNS lookup failed - invalid domain or network issue"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+		return http.StatusBadGateway, "UPSTREAM_UNREACHABLE", "Connection refused - provider node offline or unreachable"
+	}
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return http.StatusBadGateway, "UPSTREAM_UNREACHABLE", "SSL certificate verification failed"
+	}
+	// Fallback for general network or system error
+	return http.StatusBadGateway, "UPSTREAM_UNREACHABLE", err.Error()
+}
 
 // validateProbeTimeout mirrors upstream's AbortSignal.timeout(8000) on probes.
 const validateProbeTimeout = 8 * time.Second
@@ -392,6 +421,15 @@ func (h *DashboardHandler) validateProviderNodeConnection(
 // (GET /models, falling back to a minimal chat request).
 func validateProviderKey(ctx context.Context, provider string, cfg providers.ProviderConfig, apiKey string, psd map[string]any) validateOutcome {
 	if cfg.NoAuth {
+		// gemini-web is the one NoAuth provider whose credential is optional
+		// rather than absent: the site serves an anonymous visitor, and a pasted
+		// cookie only raises the set of models the session may be served. So it
+		// is still probed when one is supplied — "Check" has to be able to tell
+		// a working cookie from a stale one — but an empty credential is not an
+		// error and is not probed.
+		if provider == "gemini-web" && strings.TrimSpace(apiKey) != "" {
+			return validateGeminiWeb(ctx, apiKey)
+		}
 		return validateOutcome{valid: true, supported: true}
 	}
 
@@ -415,6 +453,10 @@ func validateProviderKey(ctx context.Context, provider string, cfg providers.Pro
 		return validateGrokWeb(ctx, apiKey)
 	case "perplexity-web":
 		return validatePerplexityWeb(ctx, apiKey)
+	case "deepseek-web":
+		return validateDeepSeekWeb(ctx, apiKey)
+	case "gemini-web":
+		return validateGeminiWeb(ctx, apiKey)
 	case "qoder", "qoder-cn":
 		return validateQoder(ctx, provider, apiKey, psd)
 	case "v1m":

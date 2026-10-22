@@ -3,6 +3,7 @@ package media
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -87,8 +88,16 @@ func TestHandleSystemone_Opencode_Mock(t *testing.T) {
 }
 
 func TestHandleSystemone_Live_Opencode(t *testing.T) {
+	// This one talks to a real provider, so it is gated the way the other live
+	// tests in this package are (see e2e_media_test.go): off unless asked for.
+	// It used to run on every `go test`, and the free tier it targets now
+	// answers 429 for callers outside its own client, which turned CI red on
+	// main without saying anything about this code.
 	if testing.Short() {
 		t.Skip("skipping live test in short mode")
+	}
+	if os.Getenv("ROUTER_LIVE_E2E") == "" {
+		t.Skip("skipping live systemone network test (set ROUTER_LIVE_E2E=1 to run)")
 	}
 	sqlDB, cleanup := setupEmbeddingsTestDB(t)
 	defer cleanup()

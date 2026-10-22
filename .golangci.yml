@@ -1,0 +1,52 @@
+# golangci-lint configuration — CI v2.x.
+#
+# This file exists to name the linter set explicitly, not to loosen it. CI runs
+# with `--new-from-rev`, so it gates the diff rather than the tree: the repo
+# carries 141 pre-existing findings and 147 files gofmt would rewrite, and a
+# whole-tree gate would fail on its first PR and be disabled by its second. The
+# ratchet is the same shape as web's svelte-check one (AGENTS.md §6.E).
+#
+# Reproduce CI locally:
+#   mkdir -p web/dist && printf '<!doctype html>' > web/dist/index.html
+#   golangci-lint run --new-from-rev="$(git merge-base origin/main HEAD)" ./...
+#
+# Fixing the baseline is a follow-up, and `golangci-lint run` with no filter
+# prints it in full.
+version: "2"
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused. Those four are
+  # what AGENTS.md §4 already asks for by hand: static analysis, dead code, and
+  # the error returns that were dropped.
+  default: standard
+  enable:
+    # The gateway is an HTTP proxy whose hot path is upstream calls. A response
+    # body that is never closed leaks a connection per request against a pooled
+    # transport, and an http.Request built without a context cannot be cancelled
+    # when the client disconnects — both are §4.B rules that only a linter can
+    # enforce on every new call site.
+    - bodyclose
+    - noctx
+    # Covers database/sql the same way: a Rows that is not closed pins a
+    # connection, and an unchecked rows.Err() turns a mid-iteration failure into
+    # a silently truncated result set.
+    - rowserrcheck
+    - sqlclosecheck
+    # Handles the wrapped-error rules of §4.E: comparing errors with == or
+    # parsing err.Error() instead of errors.Is/errors.As.
+    - errorlint
+
+  exclusions:
+    rules:
+      # Tests assert on the fake upstream and share its process, so a leaked
+      # body or an un-cancellable request there costs nothing and the checks add
+      # only noise to files that are already the largest in the tree.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - noctx
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt

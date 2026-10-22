@@ -509,6 +509,9 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 	for _, mRaw := range messagesRaw {
 		if msgMap, ok := mRaw.(map[string]any); ok {
 			normalizeMessageContent(msgMap)
+			if dropForeignMessageKeys(msgMap) {
+				changed = true
+			}
 		}
 	}
 
@@ -594,46 +597,21 @@ func SanitizeClaudePassthrough(body []byte, intentionalPrefill bool) []byte {
 		}
 	}
 
-// Third pass: drop messages whose content carries nothing Anthropic accepts.
-	// isContentfulContent enumerates the block types that count as content, so
-	// an empty array, a blank string and a whitespace-only text turn all go,
-	// while a turn holding only a container_upload (Files API) stays (upstream
-	// #4316). The trailing user turn is kept even when it is empty — the tail
-	// repair below replaces its content instead of letting an assistant turn
-	// become last.
-	var filtered []any
-	for i, mRaw := range messagesRaw {
-		msgMap, ok := mRaw.(map[string]any)
-		if !ok {
-			filtered = append(filtered, mRaw)
-			continue
-		}
-		contentRaw, exists := msgMap["content"]
-		if !exists {
-			filtered = append(filtered, mRaw)
-			continue
-		}
-		if !isContentfulContent(contentRaw) && !isTrailingUserTurn(messagesRaw, i) {
-			changed = true
-			continue
-		}
-		filtered = append(filtered, mRaw)
-	}
-
-// Newer Claude models refuse a body ending on an assistant turn ("does not
-// support assistant message prefill"). A prefill the client wrote itself is
-// its own choice and stays; one that only exists because the cleanup left
-// the last user turn empty is repaired (upstream ensureTrailingUserTurn,
-// open-sse/translator/formats/claude.js:345-349).
-	repaired := EnsureTrailingUserTurn(filtered, intentionalPrefill)
-	if len(repaired) != len(filtered) || !sameTail(repaired, filtered) {
-		filtered = repaired
+	// Third pass: drop messages whose content carries nothing Anthropic accepts
+	// and repair a tail the removal promoted to an assistant turn. The rule
+	// lives in one place because the OpenAI→Claude conversion path needs it too
+	// — see DropNonContentfulClaudeMessages for the emptiness rule and the
+	// trailing-turn repair (upstream #4316, ensureTrailingUserTurn
+	// open-sse/translator/formats/claude.js:345-349).
+	if filtered, dropped := DropNonContentfulClaudeMessages(messagesRaw, intentionalPrefill); dropped {
+		messagesRaw = filtered
 		changed = true
 	}
 	if !changed {
 		return body
 	}
-	req["messages"] = filtered
+	req["messages"] = messagesRaw
+
 	if out, err := json.Marshal(req); err == nil {
 		return out
 	}
@@ -690,6 +668,31 @@ func LastCacheableToolIndex(tools []any) int {
 
 // AnchorClaudeCache ensures prompt-caching breakpoint lands on the last non-deferred tool.
 // Port of open-sse/translator/formats/claude.js#lastCacheableToolIndex / anchorClaudeCache (#3567).
+// claudeMessageKeys are the only keys a Messages API message object accepts.
+// Anthropic answers anything else with
+// "messages.<n>.<key>: Extra inputs are not permitted" and refuses the whole
+// request, so a foreign key that reaches history poisons every later turn.
+var claudeMessageKeys = map[string]struct{}{
+	"role":    {},
+	"content": {},
+}
+
+// dropForeignMessageKeys removes keys Anthropic would reject from one message
+// and reports whether anything was dropped. The usual offender is
+// `reasoning_content`, which OpenAI-shaped clients echo back on assistant turns
+// and which passes through untouched when a combo mixes lanes.
+func dropForeignMessageKeys(msgMap map[string]any) bool {
+	dropped := false
+	for k := range msgMap {
+		if _, ok := claudeMessageKeys[k]; ok {
+			continue
+		}
+		delete(msgMap, k)
+		dropped = true
+	}
+	return dropped
+}
+
 func normalizeMessageContent(msgMap map[string]any) {
 	if c, ok := msgMap["content"].(map[string]any); ok {
 		delete(c, "cache_control")

@@ -622,7 +622,7 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 
 				if fwdErr != nil {
 					if ctx.Err() != nil {
-						lastErr = &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(`{"error":{"message":"client closed request","type":"client_closed_request","code":499}}`)}
+						lastErr = &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(clientClosedBody)}
 						break
 					}
 					if isGuardrailBlock(fwdErr) {
@@ -651,6 +651,20 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 						// which is the scope that actually matters.
 						if providers.IsModelDeprecation(ue.StatusCode, ue.Body) {
 							h.recordModelDeprecation(ctx, modelInfo.Provider, modelInfo.Model, connID, ue)
+							retry.note(ue)
+							lastErr = ue
+							break
+						}
+						// A prompt that does not fit this model fails the same
+						// way on every connection to it, so advancing to the
+						// next combo member is the only move that can succeed
+						// (#338). Breaking here also skips
+						// comboLockRetryable: the account is fine, and cooling
+						// it down would take a healthy connection out of the
+						// rotation.
+						if providers.IsModelFitError(ue.StatusCode, ue.Body) {
+							log.Info("combo", "model too small for request, next member",
+								"provider", modelInfo.Provider, "model", modelInfo.Model)
 							retry.note(ue)
 							lastErr = ue
 							break
@@ -830,7 +844,7 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 
 				if fwdErr != nil {
 					if ctx.Err() != nil {
-						lastErr = &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(`{"error":{"message":"client closed request","type":"client_closed_request","code":499}}`)}
+						lastErr = &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(clientClosedBody)}
 						break
 					}
 					if isGuardrailBlock(fwdErr) {
@@ -852,6 +866,20 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 						// would have nothing left to fail over to.
 						if providers.IsModelDeprecation(ue.StatusCode, ue.Body) {
 							h.recordModelDeprecation(ctx, modelInfo.Provider, modelInfo.Model, connID, ue)
+							retry.note(ue)
+							lastErr = ue
+							break
+						}
+						// A prompt that does not fit this model fails the same
+						// way on every connection to it, so advancing to the
+						// next combo member is the only move that can succeed
+						// (#338). Breaking here also skips
+						// comboLockRetryable: the account is fine, and cooling
+						// it down would take a healthy connection out of the
+						// rotation.
+						if providers.IsModelFitError(ue.StatusCode, ue.Body) {
+							log.Info("combo", "model too small for request, next member",
+								"provider", modelInfo.Provider, "model", modelInfo.Model)
 							retry.note(ue)
 							lastErr = ue
 							break

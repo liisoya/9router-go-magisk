@@ -2,6 +2,7 @@
   import { api, type SystemVersionInfo } from '../api/client'
   import { copyToClipboard } from '../lib/clipboard'
   import { TAB_ROUTES, type ActiveTab } from '../lib/router'
+  import { isNavLinkActive, visibleNavGroups } from '../lib/nav'
 
   export type { ActiveTab }
   let {
@@ -15,6 +16,7 @@
     showUpdateModal = $bindable(false),
     updateInfo = $bindable(null),
     version = $bindable(''),
+    hiddenNav,
   }: {
     activeTab: ActiveTab
     navigate?: (tab: ActiveTab, replace?: boolean) => void
@@ -24,6 +26,7 @@
     showUpdateModal?: boolean
     updateInfo?: SystemVersionInfo | null
     version?: string
+    hiddenNav?: string[]
   } = $props()
   const INSTALL_CMD = '9router-go update'
   let copied = $state(false)
@@ -71,57 +74,16 @@
 
   function handleNav(tab: ActiveTab, e?: MouseEvent) {
     if (e) {
-      if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) return
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || (e.button !== undefined && e.button !== 0)) return
       e.preventDefault()
     }
     navigate(tab)
     onClose?.()
   }
 
-  const mainNavLinks = [
-    { tab: 'endpoint' as ActiveTab, label: 'Endpoint & Key', icon: 'api' },
-    { tab: 'connections' as ActiveTab, label: 'Providers', icon: 'dns' },
-    { tab: 'combos' as ActiveTab, label: 'Combo & Vision Adapter', icon: 'layers' },
-    { tab: 'analytics' as ActiveTab, label: 'Usage', icon: 'bar_chart' },
-    { tab: 'quota' as ActiveTab, label: 'Quota Tracker', icon: 'data_usage' },
-    { tab: 'token-saver' as ActiveTab, label: 'Token Saver', icon: 'savings' },
-    { tab: 'cli-tools' as ActiveTab, label: 'CLI Tools', icon: 'terminal' },
-  ] as const
-
-  const mediaNavLinks = [
-    { tab: 'media-embedding' as ActiveTab, label: 'Embedding', icon: 'data_array' },
-    { tab: 'media-image' as ActiveTab, label: 'Text to Image', icon: 'brush' },
-    { tab: 'media-tts' as ActiveTab, label: 'Text To Speech', icon: 'record_voice_over' },
-    { tab: 'media-stt' as ActiveTab, label: 'Speech To Text', icon: 'mic' },
-    { tab: 'media-video' as ActiveTab, label: 'Video', icon: 'movie' },
-    { tab: 'media-systemone' as ActiveTab, label: 'System One', icon: 'psychology' },
-    { tab: 'media-web' as ActiveTab, label: 'Web Fetch & Search', icon: 'travel_explore' },
-  ] as const
-
-  const systemNavLinks = [
-    { tab: 'proxy-pools' as ActiveTab, label: 'Proxy Pools', icon: 'lan' },
-    { tab: 'skills' as ActiveTab, label: 'Skills', icon: 'extension' },
-    { tab: 'console-log' as ActiveTab, label: 'Console Log', icon: 'terminal' },
-  ] as const
-
-  function isLinkActive(tab: ActiveTab): boolean {
-    if (tab === 'endpoint') {
-      return activeTab === 'endpoint' || activeTab === 'keys'
-    }
-    if (tab === 'console-log') {
-      return activeTab === 'console-log' || activeTab === 'terminal'
-    }
-    // Cache and Compression Analytics are Usage sections (#200): they left the
-    // sidebar, so the Usage entry has to stay lit while one of them is open.
-    if (tab === 'analytics') {
-      return (
-        activeTab === 'analytics' ||
-        activeTab === 'usage-cache' ||
-        activeTab === 'usage-compression'
-      )
-    }
-    return activeTab === tab
-  }
+  // The sidebar and the Settings > Sidebar switch read the same entry list
+  // (web/src/lib/nav.ts), so a hidden entry is hidden in both.
+  const navGroups = $derived(visibleNavGroups(hiddenNav))
 </script>
 
 <aside
@@ -194,133 +156,80 @@
 
   <!-- Navigation -->
   <nav class="flex-1 min-h-0 px-4 py-2 space-y-0.5 overflow-y-auto custom-scrollbar">
-    <!-- 1-7 Main navigation links -->
-    {#each mainNavLinks as item (item.tab)}
-      {@const active = isLinkActive(item.tab)}
-      <a
-        href={TAB_ROUTES[item.tab]}
-        onclick={(e) => handleNav(item.tab, e)}
-        class="flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {active
-          ? 'bg-primary/10 text-primary font-medium'
-          : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
-      >
-        <span
-          class="material-symbols-outlined text-[18px] {active
-            ? 'fill-1'
-            : 'group-hover:text-primary transition-colors'}"
-        >
-          {item.icon}
-        </span>
-        <span class="text-[13px]">{item.label}</span>
-      </a>
-    {/each}
+    {#each navGroups as group (group.id)}
+      <div class="{group.label ? 'pt-3 mt-2' : ''} space-y-0.5">
+        {#if group.label}
+          <p class="px-3 text-xs font-semibold text-text-muted/60 uppercase tracking-wider mb-2">
+            {group.label}
+          </p>
+        {/if}
 
-    <!-- System section header -->
-    <div class="pt-3 mt-2 space-y-0.5">
-      <p class="px-3 text-xs font-semibold text-text-muted/60 uppercase tracking-wider mb-2">
-        System
-      </p>
+        {#each group.entries as entry (entry.id)}
+          {#if entry.kind === 'accordion'}
+            <button
+              type="button"
+              onclick={() => (isMediaOpen = !isMediaOpen)}
+              class="w-full flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {activeTab.startsWith(
+                'media-'
+              )
+                ? 'bg-primary/10 text-primary font-medium'
+                : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
+            >
+              <span class="material-symbols-outlined text-[18px]">{entry.icon}</span>
+              <span class="text-[13px] flex-1 text-left">{entry.label}</span>
+              <span
+                class="material-symbols-outlined text-[14px] transition-transform duration-200"
+                style:transform={isMediaOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
+              >
+                expand_more
+              </span>
+            </button>
 
-      <!-- 8. Media Providers accordion -->
-      <button
-        type="button"
-        onclick={() => (isMediaOpen = !isMediaOpen)}
-        class="w-full flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {activeTab.startsWith(
-          'media-'
-        )
-          ? 'bg-primary/10 text-primary font-medium'
-          : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
-      >
-        <span class="material-symbols-outlined text-[18px]">perm_media</span>
-        <span class="text-[13px] flex-1 text-left">Media Providers</span>
-        <span
-          class="material-symbols-outlined text-[14px] transition-transform duration-200"
-          style:transform={isMediaOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
-        >
-          expand_more
-        </span>
-      </button>
-
-      {#if isMediaOpen}
-        <div class="pl-4 space-y-0.5">
-          {#each mediaNavLinks as item (item.tab)}
-            {@const active = isLinkActive(item.tab)}
+            {#if isMediaOpen}
+              <div class="pl-4 space-y-0.5">
+                {#each entry.children as child (child.id)}
+                  {@const childActive = isNavLinkActive(child.id, activeTab)}
+                  <a
+                    href={TAB_ROUTES[child.id]}
+                    onclick={(e) => handleNav(child.id, e)}
+                    class="flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {childActive
+                      ? 'bg-primary/10 text-primary font-medium'
+                      : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
+                  >
+                    <span
+                      class="material-symbols-outlined text-[16px] {childActive
+                        ? 'fill-1'
+                        : 'group-hover:text-primary transition-colors'}"
+                    >
+                      {child.icon}
+                    </span>
+                    <span class="text-[13px]">{child.label}</span>
+                  </a>
+                {/each}
+              </div>
+            {/if}
+          {:else}
+            {@const active = isNavLinkActive(entry.id, activeTab)}
             <a
-              href={TAB_ROUTES[item.tab]}
-              onclick={(e) => handleNav(item.tab, e)}
+              href={TAB_ROUTES[entry.id]}
+              onclick={(e) => handleNav(entry.id, e)}
               class="flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {active
                 ? 'bg-primary/10 text-primary font-medium'
                 : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
             >
               <span
-                class="material-symbols-outlined text-[16px] {active
+                class="material-symbols-outlined text-[18px] {active
                   ? 'fill-1'
                   : 'group-hover:text-primary transition-colors'}"
               >
-                {item.icon}
+                {entry.icon}
               </span>
-              <span class="text-[13px]">{item.label}</span>
+              <span class="text-[13px]">{entry.label}</span>
             </a>
-          {/each}
-        </div>
-      {/if}
-
-      <!-- 9-11 System links: Proxy Pools, Skills, Console Log -->
-      {#each systemNavLinks as item (item.tab)}
-        {@const active = isLinkActive(item.tab)}
-        <a
-          href={TAB_ROUTES[item.tab]}
-          onclick={(e) => handleNav(item.tab, e)}
-          class="flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {active
-            ? 'bg-primary/10 text-primary font-medium'
-            : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
-        >
-          <span
-            class="material-symbols-outlined text-[18px] {active
-              ? 'fill-1'
-              : 'group-hover:text-primary transition-colors'}"
-          >
-            {item.icon}
-          </span>
-          <span class="text-[13px]">{item.label}</span>
-        </a>
-      {/each}
-
-      <!-- 12. Settings -->
-      <a
-        href={TAB_ROUTES.settings}
-        onclick={(e) => handleNav('settings', e)}
-        class="flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {isLinkActive('settings')
-          ? 'bg-primary/10 text-primary font-medium'
-          : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
-      >
-        <span
-          class="material-symbols-outlined text-[18px] {isLinkActive('settings')
-            ? 'fill-1'
-            : 'group-hover:text-primary transition-colors'}"
-        >
-          settings
-        </span>
-        <span class="text-[13px]">Settings</span>
-      </a>
-
-      <a
-        href={TAB_ROUTES.security}
-        onclick={(e) => handleNav('security', e)}
-        class="flex items-center gap-3 px-3 py-1.5 rounded-lg transition-all group cursor-pointer {isLinkActive('security')
-          ? 'bg-primary/10 text-primary font-medium'
-          : 'text-text-muted hover:bg-surface-2 hover:text-text-main'}"
-      >
-        <span
-          class="material-symbols-outlined text-[18px] {isLinkActive('security')
-            ? 'fill-1'
-            : 'group-hover:text-primary transition-colors'}"
-        >
-          shield_lock
-        </span>
-        <span class="text-[13px]">Security</span>
-      </a>
-    </div>
+          {/if}
+        {/each}
+      </div>
+    {/each}
   </nav>
 
   <!-- Bottom connection summary -->

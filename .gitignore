@@ -20,6 +20,11 @@ _site/
 .9router/
 data/
 
+# Local demo gateway: its SQLite data dir, engine key and captured streams. The
+# key alone is enough to talk to the running gateway as a client, so none of it
+# belongs in a commit.
+.demo/
+
 # Local overrides
 docker-compose.local.yml
 
@@ -51,3 +56,7 @@ module/etc/engine-version
 # build-dnsfwd.sh 的第三方源码缓存（mbedTLS 解包树，勿入库）
 tools/third_party/
 tools/dnsfwd
+
+# A pasted browser-login credential for scripts/deepseek-web-live.sh. Never
+# belongs in a commit, and `git add -A` would otherwise stage it silently.
+.ds-token

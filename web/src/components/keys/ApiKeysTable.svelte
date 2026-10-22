@@ -129,6 +129,14 @@
     return !Number.isNaN(parsed.getTime()) && parsed.getTime() < Date.now()
   }
 
+  // Tokens are shown compactly: a budget is read as a scale ("12.3k of 250k"),
+  // not as a seven-digit number the eye has to parse.
+  function compactTokens(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+    return String(n)
+  }
+
   // Status, policy and creation date share one multi-line cell rather than
   // three columns: an operator reads them as facts about the same key, and the
   // separate columns made the table wider than the row content justified.
@@ -141,13 +149,34 @@
     if ((k.rateLimitConcurrency ?? 0) > 0) {
       badges.push({ label: `${(k.rateLimitConcurrency ?? 0).toLocaleString()} conc`, tone: 'info' })
     }
+    // The spent side travels with the ceiling (#365): a badge naming only the
+    // limit leaves an operator unable to tell a key at 2% of its budget from one
+    // that is already refusing traffic, and exhausted reads as danger.
     if ((k.tokenQuota ?? 0) > 0) {
-      badges.push({ label: `${(k.tokenQuota ?? 0).toLocaleString()} tok quota`, tone: 'info' })
+      const quota = k.tokenQuota ?? 0
+      const used = k.usedTokens ?? 0
+      badges.push({
+        label: `${compactTokens(used)} / ${compactTokens(quota)} tok`,
+        tone: used >= quota ? 'danger' : 'info',
+      })
     }
     if ((k.expiresAt ?? '') !== '') {
       badges.push({ label: isExpired(k) ? 'expired' : 'expires', tone: isExpired(k) ? 'danger' : 'info' })
     }
     return badges
+  }
+
+  // Clearing a spent budget is the recoverable direction — the usage history
+  // stays, the key just stops being charged for it — so it runs without a
+  // confirmation, unlike a rotate or a delete.
+  function handleResetQuota(k: APIKey) {
+    return runExclusive(k.id, async () => {
+      const res = await api.resetApiKeyQuota(k.id)
+      notifications.success(
+        `Token budget reset for "${keyLabel(k)}": ${compactTokens(res.usedTokens)} of ${compactTokens(res.tokenQuota)} spent.`,
+      )
+      onRefresh?.()
+    })
   }
 
   async function runExclusive(id: string, work: () => Promise<void>) {
@@ -370,6 +399,20 @@
           disabled={busyId !== null}
           onSelect={() => handleRotate(k)}
         />
+
+        {#if (k.tokenQuota ?? 0) > 0}
+          <!-- Metered keys get a reset (#365), and it is offered whether or not
+               the budget is spent: an operator raising a ceiling for next month
+               wants the same control as one clearing an exhausted key. The note
+               says what will be cleared. -->
+          <MenuItem
+            label="Reset token quota"
+            icon="restart_alt"
+            note={compactTokens(k.usedTokens ?? 0)}
+            disabled={busyId !== null}
+            onSelect={() => handleResetQuota(k)}
+          />
+        {/if}
 
         <div class="my-1 border-t border-border-subtle" role="separator"></div>
 

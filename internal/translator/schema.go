@@ -142,42 +142,12 @@ func cleanGeminiSchema(schema map[string]any) {
 		delete(schema, "prefixItems")
 	}
 
-	// Ensure every array has an items schema (Gemini protobuf requires it).
-	// Missing items causes: "...items.items: missing field." or "...items: missing field."
+	// Ensure every array carries an items schema with a concrete type (Gemini
+	// protobuf requires both). Missing items, tuple items, or an untyped/empty
+	// items cause: "...items: missing field." / "...items.items: missing field."
+	// normalizeArrayItems only normalizes the shape; the recursion below cleans it.
 	if t, ok := schema["type"].(string); ok && t == "array" {
-		if _, hasItems := schema["items"]; !hasItems {
-			schema["items"] = map[string]any{"type": "string"}
-		} else {
-			// Tuple form: items: [ {...}, {...} ] — take first element as single schema.
-			switch items := schema["items"].(type) {
-			case []any:
-				if len(items) > 0 {
-					if firstMap, ok := items[0].(map[string]any); ok {
-						schema["items"] = firstMap
-					} else {
-						schema["items"] = map[string]any{"type": "string"}
-					}
-				} else {
-					schema["items"] = map[string]any{"type": "string"}
-				}
-			case map[string]any:
-				if len(items) == 0 {
-					schema["items"] = map[string]any{"type": "string"}
-				} else if _, hasType := items["type"]; !hasType {
-					if _, hasProps := items["properties"]; !hasProps {
-						if _, hasItemsInner := items["items"]; !hasItemsInner {
-							if _, hasEnum := items["enum"]; !hasEnum {
-								if _, hasAnyOf := items["anyOf"]; !hasAnyOf {
-									if _, hasOneOf := items["oneOf"]; !hasOneOf {
-										items["type"] = "string"
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
+		schema["items"] = normalizeArrayItems(schema["items"])
 	}
 
 	// Fix misplaced `required` inside `properties` (common generator bug: required as property instead of sibling)
@@ -225,11 +195,17 @@ func cleanGeminiSchema(schema map[string]any) {
 		switch items := itemsRaw.(type) {
 		case map[string]any:
 			cleanGeminiSchema(items)
+			if t, ok := schema["type"].(string); ok && t == "array" {
+				schema["items"] = normalizeArrayItems(schema["items"])
+			}
 		case []any:
 			for _, elem := range items {
 				if elemMap, ok := elem.(map[string]any); ok {
 					cleanGeminiSchema(elemMap)
 				}
+			}
+			if t, ok := schema["type"].(string); ok && t == "array" {
+				schema["items"] = normalizeArrayItems(schema["items"])
 			}
 		}
 	}
@@ -308,6 +284,66 @@ func cleanGeminiSchema(schema map[string]any) {
 		}
 		schema["required"] = []string{"reason"}
 	}
+}
+
+// stringItems is the permissive placeholder Gemini accepts for an array whose
+// items carry nothing usable. Always a fresh map: the recursion below mutates it.
+func stringItems() map[string]any { return map[string]any{"type": "string"} }
+
+// normalizeArrayItems reduces whatever an array carries under `items` to a
+// single schema object with a type Gemini can parse: a tuple list collapses to
+// one entry, an untyped object infers its type, and an empty or non-object
+// value falls back to {"type": "string"} (upstream #4798).
+func normalizeArrayItems(raw any) map[string]any {
+	switch items := raw.(type) {
+	case map[string]any:
+		if len(items) == 0 {
+			// Empty map, e.g. left over after title/default were stripped:
+			// reaching Gemini as-is is the reported "items.items: missing field".
+			return stringItems()
+		}
+		inferItemsType(items)
+		return items
+	case []any:
+		// Tuple form (draft-04/07 items list). Skip empty entries so
+		// `[{}, {...}]` keeps the one that describes something instead of
+		// collapsing into the empty-object placeholder.
+		for _, elem := range items {
+			if m, ok := elem.(map[string]any); ok && len(m) > 0 {
+				inferItemsType(m)
+				return m
+			}
+		}
+		return stringItems()
+	default:
+		// Missing, null, or a non-schema scalar (items: true).
+		return stringItems()
+	}
+}
+
+// inferItemsType fills in a missing `type` from the keys the item schema does
+// carry. anyOf/oneOf are left alone: flattening them may pick a different type.
+func inferItemsType(items map[string]any) {
+	if _, hasType := items["type"]; hasType {
+		return
+	}
+	if _, hasAnyOf := items["anyOf"]; hasAnyOf {
+		return
+	}
+	if _, hasOneOf := items["oneOf"]; hasOneOf {
+		return
+	}
+	if _, hasProps := items["properties"]; hasProps {
+		items["type"] = "object"
+		return
+	}
+	if _, hasNested := items["items"]; hasNested {
+		items["type"] = "array"
+		return
+	}
+	// Covers the enum case too: cleanGeminiSchema stringifies enum values and
+	// Gemini requires type:"string" alongside them.
+	items["type"] = "string"
 }
 
 // CleanParametersSchema parses raw JSON schema, cleans it, and returns it.

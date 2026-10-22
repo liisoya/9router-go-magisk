@@ -1,10 +1,11 @@
 package db
 
 import (
-	"database/sql"
 	"crypto/rand"
+	"database/sql"
 	json "encoding/json/v2"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,12 @@ type ProxyPool struct {
 // headers name, so it must never be dialed with http.ProxyURL — that produces
 // "malformed HTTP status code".
 //
+// A pool typed "http" (or with no type) whose URL sits on a known edge platform
+// is still a relay: those hosts answer HTTP requests, not CONNECT tunnels, so a
+// pasted relay URL created with the wrong type would otherwise be dialed as a
+// proxy and every request would fail. The URL host decides in that case, which is
+// what keeps this predicate and the pool's actual transport from disagreeing.
+//
 // One predicate for all four platforms: they share a contract, so a fifth edge
 // runtime belongs here rather than in every caller's own list.
 func (p *ProxyPool) IsEdgeRelay() bool {
@@ -41,9 +48,34 @@ func (p *ProxyPool) IsEdgeRelay() bool {
 	switch p.Type {
 	case "vercel", "cloudflare", "deno", "netlify":
 		return true
+	case "", "http":
+		for _, u := range p.URLs {
+			if IsEdgeRelayURL(u) {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}
+}
+
+// IsEdgeRelayURL reports whether a URL is hosted on a platform that serves edge
+// relays rather than CONNECT proxies (Vercel, Cloudflare Workers, Deno Deploy,
+// Netlify Functions). It exists so a relay URL pasted into a pool declared as a
+// plain HTTP proxy is recognised for what it is before any dial.
+func IsEdgeRelayURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, suffix := range []string{"vercel.app", "workers.dev", "deno.dev", "netlify.app"} {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true
+		}
+	}
+	return strings.HasSuffix(strings.ToLower(u.Path), "/.netlify/functions/relay")
 }
 
 var proxyPoolCache sync.Map // map[string]*ProxyPool

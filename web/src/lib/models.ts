@@ -55,6 +55,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "cursor": "cu",
   "deepgram": "dg",
   "deepseek": "ds",
+  "deepseek-web": "ds-web",
   "devin-cli": "devin-cli",
   "elevenlabs": "elevenlabs",
   "fal-ai": "fal",
@@ -64,6 +65,7 @@ export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {
   "freebuff": "fb",
   "gemini": "gemini",
   "gemini-cli": "gc",
+  "gemini-web": "gweb",
   "github": "gh",
   "gitlab": "gitlab",
   "glm": "glm",
@@ -340,6 +342,26 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "gemini-3.5-flash-lite",
       "name": "Gemini 3.5 Flash Lite"
+    },
+    {
+      "id": "gemini-4-argon-high",
+      "name": "Gemini 4 Argon (High)",
+      "upstreamModelId": "gemini-4-argon-high(high)"
+    },
+    {
+      "id": "gemini-4-argon-medium",
+      "name": "Gemini 4 Argon (Medium)",
+      "upstreamModelId": "gemini-4-argon-medium(medium)"
+    },
+    {
+      "id": "gemini-4-argon-low",
+      "name": "Gemini 4 Argon (Low)",
+      "upstreamModelId": "gemini-4-argon-low(low)"
+    },
+    {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon",
+      "upstreamModelId": "gemini-4-argon-medium(medium)"
     },
     {
       "id": "gemini-3.8-flash-high",
@@ -1002,6 +1024,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "deepseek-v4.1-flash",
       "name": "DeepSeek-V4.1-Flash"
+    },
+    {
+      "id": "kimi-k2.8-preview",
+      "name": "Kimi-K2.8-Preview"
     }
   ],
   "cx": [
@@ -1728,6 +1754,64 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "DeepSeek V3.2 Reasoner"
     }
   ],
+  "deepseek-web": [
+    {
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro"
+    },
+    {
+      "id": "deepseek-v4-pro-think",
+      "name": "DeepSeek V4 Pro Think"
+    },
+    {
+      "id": "deepseek-v4-pro-search",
+      "name": "DeepSeek V4 Pro Search"
+    },
+    {
+      "id": "deepseek-v4-pro-think-search",
+      "name": "DeepSeek V4 Pro Think+Search"
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash"
+    },
+    {
+      "id": "deepseek-v4-flash-think",
+      "name": "DeepSeek V4 Flash Think"
+    },
+    {
+      "id": "deepseek-v4-flash-search",
+      "name": "DeepSeek V4 Flash Search"
+    },
+    {
+      "id": "deepseek-v4-flash-think-search",
+      "name": "DeepSeek V4 Flash Think+Search"
+    },
+    {
+      "id": "deepseek-chat",
+      "name": "DeepSeek Chat"
+    },
+    {
+      "id": "deepseek-reasoner",
+      "name": "DeepSeek Reasoner"
+    },
+    {
+      "id": "DeepSeek-R1",
+      "name": "DeepSeek R1"
+    },
+    {
+      "id": "DeepSeek-R1-Search",
+      "name": "DeepSeek R1 Search"
+    },
+    {
+      "id": "DeepSeek-V3.2",
+      "name": "DeepSeek V3.2"
+    },
+    {
+      "id": "DeepSeek-Search",
+      "name": "DeepSeek Search"
+    }
+  ],
   "devin-cli": [
     {
       "id": "swe-1.6-fast",
@@ -2010,6 +2094,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
   ],
   "gc": [
     {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon"
+    },
+    {
       "id": "gemini-3.1-pro-preview",
       "name": "Gemini 3.1 Pro Preview"
     },
@@ -2039,6 +2127,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     }
   ],
   "gemini": [
+    {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon"
+    },
     {
       "id": "gemini-3.8-flash",
       "name": "Gemini 3.8 Flash"
@@ -2158,6 +2250,18 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "kind": "stt"
     },
     {
+      "id": "gemini-2.5-flash-native-audio-preview-09-17",
+      "name": "Gemini Live Transcription (Realtime)",
+      "params": [
+        "language",
+        "prompt",
+        "system_instruction",
+        "setup_timeout_ms",
+        "turn_timeout_ms"
+      ],
+      "kind": "stt"
+    },
+    {
       "id": "gemini-3.1-flash-tts-preview",
       "name": "Gemini 3.1 Flash TTS",
       "kind": "tts"
@@ -2177,6 +2281,44 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "name": "Embedding 001",
       "dimensions": 768,
       "kind": "embedding"
+    }
+  ],
+  "gemini-web": [
+    {
+      "id": "gemini-3.1-pro",
+      "name": "Gemini 3.1 Pro"
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "name": "Gemini 3.7 Flash"
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "name": "Gemini 3.1 Flash-Lite"
+    },
+    {
+      "id": "gemini-pro",
+      "name": "Gemini Pro"
+    },
+    {
+      "id": "gemini-flash",
+      "name": "Gemini Flash"
+    },
+    {
+      "id": "gemini-flash-lite",
+      "name": "Gemini Flash-Lite"
+    },
+    {
+      "id": "gemini-argon",
+      "name": "Gemini Argon"
+    },
+    {
+      "id": "gemini-3-pro",
+      "name": "Gemini 3 Pro"
+    },
+    {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon"
     }
   ],
   "gh": [
@@ -2254,8 +2396,8 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
       "kind": "embedding"
     },
     {
-      "id": "text-embedding-3-large",
-      "name": "Text Embedding 3 Large (GitHub)",
+      "id": "text-embedding-ada-002",
+      "name": "Text Embedding Ada 002 (GitHub)",
       "kind": "embedding"
     }
   ],
@@ -3811,6 +3953,26 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     {
       "id": "muse-spark-1.3-contributor",
       "name": "Muse Spark 1.3 Contributor"
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5"
+    },
+    {
+      "id": "gemini-4-argon-contributor",
+      "name": "Gemini 4 Argon Contributor"
+    },
+    {
+      "id": "longcat-2.5-preview-free",
+      "name": "LongCat 2.5 Preview (Free)"
+    },
+    {
+      "id": "step-5-preview",
+      "name": "Step 5 Preview"
+    },
+    {
+      "id": "beam-free",
+      "name": "Beam (Free)"
     }
   ],
   "oc": [
@@ -4928,6 +5090,10 @@ export const BUILTIN_MODELS_BY_PROVIDER: Record<string, ProviderModel[]> = {
     }
   ],
   "vertex": [
+    {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon"
+    },
     {
       "id": "gemini-3.1-pro-preview",
       "name": "Gemini 3.1 Pro Preview"

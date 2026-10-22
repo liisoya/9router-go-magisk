@@ -31,6 +31,9 @@ type TokenSaverConfig struct {
 	ponytailLevel           string
 	adhdEnabled             bool
 	adhdLevel               string
+	systemPromptEnabled     bool
+	systemPromptPrefix      string
+	systemPromptSuffix      string
 	injectionGuardEnabled   bool
 	semanticCacheEnabled    bool
 	semanticCacheTTL        int
@@ -40,12 +43,12 @@ type TokenSaverConfig struct {
 // NewTokenSaverConfig creates config with initial values.
 func NewTokenSaverConfig(rtk, caveman, ponytail bool) *TokenSaverConfig {
 	return &TokenSaverConfig{
-		rtkEnabled:              rtk,
-		rtkMode:                 "simple",
-		rtkIntensity:            "standard",
-		rtkMaxLines:             100,
-		rtkMaxChars:             8000,
-		rtkDeduplicate:          true,
+		rtkEnabled:     rtk,
+		rtkMode:        "simple",
+		rtkIntensity:   "standard",
+		rtkMaxLines:    100,
+		rtkMaxChars:    8000,
+		rtkDeduplicate: true,
 		rtkCategories: map[string]bool{
 			"git":     true,
 			"build":   true,
@@ -66,6 +69,9 @@ func NewTokenSaverConfig(rtk, caveman, ponytail bool) *TokenSaverConfig {
 		ponytailLevel:           "full",
 		adhdEnabled:             false,
 		adhdLevel:               "full",
+		systemPromptEnabled:     false,
+		systemPromptPrefix:      "",
+		systemPromptSuffix:      "",
 		injectionGuardEnabled:   true, // on by default; toggle via settings
 		semanticCacheEnabled:    false,
 		semanticCacheTTL:        1440,
@@ -166,6 +172,36 @@ func (c *TokenSaverConfig) SetADHD(v bool, level ...string) {
 	if len(level) > 0 && level[0] != "" {
 		c.adhdLevel = level[0]
 	}
+}
+
+// SystemPromptEnabled reports whether global system prompt injection is on.
+func (c *TokenSaverConfig) SystemPromptEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.systemPromptEnabled
+}
+
+// SystemPromptPrefix returns the text that must lead the system prompt.
+func (c *TokenSaverConfig) SystemPromptPrefix() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.systemPromptPrefix
+}
+
+// SystemPromptSuffix returns the text that must end the system prompt.
+func (c *TokenSaverConfig) SystemPromptSuffix() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.systemPromptSuffix
+}
+
+// SetSystemPrompt updates both slots atomically.
+func (c *TokenSaverConfig) SetSystemPrompt(enabled bool, prefix, suffix string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.systemPromptEnabled = enabled
+	c.systemPromptPrefix = prefix
+	c.systemPromptSuffix = suffix
 }
 
 // InjectionGuardEnabled reports whether the prompt-injection detector is on.
@@ -337,6 +373,9 @@ func (c *TokenSaverConfig) UpdateFromSettings(s *db.SettingsData) {
 	if s.ADHDLevel != "" {
 		c.adhdLevel = s.ADHDLevel
 	}
+	c.systemPromptEnabled = s.SystemPromptEnabled
+	c.systemPromptPrefix = s.SystemPromptPrefix
+	c.systemPromptSuffix = s.SystemPromptSuffix
 	c.semanticCacheEnabled = s.SemanticCacheEnabled
 	if s.SemanticCacheTTL > 0 {
 		c.semanticCacheTTL = s.SemanticCacheTTL

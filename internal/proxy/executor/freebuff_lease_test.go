@@ -87,7 +87,7 @@ func TestFreebuffLease_TwoClaimersConverge(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			s, err := requestFreebuffSessionWithStore(context.Background(), store, srv.Client(), srv.URL, token, model)
+			s, err := requestFreebuffSessionWithStore(context.Background(), store, srv.Client(), srv.URL, token, model, nil)
 			if err != nil {
 				t.Errorf("claimer %d: %v", i, err)
 				return
@@ -131,7 +131,7 @@ func TestFreebuffLease_FollowerReadsNoPost(t *testing.T) {
 	clearFreebuffSession(token, model)
 
 	// Sibling admits first (separate memory, same store).
-	sib, err := requestFreebuffSessionWithStore(context.Background(), store, srv.Client(), srv.URL, token, model)
+	sib, err := requestFreebuffSessionWithStore(context.Background(), store, srv.Client(), srv.URL, token, model, nil)
 	if err != nil || sib.InstanceID != "inst-sib" {
 		t.Fatalf("sibling admit failed: %+v %v", sib, err)
 	}
@@ -186,7 +186,7 @@ func TestFreebuffLease_NilStoreUnchanged(t *testing.T) {
 
 	const token, model = "tok-nil", "m-nil"
 	clearFreebuffSession(token, model)
-	sess, err := requestFreebuffSession(context.Background(), srv.Client(), srv.URL, token, model)
+	sess, err := requestFreebuffSession(context.Background(), srv.Client(), srv.URL, token, model, nil)
 	if err != nil || sess.InstanceID != "inst-x" {
 		t.Fatalf("nil-store admit failed: %+v %v", sess, err)
 	}
@@ -234,7 +234,7 @@ func TestFreebuffLease_SQLiteConverge(t *testing.T) {
 			// Separate memory per "process" is the same map in-test; clear
 			// between attempts is unnecessary: the claim mutex + lease
 			// decide the winner regardless of L1.
-			s, err := requestFreebuffSessionWithStore(context.Background(), stores[i], srv.Client(), srv.URL, token, model)
+			s, err := requestFreebuffSessionWithStore(context.Background(), stores[i], srv.Client(), srv.URL, token, model, nil)
 			if err == nil && s != nil {
 				ids[i] = s.InstanceID
 			}

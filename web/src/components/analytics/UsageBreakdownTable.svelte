@@ -4,7 +4,6 @@
   import ProviderArtwork from '../providers/ProviderArtwork.svelte'
   import {
     fmt,
-    fmtCost,
     timeAgo,
     TABLE_OPTIONS,
     type StatsData,
@@ -12,6 +11,7 @@
     type ViewMode,
     type UsageItem
   } from './types'
+  import { costIn } from '../../lib/currency.svelte'
 
   let { stats = {} }: { stats?: StatsData } = $props()
 
@@ -147,7 +147,7 @@
                 </td>
                 {#if viewMode === 'costs'}
                   <td class="py-3 px-4 text-right font-mono font-bold text-warning">
-                    {fmtCost(row.cost)}
+                    {costIn(row.cost ?? 0)}
                   </td>
                 {:else}
                   <td class="py-3 px-4 text-right font-mono text-brand-500">

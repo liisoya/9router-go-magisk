@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"crypto/sha1"
 	json "encoding/json/v2"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/proxy"
+
+	"github.com/google/uuid"
 )
 
 // ForwardCodebuddyCN forwards to Tencent CodeBuddy with force-stream
@@ -32,8 +35,29 @@ func ForwardCodebuddyCN(w http.ResponseWriter, req *Request) error {
 	}
 
 	ctx := req.Ctx
+	cfg := req.Config
+	// The intl gateway (codebuddy.ai) added "channel verification": requests
+	// without the X-Conversation-* header family the official IDE sends on
+	// every turn are rejected with HTTP 400 code 11128 ("conversation id
+	// missing") — 9router issue #4892. A/B against the live upstream with the
+	// same credentials and body: family absent -> 11128, family present ->
+	// 200 SSE. codebuddy-cn (copilot.tencent.com) is not gated, so only the
+	// intl BaseURL gets the family. Headers merge into a config copy so the
+	// shared StaticHeaders map is never mutated.
+	if cfg != nil && strings.Contains(cfg.BaseURL, "codebuddy.ai") {
+		merged := make(map[string]string, len(cfg.StaticHeaders)+3)
+		for k, v := range cfg.StaticHeaders {
+			merged[k] = v
+		}
+		for k, v := range codebuddyConversationHeaders(req, body) {
+			merged[k] = v
+		}
+		cfgCopy := *cfg
+		cfgCopy.StaticHeaders = merged
+		cfg = &cfgCopy
+	}
 	// Always forward as stream — CodeBuddy rejects stream=false
-	resp, err := proxy.ForwardOpenAI(ctx, req.Client, req.Config, req.APIKey, body, true)
+	resp, err := proxy.ForwardOpenAI(ctx, req.Client, cfg, req.APIKey, body, true)
 	if err != nil {
 		return fmt.Errorf("ForwardCodebuddyCN upstream: %w", err)
 	}
@@ -120,6 +144,86 @@ func transformCodebuddyBody(body []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(reqMap)
+}
+
+// codebuddyConversationHeaders builds the X-Conversation-* header family the
+// intl gateway requires (see ForwardCodebuddyCN). Mirrors the official IDE:
+// a conversation id derived stably from the session key (uuid5-shaped, so
+// retries of the same turn and account failovers keep the same conversation),
+// plus fresh UUIDs per request and per message.
+func codebuddyConversationHeaders(req *Request, body []byte) map[string]string {
+	sessionKey := req.SessionID
+	if sessionKey == "" {
+		if m, ok := req.ConnData["sessionId"].(string); ok {
+			sessionKey = m
+		}
+	}
+	if sessionKey == "" {
+		sessionKey = firstUserText(body)
+	}
+	var convID string
+	if sessionKey != "" {
+		convID = stableConversationUUID("codebuddy-intl:" + sessionKey)
+	} else {
+		convID = uuid.NewString()
+	}
+	return map[string]string{
+		"X-Conversation-ID":         convID,
+		"X-Conversation-Request-ID": uuid.NewString(),
+		"X-Conversation-Message-ID": uuid.NewString(),
+	}
+}
+
+// stableConversationUUID derives an RFC-4122-v5-shaped UUID from key via
+// SHA-1, matching the JS executor's derivation so the same session key maps
+// to the same conversation id across implementations.
+func stableConversationUUID(key string) string {
+	sum := sha1.Sum([]byte(key))
+	var b [16]byte
+	copy(b[:], sum[:16])
+	b[6] = (b[6] & 0x0f) | 0x50 // version 5
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	u, err := uuid.FromBytes(b[:])
+	if err != nil {
+		return uuid.NewString()
+	}
+	return u.String()
+}
+
+// firstUserText extracts the opening user message text from an OpenAI-shaped
+// body (string or typed blocks) to use as a conversation-key fallback.
+func firstUserText(body []byte) string {
+	var reqMap map[string]any
+	if err := json.Unmarshal(body, &reqMap); err != nil {
+		return ""
+	}
+	msgs, _ := reqMap["messages"].([]any)
+	for _, raw := range msgs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		if role != "user" {
+			continue
+		}
+		switch content := m["content"].(type) {
+		case string:
+			return content
+		case []any:
+			var sb strings.Builder
+			for _, blk := range content {
+				if bm, ok := blk.(map[string]any); ok {
+					if t, ok := bm["text"].(string); ok {
+						sb.WriteString(t)
+					}
+				}
+			}
+			return sb.String()
+		}
+		return ""
+	}
+	return ""
 }
 
 // sseToOpenAIJSON re-aggregates OpenAI chat-completions SSE chunks into a

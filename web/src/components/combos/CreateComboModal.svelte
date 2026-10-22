@@ -89,7 +89,7 @@
     draggedIdx = null
     dragOverIdx = null
   }
-  const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/
+  const VALID_NAME_REGEX = /^[a-zA-Z0-9_.-]+$/
 
   function validateModalName(name: string): boolean {
     if (!name.trim()) {

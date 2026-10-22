@@ -328,7 +328,8 @@ func TestNormalizeZenResponsesBody_ReasoningShapes(t *testing.T) {
 
 // Paid ids stay on the keyed /zen/v1 lane with the v1 identity — including
 // big-pickle, which has no live 403 evidence and the lane table carries as
-// paid chat, so it must not be swept into the inference gate.
+// paid chat, so it must not be swept into the inference gate. The -free suffix
+// rule added for #327 must not reach a bare paid id like this one.
 func TestForwardOpencodeZen_KeyedLaneStaysOnZenV1(t *testing.T) {
 	tests := []struct {
 		model string
@@ -386,6 +387,53 @@ func TestForwardOpencodeZen_KeyedLaneStaysOnZenV1(t *testing.T) {
 // Free-tier ids 403 on the keyed lane ("free tier can only be used from within
 // OpenCode", probed live), so they travel exactly like free-executor requests:
 // inference endpoint, Bearer public, v2 cli identity and fingerprint.
+// The shaper must follow the gate the request lands on, not the lane it arrived
+// from. A free id is forwarded to the keyless inference gate from every lane,
+// and that gate wants the genuine CLI 2.x read/shell definitions; the legacy
+// quartet is the /zen/v1 fingerprint and is refused there.
+//
+// This pins the rule directly rather than through a lane, because no free id is
+// served on the messages lane today — the bug this guards (the messages lane
+// shaping every request as paid) was therefore invisible to every lane test.
+func TestZenShapedBodyFollowsTheDestinationGate(t *testing.T) {
+	client := []byte(`{"model":"x","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"Bash","parameters":{"type":"object"}}}]}`)
+
+	t.Run("free id gets the CLI 2.x fingerprint", func(t *testing.T) {
+		out, _ := zenShapedBody(client, "deepseek-v4-flash-free", true)
+		var payload map[string]any
+		if err := json.Unmarshal(out, &payload); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		raw, _ := payload["tools"].([]any)
+		names := map[string]bool{}
+		for _, tool := range raw {
+			if m, ok := tool.(map[string]any); ok {
+				if fn, ok := m["function"].(map[string]any); ok {
+					if n, ok := fn["name"].(string); ok {
+						names[n] = true
+					}
+				}
+			}
+		}
+		if !names["read"] || !names["shell"] {
+			t.Errorf(`a free request must carry the genuine "read" and "shell" fingerprint, got %v`, names)
+		}
+		if names["bash"] || names["glob"] || names["grep"] {
+			t.Errorf("a free request must not receive the legacy quartet, got %v", names)
+		}
+	})
+
+	t.Run("paid id keeps the legacy quartet collapse", func(t *testing.T) {
+		out, nameMap := zenShapedBody(client, "deepseek-v4-pro", false)
+		if nameMap["bash"] != "Bash" {
+			t.Errorf("paid request must collapse Bash -> bash, got map %v", nameMap)
+		}
+		if !strings.Contains(string(out), `"name":"bash"`) {
+			t.Errorf("paid request must declare bash, got %s", out)
+		}
+	})
+}
+
 func TestForwardOpencodeZen_FreeModelTakesInferenceGate(t *testing.T) {
 	tests := []struct {
 		model string
@@ -442,4 +490,3 @@ func TestForwardOpencodeZen_FreeModelTakesInferenceGate(t *testing.T) {
 		})
 	}
 }
-

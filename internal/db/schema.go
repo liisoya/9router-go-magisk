@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // tableDef mirrors one entry of upstream schema.js TABLES: the declarative
@@ -141,6 +142,7 @@ func coreSchema() []tableDef {
 				{"status", "TEXT"},
 				{"tokens", "TEXT"},
 				{"meta", "TEXT"},
+				{"clientKey", "TEXT DEFAULT ''"},
 			},
 			indexes: []string{
 				"CREATE INDEX IF NOT EXISTS idx_uh_ts ON usageHistory(timestamp DESC)",
@@ -150,13 +152,17 @@ func coreSchema() []tableDef {
 				"CREATE INDEX IF NOT EXISTS idx_uh_ts_prov ON usageHistory(timestamp DESC, provider)",
 				"CREATE INDEX IF NOT EXISTS idx_uh_ts_model ON usageHistory(timestamp DESC, model)",
 				// The per-key lifetime token quota sums prompt+completion tokens
-				// WHERE apiKey = ? on every request for a quota-bearing key, and
-				// this ledger is never pruned (see usage_retention.go: it is the
-				// billing record). Without this index that sum is a full scan —
-				// measured at ~150 ms on a 200k-row ledger versus sub-millisecond
-				// with it. EnsureCoreSchema re-runs this list on every boot, so
-				// existing installs pick the index up on the next start.
+				// over `clientKey = ? OR apiKey = ? OR apiKey = ?` (tokenUsageSince,
+				// quota_reset.go). SQLite answers a disjunction with a multi-index
+				// OR only when EVERY arm is indexable, so idx_uh_apikey alone was
+				// not enough: the unindexed clientKey arm degraded the whole
+				// statement to `SCAN usageHistory`. That scan ran once per key row
+				// in GET /api/keys (apiKeyUsedTokens), which is on the dashboard's
+				// boot path — measured on a 512k-row ledger at ~127 ms per key, so
+				// a 50-key install spent ~10 s in that one request. Both columns
+				// need their own index for the OR to use indexes at all.
 				"CREATE INDEX IF NOT EXISTS idx_uh_apikey ON usageHistory(apiKey)",
+				"CREATE INDEX IF NOT EXISTS idx_uh_clientkey ON usageHistory(clientKey)",
 			},
 		},
 		{
@@ -292,11 +298,48 @@ var goOnlyColumns = [][3]string{
 	{"apiKeys", "lastUsedAt", "TEXT DEFAULT ''"},
 	{"apiKeys", "usedCount", "INTEGER DEFAULT 0"},
 	{"apiKeys", "metadata", "TEXT DEFAULT ''"},
+	// #365 Resettable token budget: the usageHistory row id a key's tokenQuota is
+	// measured from, so an exhausted key can be given a fresh budget without
+	// deleting the usage history behind it. A row id rather than a timestamp
+	// because usageHistory.timestamp is second-precision and a reset in the same
+	// second as the spend would keep charging the key.
+	{"apiKeys", "quotaResetId", "INTEGER DEFAULT 0"},
+	// #365 Client attribution in the usage ledger. usageHistory.apiKey holds the
+	// UPSTREAM credential (masked), so a per-key token budget measured from that
+	// column never matched a client and never fired. This column names the client
+	// that spent the tokens: the same masked shape the reader already looks for,
+	// so rows the upstream dashboard wrote (client key in apiKey) keep counting
+	// through the fallback term.
+	{"usageHistory", "clientKey", "TEXT DEFAULT ''"},
+	// F-3 Plans: reusable policy template
+	{"apiKeys", "planId", "TEXT DEFAULT ''"},
 }
 
 // keiRouterTables are Go-only tables for KeiRouter port features.
-// All use IF NOT EXISTS and are additive-only.
 var keiRouterTables = []tableDef{
+	{
+		name: "plans",
+		columns: [][2]string{
+			{"id", "TEXT PRIMARY KEY"},
+			{"tenant_id", "TEXT NOT NULL DEFAULT 'default'"},
+			{"name", "TEXT NOT NULL"},
+			{"description", "TEXT DEFAULT ''"},
+			{"limit_micros", "INTEGER NOT NULL DEFAULT 0"},
+			{"limit_tokens", "INTEGER NOT NULL DEFAULT 0"},
+			{"rpm_limit", "INTEGER NOT NULL DEFAULT 0"},
+			{"tpm_limit", "INTEGER NOT NULL DEFAULT 0"},
+			{"concurrency_limit", "INTEGER NOT NULL DEFAULT 0"},
+			{"period", "TEXT NOT NULL DEFAULT 'monthly'"},
+			{"alert_pct", "INTEGER NOT NULL DEFAULT 80"},
+			{"hard_cutoff", "INTEGER NOT NULL DEFAULT 1"},
+			{"allowed_models", "TEXT DEFAULT ''"},
+			{"created_at", "TEXT NOT NULL"},
+			{"updated_at", "TEXT NOT NULL"},
+		},
+		indexes: []string{
+			"CREATE INDEX IF NOT EXISTS idx_plans_tenant ON plans(tenant_id)",
+		},
+	},
 	{
 		name: "api_key_model_access",
 		columns: [][2]string{
@@ -350,6 +393,44 @@ var keiRouterTables = []tableDef{
 	},
 }
 
+// usageLedgerTables are Go-only tables backing the ledger retention in
+// usage_retention_ledger.go. They are declared apart from keiRouterTables
+// because they are not a ported feature: they exist so an opt-in prune of the
+// billing ledger cannot refund a per-key token budget.
+//
+// usageLedgerCarryover is one row per client key and is read by exactly one
+// statement (tokenUsageSince). It is deliberately NOT a synthetic row inside
+// usageHistory: a marker row there would be indistinguishable from real traffic
+// for every other ledger consumer — the sub-day usage window, the daily chart's
+// per-family split, the analytics scans, the topology map — each of which would
+// then need its own filter, and any one of them forgetting it reports spend that
+// never happened.
+var usageLedgerTables = []tableDef{
+	{
+		name: "usageLedgerCarryover",
+		columns: [][2]string{
+			{"keyId", "TEXT PRIMARY KEY"},
+			{"tokens", "INTEGER NOT NULL DEFAULT 0"},
+			{"updatedAt", "TEXT NOT NULL"},
+		},
+	},
+}
+
+// EnsureLedgerTables creates the Go-only tables the ledger retention needs.
+// Exported for the same reason as EnsureKeiRouterTables: a test fixture that
+// builds only the upstream core schema still gets the shape the runtime queries.
+func EnsureLedgerTables(db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("usage ledger tables: nil db")
+	}
+	for _, t := range usageLedgerTables {
+		if err := ensureTable(db, t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // supersededIndexes are dropped on every boot: each was replaced by an index
 // whose shape a measured query plan chose, and keeping the old ones would leave
 // SQLite with candidates it never picks while every write still updates them.
@@ -394,6 +475,9 @@ func EnsureCoreSchema(db *sql.DB) error {
 		}
 	}
 	if err := EnsureKeiRouterTables(db); err != nil {
+		return err
+	}
+	if err := EnsureLedgerTables(db); err != nil {
 		return err
 	}
 	if err := EnsureAdditiveColumns(db); err != nil {
@@ -467,6 +551,18 @@ func EnsureKeiRouterTables(db *sql.DB) error {
 		if err := ensureTable(db, t); err != nil {
 			return err
 		}
+	}
+	// The default plan is part of the table's shape, not operator data: every
+	// path that creates the plans table also guarantees the row exists, so a
+	// key assigned to "default" always resolves to a plan instead of silently
+	// reading as unplanned. INSERT OR IGNORE keeps it stable across boots.
+	if _, err := db.Exec( //nolint:noctx
+		`INSERT OR IGNORE INTO plans (id, tenant_id, name, description, limit_micros, limit_tokens, rpm_limit, tpm_limit, concurrency_limit, period, alert_pct, hard_cutoff, allowed_models, created_at, updated_at)
+		 VALUES ('default', 'default', 'Default', 'Default plan for existing keys', 0, 0, 0, 0, 0, 'monthly', 80, 0, '', ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339),
+		time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		return fmt.Errorf("keirouter tables: seed default plan: %w", err)
 	}
 	return nil
 }

@@ -43,7 +43,7 @@ func renderSystemdUnit(exe string, args []string) string {
 	b.WriteString("Type=simple\n")
 	b.WriteString("ExecStart=" + commandLine(exe, args) + "\n")
 	if dir := filepath.Dir(exe); dir != "" {
-		b.WriteString("WorkingDirectory=" + quoteSystemdValue(filepath.ToSlash(dir)) + "\n")
+		b.WriteString("WorkingDirectory=" + escapeSystemdPath(filepath.ToSlash(dir)) + "\n")
 	}
 	if dataDir := strings.TrimSpace(os.Getenv("DATA_DIR")); dataDir != "" {
 		b.WriteString("Environment=" + quoteArg("DATA_DIR="+dataDir) + "\n")
@@ -55,38 +55,22 @@ func renderSystemdUnit(exe string, args []string) string {
 	return b.String()
 }
 
-// quoteSystemdValue renders a value for a systemd assignment that supports
-// quoting. It differs from quoteArg, which targets POSIX *shell* command
-// lines: systemd does not tokenise on whitespace, it only unquotes, so a
-// value is always wrapped and only the characters its unquoter interprets
-// are escaped.
+// escapeSystemdPath renders the value of a systemd setting that takes a single
+// path — WorkingDirectory=, the only one this package emits.
 //
-// Two escapes matter here. Inside double quotes systemd processes C-style
-// escapes, so a backslash and a quote must be doubled, otherwise a path
-// ending in `\` escapes the closing quote and swallows the rest of the line.
-// And every assignment is specifier-expanded, so `%` must be written `%%`:
-// a binary under /opt/100%-uptime/ would otherwise expand to a unit that
-// names a different, almost certainly nonexistent, directory.
+// It is deliberately not quoted. systemd parses that setting with
+// config_parse_working_directory, which runs path_simplify_and_warn(
+// PATH_CHECK_ABSOLUTE) on the whole remainder of the line: unlike ExecStart= it
+// does not unquote, so a quoted path reaches the check with the quote attached
+// and the unit is rejected —
 //
-// A literal newline cannot be represented — it would end the assignment —
-// but a path from os.Executable cannot contain one.
-func quoteSystemdValue(value string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range value {
-		switch r {
-		case '\\':
-			b.WriteString(`\\`)
-		case '"':
-			b.WriteString(`\"`)
-		case '%':
-			b.WriteString("%%")
-		default:
-			b.WriteRune(r)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
+//	WorkingDirectory= path is not absolute: "/usr/local/bin"
+//
+// Whitespace is not a separator here either, so a spaced path needs no quoting
+// to survive. The one transformation that does apply is specifier expansion
+// (unit_path_printf), so a literal '%' must be doubled.
+func escapeSystemdPath(value string) string {
+	return strings.ReplaceAll(value, "%", "%%")
 }
 
 // systemctl builds a systemctl invocation against the user manager. Every call

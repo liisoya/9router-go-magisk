@@ -246,3 +246,62 @@ func TestHandleEmbeddings_UpstreamError(t *testing.T) {
 		t.Errorf("expected error 'upstream failed', got %v", resp["error"])
 	}
 }
+
+func TestHandleEmbeddings_ForwardStaticHeaders(t *testing.T) {
+	database, cleanup := setupEmbeddingsTestDB(t)
+	defer cleanup()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("expected Content-Type application/json, got %q", ct)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer gh-token" {
+			t.Errorf("expected Authorization Bearer gh-token, got %q", auth)
+		}
+		if integID := r.Header.Get("copilot-integration-id"); integID != "vscode-chat" {
+			t.Errorf("expected copilot-integration-id vscode-chat, got %q", integID)
+		}
+		if apiVer := r.Header.Get("x-github-api-version"); apiVer != "2025-04-01" {
+			t.Errorf("expected x-github-api-version 2025-04-01, got %q", apiVer)
+		}
+		if editorVer := r.Header.Get("editor-version"); editorVer != "vscode/1.110.0" {
+			t.Errorf("expected editor-version vscode/1.110.0, got %q", editorVer)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"object":"list","data":[{"embedding":[0.1,0.2]}]}`))
+	}))
+	defer upstream.Close()
+
+	data, _ := json.Marshal(map[string]any{
+		"apiKey":     "gh-token",
+		"baseUrl":    upstream.URL,
+		"authHeader": "Authorization",
+		"authScheme": "Bearer",
+		"staticHeaders": map[string]string{
+			"copilot-integration-id": "vscode-chat",
+			"x-github-api-version":   "2025-04-01",
+			"editor-version":         "vscode/1.110.0",
+		},
+	})
+	_, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-gh', 'github', 'apikey', 'GitHub Copilot', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, string(data))
+	if err != nil {
+		t.Fatalf("failed to seed provider connection: %v", err)
+	}
+
+	repo := db.NewRepo(database)
+	handler := newTestMediaHandler(repo)
+
+	body := `{"model":"github/text-embedding-3-small"}`
+	req := httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.HandleEmbeddings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

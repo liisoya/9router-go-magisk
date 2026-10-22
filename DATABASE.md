@@ -205,6 +205,57 @@ CREATE TABLE usageHistory (
 
 Go omits `id` on insert, allowing the upstream autoincrement column to allocate it, and reads recent rows by implicit `rowid`. Go test fixtures sometimes omit `id`; that fixture difference is not a production schema.
 
+#### Retention
+
+`usageHistory` is the billing ledger and is **kept forever by default**. It is
+pruned only when an operator turns on the `usageHistoryRetentionDays` setting
+(dashboard: Profile → Storage → *Usage Ledger Retention*), which is deliberately
+separate from the requestDetails `retentionDays` control: that one governs
+diagnostics nothing bills from, this one deletes billing rows. The background
+retention loop applies the window every six hours; the dashboard's
+**Prune Usage History** button applies it once, with a dry run first.
+
+Deleting ledger rows is not free of consequence, and the mechanism that keeps it
+safe is the reason the feature exists in this shape:
+
+- **Per-key token budgets survive.** `tokenQuota` is measured by summing
+  `promptTokens + completionTokens` out of this table (`internal/db/quota_reset.go`),
+  not from a counter. A prune would therefore *refund* an exhausted key. Before a
+  range is deleted, the spend those rows contributed to each key is summed into
+  `usageLedgerCarryover`, and the budget reader adds that term back. A key's spend
+  reads identically before and after a prune — pinned by
+  `TestPruneUsageHistory_SpendInvariant` and, end to end,
+  `TestLedgerPrunePreservesKeyQuotaEnforcement`.
+- **A reset clears the carryover.** `quotaResetId` marks where a key's budget is
+  measured from, and `ResetApiKeyQuota` deletes the key's carryover row in the
+  same transaction, so a reset after a prune still starts from zero.
+- **The `all` usage period and the analytics pages shorten.** They read this table
+  directly, so after a prune `all` means "everything still retained". Lifetime
+  totals on the dashboard are unaffected (they come from `usageDaily`).
+- **Rows are only deleted, never rewritten.** Each chunk is folded and deleted in
+  one transaction, bounded by `retentionChunkSize`, so a crash cannot leave a
+  deleted row whose spend was not carried.
+- **VACUUM is still manual.** Pruning frees pages for reuse but does not shrink
+  the file; use the dashboard's *Compact Database (VACUUM)*.
+
+`usageLedgerCarryover` is a Go-only table (`internal/db/schema.go`,
+`usageLedgerTables`) with one row per client key. It is intentionally not a
+synthetic row inside `usageHistory`: a marker row there would be indistinguishable
+from real traffic for every other ledger consumer (the sub-day usage window, the
+daily chart's per-family split, the analytics scans, the topology map).
+
+```sql
+CREATE TABLE usageLedgerCarryover (
+    keyId     TEXT PRIMARY KEY,
+    tokens    INTEGER NOT NULL DEFAULT 0,
+    updatedAt TEXT NOT NULL
+);
+```
+
+If this database is shared with the upstream Next.js dashboard, note that
+upstream has no such retention. Running a prune shortens the history it sees as
+well — that is inherent to sharing one ledger, not something this build can hide.
+
 ### `usageDaily`
 
 ```sql

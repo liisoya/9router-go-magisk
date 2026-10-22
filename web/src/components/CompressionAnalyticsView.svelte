@@ -10,6 +10,8 @@
   import { periodLabel, type Period } from './analytics/types'
   import Menu from '../lib/ui/Menu.svelte'
   import MenuItem from '../lib/ui/MenuItem.svelte'
+  import { costIn, currentCurrency } from '../lib/currency.svelte'
+  import { convertFromUsd } from '../lib/currency'
 
   interface Props {
     /**
@@ -56,6 +58,8 @@
     notifications.success('Exported JSON successfully')
   }
 
+  // Cost columns in the CSV: EstUSD keeps the pre-existing USD cell, EstLocal
+  // adds the operator's display-currency conversion, Currency names its code.
   function exportCSV() {
     if (!stats) return
     const lines = ['Category,Key,Requests,TokensSaved,AvgSavingsPct']
@@ -70,9 +74,14 @@
     }
     if (stats.topSavers && stats.topSavers.length > 0) {
       lines.push('')
-      lines.push('TopSavers,RequestID,Timestamp,Provider,Model,Mode,OriginalTokens,CompressedTokens,TokensSaved,SavingsPct,DurationMs,EstUSD')
+      lines.push('TopSavers,RequestID,Timestamp,Provider,Model,Mode,OriginalTokens,CompressedTokens,TokensSaved,SavingsPct,DurationMs,EstUSD,EstLocal,Currency')
       for (const s of stats.topSavers) {
-        lines.push(`TopSaver,${s.requestId},${s.timestamp},${s.provider},${s.model},${s.mode},${s.originalTokens},${s.compressedTokens},${s.tokensSaved},${s.savingsPct}%,${s.durationMs}ms,$${s.estimatedUsd}`)
+        const currency = currentCurrency()
+        const local = convertFromUsd(s.estimatedUsd ?? 0, currency)
+        const estLocal = local === null ? '' : local.toFixed(4)
+        // The USD cell is the pre-existing `$`-prefixed number, unchanged here.
+        const usdCell = '$' + s.estimatedUsd
+        lines.push(`TopSaver,${s.requestId},${s.timestamp},${s.provider},${s.model},${s.mode},${s.originalTokens},${s.compressedTokens},${s.tokensSaved},${s.savingsPct}%,${s.durationMs}ms,${usdCell},${estLocal},${currency.code}`)
       }
     }
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
@@ -306,7 +315,7 @@
       </div>
       <div class="mt-3">
         <div class="text-2xl font-bold text-emerald-500">
-          ${(stats?.realUsage?.estimatedUsdSaved ?? 0).toFixed(2)}
+          {costIn(stats?.realUsage?.estimatedUsdSaved ?? 0)}
         </div>
         <p class="text-xs text-text-subtle mt-1 truncate">Estimated USD saved</p>
       </div>
@@ -593,7 +602,7 @@
                   {s.durationMs}ms
                 </td>
                 <td class="py-2.5 px-3 text-right font-medium text-emerald-400">
-                  ${s.estimatedUsd.toFixed(3)}
+                  {costIn(s.estimatedUsd, 3)}
                 </td>
               </tr>
             {/each}

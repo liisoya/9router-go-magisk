@@ -41,12 +41,25 @@ func ProcessCodexEvent(data string, state *CodexStreamState, responseID string, 
 
 	eventType, _ := event["type"].(string)
 
-	// Upstream error events (e.g. {"type":"error","error":{...FreeTierError}})
-	// must surface, never vanish: without this the converter below emits a
-	// 200 with empty content for a failed turn (silent success). Record on
-	// state; handleCodexStream converts to an UpstreamError after the scan.
+	// Upstream failure events ({"type":"error",...} and the Responses API's
+	// terminal {"type":"response.failed",...}) must surface, never vanish:
+	// without this the converter below emits a 200 with empty content for a
+	// failed turn (silent success). Record on state; handleCodexStream
+	// converts it to an UpstreamError after the scan.
 	if eventType == "error" {
 		if raw, err := json.Marshal(event); err == nil {
+			state.UpstreamErr = raw
+		} else {
+			state.UpstreamErr = []byte(`{"type":"error"}`)
+		}
+		return nil
+	}
+	// response.failed carries the upstream's own reason under response.error;
+	// normalize it to the {"error":{...}} shape codexUpstreamError reads so a
+	// schema rejection is reported with its real message instead of a
+	// generic 502 "upstream error".
+	if eventType == "response.failed" {
+		if raw, err := json.Marshal(normalizeCodexFailureEvent(event)); err == nil {
 			state.UpstreamErr = raw
 		} else {
 			state.UpstreamErr = []byte(`{"type":"error"}`)
@@ -519,7 +532,14 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 				data := string(payload)
 				if data == "[DONE]" {
 					doneSeen = true
-					_ = writeSSEFinish(hw, flusher, req, state, responseID, created)
+					// A failed, empty turn must not be closed with a
+					// fabricated success terminal: a client reads
+					// finish_reason "stop" as a served answer, which is the
+					// empty response #334 reports. The post-scan branch below
+					// ends it with the error frame instead.
+					if !codexFailedEmptyTurn(state) {
+						_ = writeSSEFinish(hw, flusher, req, state, responseID, created)
+					}
 					return
 				}
 
@@ -540,10 +560,23 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 				}
 			})
 
-			// Headers are already committed on the stream path, so a pure
-			// upstream error (no content at all) can only be signaled by
-			// closing without useful chunks; the non-stream path below
-			// returns a proper UpstreamError instead.
+			// HTTP 200 is already committed and the codex turn failed with no
+			// content, so the only place left to report it is in-band. Before
+			// this, a schema rejection was closed with a fabricated
+			// finish_reason "stop" on an empty answer, which reads to the client
+			// as a served turn and lets combo fallback settle on a model that
+			// said nothing (#334).
+			if codexFailedEmptyTurn(state) {
+				errStatus, errMsg := codexEventErrorInfo(state.UpstreamErr)
+				if _, werr := hw.Write(proxy.BuildStreamErrorBytes(errStatus, errMsg, proxy.SSEFormatOpenAI)); werr != nil {
+					return werr
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return codexUpstreamError(state.UpstreamErr)
+			}
+
 			if !doneSeen {
 				return writeSSEFinish(hw, flusher, req, state, responseID, created)
 			}
@@ -591,6 +624,25 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 				}
 			}
 		})
+
+		// A failed turn and a finished one are not the same thing. The
+		// translator below emits a message_delta with stop_reason "end_turn"
+		// for an empty answer, which Claude Code reads as a served turn with
+		// no text — the empty response reported in #334. When the upstream
+		// recorded a failure and produced nothing, end the turn with the
+		// gateway's error frame instead (the same in-band shape openai.go and
+		// bedrock.go emit after HTTP 200 is committed).
+		if codexFailedEmptyTurn(state) {
+			errStatus, errMsg := codexEventErrorInfo(state.UpstreamErr)
+			if _, werr := hw.Write(proxy.BuildStreamErrorBytes(errStatus, errMsg, proxy.SSEFormatClaude)); werr != nil {
+				return werr
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			translator.SetUsage(req.Ctx, &translator.OpenAIUsage{})
+			return codexUpstreamError(state.UpstreamErr)
+		}
 
 		// Finish stream
 		if !state.Completed {
@@ -664,6 +716,18 @@ func handleCodexStream(w http.ResponseWriter, req *Request, upstream io.Reader) 
 // into an UpstreamError (default 502). FreeTierError / access gates map to
 // 403 so fallback treats them as credential problems, not capacity.
 func codexUpstreamError(raw []byte) error {
+	status, msg := codexEventErrorInfo(raw)
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]any{"message": msg, "type": "upstream_error", "code": status},
+	})
+	return &proxy.UpstreamError{StatusCode: status, Body: body}
+}
+
+// codexEventErrorInfo reads the status and message out of a recorded upstream
+// error event (default 502 / "upstream error"). Both the returned error and
+// the in-band frame come through here so the two cannot disagree about what
+// went wrong: the client's error line and the failure row show one message.
+func codexEventErrorInfo(raw []byte) (int, string) {
 	var event struct {
 		Error struct {
 			Type    string `json:"type"`
@@ -681,10 +745,33 @@ func codexUpstreamError(raw []byte) error {
 			status = http.StatusForbidden
 		}
 	}
-	body, _ := json.Marshal(map[string]any{
-		"error": map[string]any{"message": msg, "type": "upstream_error", "code": status},
-	})
-	return &proxy.UpstreamError{StatusCode: status, Body: body}
+	return status, msg
+}
+
+// normalizeCodexFailureEvent rewrites a terminal response.failed event into
+// the {"type":"error","error":{...}} shape codexUpstreamError parses. The
+// upstream puts its reason under response.error, so without this the schema
+// rejection that failed the turn is reported as a generic 502.
+func normalizeCodexFailureEvent(event map[string]any) map[string]any {
+	resp, ok := event["response"].(map[string]any)
+	if !ok {
+		return event
+	}
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		return event
+	}
+	return map[string]any{"type": "error", "error": errObj}
+}
+
+// codexFailedEmptyTurn reports a turn the upstream failed that produced no
+// content: an error event was recorded and not a single delta or tool call
+// followed. There is no answer to serve, so the turn must be closed with the
+// gateway's error frame rather than a fabricated successful terminal. An
+// error after content is a different case — the client keeps the partial
+// reply — which is why this is not simply "an error was recorded".
+func codexFailedEmptyTurn(state *CodexStreamState) bool {
+	return len(state.UpstreamErr) > 0 && state.OutputLength == 0 && state.ToolCallCount == 0
 }
 
 // writeSSEFinish writes the closing [DONE] frame and records usage. If the

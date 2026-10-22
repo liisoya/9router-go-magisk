@@ -96,12 +96,16 @@ type completionProbe struct {
 	Content jsontext.Value `json:"content"`
 	Output  jsontext.Value `json:"output"`
 	Status  string         `json:"status"`
+	// StopReason is the Claude Messages spelling of why the turn ended.
+	StopReason string `json:"stop_reason"`
 }
 
 type choiceProbe struct {
 	Message messageProbe `json:"message"`
 	Delta   messageProbe `json:"delta"`
 	Text    string       `json:"text"`
+	// FinishReason is the Chat Completions spelling of why the turn ended.
+	FinishReason string `json:"finish_reason"`
 }
 
 type messageProbe struct {
@@ -140,10 +144,16 @@ func missingCompletion(p completionProbe) string {
 		if choices[0].Message.carriesAnswer() || choices[0].Delta.carriesAnswer() {
 			return ""
 		}
+		if choices[0].FinishReason == "length" {
+			return "" // cut off by max_tokens: a short turn, not a missing one
+		}
 		return "the first choice carries no content, tool call or reasoning"
 	case p.Content != nil:
 		if carriesValue(p.Content) {
 			return ""
+		}
+		if p.StopReason == "max_tokens" {
+			return "" // cut off by max_tokens: a short turn, not a missing one
 		}
 		return "content is empty"
 	case p.Output != nil:

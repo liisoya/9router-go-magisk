@@ -40,7 +40,7 @@ func TestSwitchFreebuffModel_ReleasesHeldSessionThenAdmitsNewModel(t *testing.T)
 	}))
 	defer server.Close()
 
-	result, err := SwitchFreebuffModel(context.Background(), server.Client(), server.URL, "tok", "i-old", "model-b")
+	result, err := SwitchFreebuffModel(context.Background(), server.Client(), server.URL, "tok", "i-old", "model-b", nil)
 	if err != nil {
 		t.Fatalf("SwitchFreebuffModel failed: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestReleaseFreebuffSession_MissingRowIsNotAnError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	refund, err := releaseFreebuffSession(context.Background(), server.Client(), server.URL, "tok", "i-gone")
+	refund, err := releaseFreebuffSession(context.Background(), server.Client(), server.URL, "tok", "i-gone", nil)
 	if err != nil {
 		t.Fatalf("expected a missing session row to be tolerated, got %v", err)
 	}
@@ -87,7 +87,7 @@ func TestReleaseFreebuffSession_MissingRowIsNotAnError(t *testing.T) {
 }
 
 func TestReleaseFreebuffSession_RequiresInstanceID(t *testing.T) {
-	if _, err := releaseFreebuffSession(context.Background(), http.DefaultClient, "https://example.invalid", "tok", ""); err == nil {
+	if _, err := releaseFreebuffSession(context.Background(), http.DefaultClient, "https://example.invalid", "tok", "", nil); err == nil {
 		t.Error("expected an error when no instance id is held")
 	}
 }

@@ -66,6 +66,9 @@ type SettingsData struct {
 	PonytailLevel              string                          `json:"ponytailLevel"`
 	ADHDEnabled                bool                            `json:"adhdEnabled"`
 	ADHDLevel                  string                          `json:"adhdLevel"`
+	SystemPromptEnabled        bool                            `json:"systemPromptEnabled"`
+	SystemPromptPrefix         string                          `json:"systemPromptPrefix,omitempty"`
+	SystemPromptSuffix         string                          `json:"systemPromptSuffix,omitempty"`
 	HeadroomUrl                string                          `json:"headroomUrl"`
 	HeadroomCodeAware          bool                            `json:"headroomCodeAware"`
 	HeadroomKompress           bool                            `json:"headroomKompress"`
@@ -87,17 +90,28 @@ type SettingsData struct {
 	ObservabilityMode          string                          `json:"observabilityMode,omitempty"`
 	RetentionDays              int                             `json:"retentionDays,omitempty"`
 	MaxRequestRecords          int                             `json:"maxRequestRecords,omitempty"`
+	// UsageHistoryRetentionDays bounds how far back the usage ledger is kept.
+	// It is a separate knob from RetentionDays on purpose: that one governs
+	// requestDetails, which is diagnostics nothing bills from, while this one
+	// deletes billing rows. Folding them into one control would mean an operator
+	// trimming a diagnostic log silently shortened their usage history — and
+	// the two are wanted at different lengths, since a month of request bodies
+	// is a lot of disk and a month of per-request counters is not.
+	//
+	// 0 means "keep forever", which is the default: the ledger is only pruned
+	// when an operator asks for it. See usage_retention_ledger.go.
+	UsageHistoryRetentionDays int `json:"usageHistoryRetentionDays,omitempty"`
 }
 
 // DefaultSettings returns fallback settings.
 func DefaultSettings() *SettingsData {
 	return &SettingsData{
-		RTKEnabled:        true,
-		RTKMode:           "simple",
-		RTKIntensity:      "standard",
-		RTKMaxLines:       100,
-		RTKMaxChars:       8000,
-		RTKDeduplicate:    true,
+		RTKEnabled:     true,
+		RTKMode:        "simple",
+		RTKIntensity:   "standard",
+		RTKMaxLines:    100,
+		RTKMaxChars:    8000,
+		RTKDeduplicate: true,
 		RTKCategories: map[string]bool{
 			"git":     true,
 			"build":   true,
@@ -118,13 +132,16 @@ func DefaultSettings() *SettingsData {
 		PonytailLevel:           "full",
 		ADHDEnabled:             false,
 		ADHDLevel:               "full",
-		HeadroomUrl:       "http://localhost:8787",
-		HeadroomKompress:  true,
-		HeadroomTimeoutMs: 3000,
-		SemanticCacheEnabled:     false,
-		SemanticCacheTTL:         1440,
-		SemanticCacheMaxEntries:  1000,
-		AutoUpdate:        false,
+		SystemPromptEnabled:     false,
+		SystemPromptPrefix:      "",
+		SystemPromptSuffix:      "",
+		HeadroomUrl:             "http://localhost:8787",
+		HeadroomKompress:        true,
+		HeadroomTimeoutMs:       3000,
+		SemanticCacheEnabled:    false,
+		SemanticCacheTTL:        1440,
+		SemanticCacheMaxEntries: 1000,
+		AutoUpdate:              false,
 		CapacityAdapter: map[string]CapacityAdapterEntry{
 			"vision":     {Enabled: true, RoundRobin: false, Models: []string{}},
 			"pdf":        {Enabled: false, RoundRobin: false, Models: []string{}},
@@ -218,6 +235,15 @@ func (r *Repo) GetSettings() (*SettingsData, error) {
 	if lvl := handlerutil.GetString(raw, "adhdLevel"); lvl != "" {
 		s.ADHDLevel = lvl
 	}
+	if v, ok := raw["systemPromptEnabled"].(bool); ok {
+		s.SystemPromptEnabled = v
+	}
+	if v := handlerutil.GetString(raw, "systemPromptPrefix"); v != "" {
+		s.SystemPromptPrefix = v
+	}
+	if v := handlerutil.GetString(raw, "systemPromptSuffix"); v != "" {
+		s.SystemPromptSuffix = v
+	}
 	if v := handlerutil.GetString(raw, "headroomUrl"); v != "" {
 		s.HeadroomUrl = v
 	}
@@ -255,6 +281,13 @@ func (r *Repo) GetSettings() (*SettingsData, error) {
 	}
 	if v := settingsInt(raw["maxRequestRecords"]); v > 0 {
 		s.MaxRequestRecords = v
+	}
+
+	// The ledger window. Explicit 0 means "keep forever" and is the default, so
+	// the value is only taken when the key is actually present — a missing key
+	// must not read as an instruction to prune at zero days.
+	if _, present := raw["usageHistoryRetentionDays"]; present {
+		s.UsageHistoryRetentionDays = settingsInt(raw["usageHistoryRetentionDays"])
 	}
 
 	// Global provider fallback strategy
@@ -622,7 +655,6 @@ func settingsInt(v any) int {
 	}
 	return 0
 }
-
 
 // stringMap coerces a decoded JSON value into map[string]string, skipping
 // anything that is not a string. The settings blob is hand-editable through

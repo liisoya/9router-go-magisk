@@ -93,6 +93,14 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/keys/{id}/rotate", h.HandleRotateApiKey)
 		r.Put("/keys/{id}", h.HandleUpdateApiKey)
 
+		// F-3 Plans: reusable policy templates the keys inherit from.
+		r.Get("/plans", h.HandleListPlans)
+		r.Post("/plans", h.HandleCreatePlan)
+		r.Get("/plans/{id}", h.HandleGetPlan)
+		r.Put("/plans/{id}", h.HandleUpdatePlan)
+		r.Delete("/plans/{id}", h.HandleDeletePlan)
+		r.Get("/plans/{id}/keys", h.HandlePlanKeys)
+
 		// F-5 Credential vault: status and master-key rotation.
 		r.Get("/vault/status", h.HandleGetVaultStatus)
 		r.Post("/vault/rotate", h.HandleRotateVault)
@@ -120,8 +128,10 @@ func RegisterRoutes(r chi.Router, h *DashboardHandler) {
 		r.Post("/settings/database", h.HandleImportDatabase)
 		r.Get("/settings/database/stats", h.HandleGetDatabaseStats)
 		r.Post("/settings/database/prune", h.HandlePruneDatabase)
+		r.Post("/settings/database/prune-usage", h.HandlePruneUsageHistory)
 		r.Post("/settings/database/vacuum", h.HandleVacuumDatabase)
 		r.Post("/settings/proxy-test", h.HandleProxyTest)
+		r.Post("/settings/currency/refresh", h.HandleRefreshCurrencyRates)
 
 		// Token Saver Testing Benches
 		r.Post("/tokensaver/rtk/test", h.HandleTestRTK)

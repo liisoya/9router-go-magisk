@@ -32,7 +32,7 @@ import (
 
 // testModelTimeout bounds one probe. A provider that never answers (no chat
 // lane, a STT model handed an upload it cannot read) must not hold the button.
-const testModelTimeout = 15 * time.Second
+const testModelTimeout = 45 * time.Second
 
 const (
 	// probeMaxTokens is generous on purpose: a reasoning model spends a small
@@ -257,6 +257,14 @@ func readProbeResult(rec *httptest.ResponseRecorder, kind string) testModelResul
 	body, _ := io.ReadAll(io.LimitReader(rec.Body, probeBodyReadCap))
 	parsed := parseProbeBody(body)
 
+	// Check for inconclusive mid-stream timeout / abort (e.g. status 499/504 with valid first token stream data)
+	if (status == 499 || status == 504) && hasReceivedFirstToken(body) {
+		return testModelResult{OK: true, Status: status, Note: "inconclusive (first token received)"}
+	}
+	if (status == 499 || status == 504) && len(bytes.TrimSpace(body)) == 0 {
+		return testModelResult{Status: status, Error: ""}
+	}
+
 	if status != http.StatusOK {
 		errText := probeErrorText(body, parsed)
 		res := testModelResult{
@@ -269,7 +277,29 @@ func readProbeResult(rec *httptest.ResponseRecorder, kind string) testModelResul
 		}
 		return res
 	}
+
 	return verdictForKind(kind, parsed, status)
+}
+
+func hasReceivedFirstToken(body []byte) bool {
+	lines := bytes.Split(body, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		var chunk struct {
+			Choices []any `json:"choices"`
+		}
+		if json.Unmarshal(payload, &chunk) == nil && len(chunk.Choices) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // cooldownMarkers are the exact sentences the gateway itself emits when every

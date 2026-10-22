@@ -129,3 +129,36 @@ func TestGetProxyPool_SingleProxyUrl_AndMetadata(t *testing.T) {
 		t.Errorf("expected NextURL https://relay.example.com, got %s", next)
 	}
 }
+
+// A relay URL pasted into a pool declared "http" must still read as a relay, or
+// the request path dials it with http.ProxyURL and answers "malformed HTTP
+// status code" — the failure the predicate exists to prevent.
+func TestProxyPool_IsEdgeRelay(t *testing.T) {
+	tests := []struct {
+		name string
+		pool *ProxyPool
+		want bool
+	}{
+		{name: "nil", pool: nil, want: false},
+		{name: "declared vercel", pool: &ProxyPool{Type: "vercel", URLs: []string{"https://x.example.com"}}, want: true},
+		{name: "declared cloudflare", pool: &ProxyPool{Type: "cloudflare", URLs: []string{"https://x.example.com"}}, want: true},
+		{name: "declared deno", pool: &ProxyPool{Type: "deno", URLs: []string{"https://x.example.com"}}, want: true},
+		{name: "declared netlify", pool: &ProxyPool{Type: "netlify", URLs: []string{"https://x.example.com"}}, want: true},
+		{name: "http typed but vercel host", pool: &ProxyPool{Type: "http", URLs: []string{"https://relay-deploy.vercel.app"}}, want: true},
+		{name: "http typed but workers host", pool: &ProxyPool{Type: "http", URLs: []string{"https://relay.user.workers.dev"}}, want: true},
+		{name: "untyped deno host", pool: &ProxyPool{Type: "", URLs: []string{"https://relay.deno.dev"}}, want: true},
+		{name: "netlify function path", pool: &ProxyPool{Type: "http", URLs: []string{"https://site.example.com/.netlify/functions/relay"}}, want: true},
+		{name: "http typed real proxy stays a proxy", pool: &ProxyPool{Type: "http", URLs: []string{"http://user:pass@proxy.example.com:8080"}}, want: false},
+		{name: "http typed loopback stays a proxy", pool: &ProxyPool{Type: "http", URLs: []string{"http://127.0.0.1:8888"}}, want: false},
+		{name: "socks5 is not inferred as relay", pool: &ProxyPool{Type: "socks5", URLs: []string{"https://relay.vercel.app"}}, want: false},
+		{name: "lookalike host is not a relay", pool: &ProxyPool{Type: "http", URLs: []string{"https://vercel.app.evil.com"}}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.pool.IsEdgeRelay(); got != tt.want {
+				t.Errorf("IsEdgeRelay() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

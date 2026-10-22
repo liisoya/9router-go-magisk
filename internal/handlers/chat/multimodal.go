@@ -1,8 +1,9 @@
 package chat
 
 import (
-	"bytes"
 	json "9router/proxy/internal/fastjson"
+	"9router/proxy/internal/middleware"
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -137,7 +138,7 @@ func (h *ChatHandler) forwardMultimodal(w http.ResponseWriter, r *http.Request, 
 func (h *ChatHandler) HandleImages(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -154,7 +155,7 @@ func (h *ChatHandler) HandleImages(w http.ResponseWriter, r *http.Request) {
 func (h *ChatHandler) HandleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -177,7 +178,7 @@ func (h *ChatHandler) HandleAudioTranscriptions(w http.ResponseWriter, r *http.R
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -228,7 +229,7 @@ func (h *ChatHandler) HandleAudioTranscriptions(w http.ResponseWriter, r *http.R
 func (h *ChatHandler) HandleVideoGenerations(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -246,7 +247,7 @@ func (h *ChatHandler) HandleVideoGenerations(w http.ResponseWriter, r *http.Requ
 func (h *ChatHandler) HandleVideoEdits(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()
@@ -264,7 +265,7 @@ func (h *ChatHandler) HandleVideoEdits(w http.ResponseWriter, r *http.Request) {
 func (h *ChatHandler) HandleVideoExtensions(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read request body")
+		middleware.WriteBodyReadError(w, r, err)
 		return
 	}
 	defer r.Body.Close()

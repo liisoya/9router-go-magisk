@@ -204,3 +204,60 @@ func TestBuiltinModelTopLevelLimitsMatchCapabilities(t *testing.T) {
 		t.Errorf("max_completion_tokens = %v, want %v (capabilities.maxOutput)", got, capMax)
 	}
 }
+
+// The published metadata must survive a caps block that carries a non-boolean
+// member. Real case: a bridge-backed node's row holds "thinkingFormat":"effort"
+// inside caps, and the limits sit after caps in the stored JSON. Decoding
+// straight into map[string]bool used to abort at that member, drop
+// contextWindow/maxOutput, and republish 128000/4096 for a 1M/64k endpoint.
+func TestCustomModelDeclaredLimitsSurviveNonBooleanCaps(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	providers.ClearCustomModelCaps()
+	t.Cleanup(providers.ClearCustomModelCaps)
+
+	if _, err := database.Exec(`INSERT INTO providerNodes (id, type, name, data, createdAt, updatedAt) VALUES
+		('openai-compatible-chat-gsb', 'openai-compatible', 'Gemini Stealth Bridge',
+		 '{"prefix":"gsb","apiType":"chat","baseUrl":"https://gsb.example.com/v1"}',
+		 '2026-10-17T00:00:00Z', '2026-10-17T00:00:00Z')`); err != nil {
+		t.Fatalf("seed providerNode: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-gsb', 'openai-compatible-chat-gsb', 'apikey', 'gsb', 1, 1,
+		 '{"apiKey":"gsb-test","providerSpecificData":{"prefix":"gsb"}}',
+		 '2026-10-17T00:00:00Z', '2026-10-17T00:00:00Z')`); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+	row := `{"id":"gemini-argon","providerAlias":"openai-compatible-chat-gsb","type":"llm",` +
+		`"name":"gemini-argon","caps":{"vision":true,"reasoning":true,"search":true,"tools":true,` +
+		`"thinkingEffortSupported":true,"thinkingCanDisable":false,"thinkingFormat":"effort"},` +
+		`"contextWindow":1048576,"maxOutput":65536}`
+	if _, err := database.Exec(`INSERT INTO kv (scope, key, value) VALUES ('customModels', ?, ?)`,
+		"openai-compatible-chat-gsb|gemini-argon|llm", row); err != nil {
+		t.Fatalf("seed customModels: %v", err)
+	}
+
+	handler := NewChatHandler(db.NewRepo(database))
+	w := httptest.NewRecorder()
+	handler.HandleModels(w, httptest.NewRequest("GET", "/v1/models", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	entry := findModelInfo(t, w.Body.Bytes(), "gsb/gemini-argon")
+	if got := int(entry["context_length"].(float64)); got != 1048576 {
+		t.Errorf("context_length = %d, want the declared 1048576", got)
+	}
+	if got := int(entry["max_completion_tokens"].(float64)); got != 65536 {
+		t.Errorf("max_completion_tokens = %d, want the declared 65536", got)
+	}
+	caps, ok := entry["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("entry carries no capabilities block: %v", entry)
+	}
+	if got := int(caps["contextWindow"].(float64)); got != 1048576 {
+		t.Errorf("capabilities.contextWindow = %d, want 1048576", got)
+	}
+	if got := int(caps["maxOutput"].(float64)); got != 65536 {
+		t.Errorf("capabilities.maxOutput = %d, want 65536", got)
+	}
+}

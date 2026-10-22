@@ -314,6 +314,19 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},
+	// DeepSeek Web: the consumer chat site reached with the credential a browser
+	// login leaves behind, mirrored from OmniRoute
+	// open-sse/config/providers/registry/deepseek/web/index.ts. It is a distinct
+	// deployment with its own credential and quota, so it is never aliased onto
+	// the API-key `deepseek` above (AGENTS.md section 3.A). Unlike grok-web and
+	// perplexity-web it does not send the pasted value as a raw cookie: the
+	// userToken is exchanged for a short-lived Bearer access token first, which
+	// is why it keeps the Authorization/bearer shape.
+	"deepseek-web": {
+		BaseURL:    "https://chat.deepseek.com/api/v0/chat/completion",
+		AuthHeader: "Authorization",
+		AuthScheme: "bearer",
+	},
 	// SumoPod — Indonesian AI gateway (ai.sumopod.com), OpenAI-compatible
 	// chat completions with 60+ models across Claude, Gemini, GPT, DeepSeek,
 	// Qwen, GLM, Kimi, MiniMax, Seed, Grok, Hy and Mimo.
@@ -388,6 +401,23 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 		Format:     "gemini-openai",
+	},
+	// Gemini Web: gemini.google.com reached directly over HTTP, the way the
+	// page's own JavaScript reaches it. This was never an API — but it is an
+	// HTTP surface, and the executor drives it without a browser.
+	//
+	// NoAuth because the site answers an anonymous visitor: one model is served
+	// with no credential at all. A pasted __Secure-1PSID cookie is honored when
+	// one is configured, and the only thing it buys is the choice of model — an
+	// anonymous session is served one, a signed-in one several. Requiring a
+	// cookie would turn a plug-and-play provider into one that is not, for no
+	// gain.
+	"gemini-web": {
+		BaseURL:       "https://gemini.google.com/app",
+		AuthHeader:    "Authorization",
+		AuthScheme:    "bearer",
+		DefaultAPIKey: "anonymous",
+		NoAuth:        true,
 	},
 	"antigravity": {
 		BaseURL:    "https://daily-cloudcode-pa.googleapis.com",

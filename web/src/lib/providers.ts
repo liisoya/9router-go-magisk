@@ -2224,6 +2224,36 @@ export const PROVIDER_CATALOG: ProviderCatalogItem[] = [
     ]
   },
   {
+    "id": "deepseek-web",
+    "name": "DeepSeek Web",
+    "category": "webCookie",
+    "alias": "ds-web",
+    "color": "#4D6BFE",
+    "icon": "auto_awesome",
+    "website": "https://chat.deepseek.com",
+    "authType": "cookie",
+    "authHint": "Paste your userToken from chat.deepseek.com — DevTools → Application → Local Storage → userToken",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
+    "id": "gemini-web",
+    "name": "Gemini Web",
+    "category": "webCookie",
+    "alias": "gweb",
+    "color": "#4285F4",
+    "icon": "auto_awesome",
+    "website": "https://gemini.google.com",
+    "authType": "cookie",
+    "authHint": "Optional. Works with no cookie at all — an anonymous gemini.google.com session reaches one model. Paste __Secure-1PSID from a signed-in tab to reach the others.",
+    "noAuth": false,
+    "serviceKinds": [
+      "llm"
+    ]
+  },
+  {
     "id": "selfhosted-tts",
     "name": "Self-Hosted TTS",
     "category": "apikey",

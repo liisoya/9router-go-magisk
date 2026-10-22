@@ -22,18 +22,19 @@ var errorTypes = map[int]struct {
 	errType string
 	errCode string
 }{
-	http.StatusBadRequest:          {errType: "invalid_request_error", errCode: "bad_request"},
-	http.StatusUnauthorized:        {errType: "authentication_error", errCode: "invalid_api_key"},
-	http.StatusPaymentRequired:     {errType: "billing_error", errCode: "payment_required"},
-	http.StatusForbidden:           {errType: "permission_error", errCode: "insufficient_quota"},
-	http.StatusNotFound:            {errType: "invalid_request_error", errCode: "model_not_found"},
-	http.StatusMethodNotAllowed:    {errType: "invalid_request_error", errCode: "method_not_allowed"},
-	http.StatusNotAcceptable:       {errType: "invalid_request_error", errCode: "model_not_supported"},
-	http.StatusTooManyRequests:     {errType: "rate_limit_error", errCode: "rate_limit_exceeded"},
-	http.StatusInternalServerError: {errType: "server_error", errCode: "internal_server_error"},
-	http.StatusBadGateway:          {errType: "server_error", errCode: "bad_gateway"},
-	http.StatusServiceUnavailable:  {errType: "server_error", errCode: "service_unavailable"},
-	http.StatusGatewayTimeout:      {errType: "server_error", errCode: "gateway_timeout"},
+	http.StatusBadRequest:            {errType: "invalid_request_error", errCode: "bad_request"},
+	http.StatusUnauthorized:          {errType: "authentication_error", errCode: "invalid_api_key"},
+	http.StatusPaymentRequired:       {errType: "billing_error", errCode: "payment_required"},
+	http.StatusForbidden:             {errType: "permission_error", errCode: "insufficient_quota"},
+	http.StatusNotFound:              {errType: "invalid_request_error", errCode: "model_not_found"},
+	http.StatusMethodNotAllowed:      {errType: "invalid_request_error", errCode: "method_not_allowed"},
+	http.StatusNotAcceptable:         {errType: "invalid_request_error", errCode: "model_not_supported"},
+	http.StatusTooManyRequests:       {errType: "rate_limit_error", errCode: "rate_limit_exceeded"},
+	http.StatusRequestEntityTooLarge: {errType: "invalid_request_error", errCode: "payload_too_large"},
+	http.StatusInternalServerError:   {errType: "server_error", errCode: "internal_server_error"},
+	http.StatusBadGateway:            {errType: "server_error", errCode: "bad_gateway"},
+	http.StatusServiceUnavailable:    {errType: "server_error", errCode: "service_unavailable"},
+	http.StatusGatewayTimeout:        {errType: "server_error", errCode: "gateway_timeout"},
 }
 
 // WriteJSONError writes a standardized JSON error response with status-code-aware
@@ -54,6 +55,39 @@ func WriteJSONError(w http.ResponseWriter, status int, message string) {
 			"message": message,
 			"type":    errType,
 			"code":    errCode,
+		},
+	}
+	if err := json.MarshalWrite(w, errResp, deterministicJSON); err != nil {
+		w.Write([]byte(`{"error":{"message":"internal error","type":"server_error","code":"internal_server_error"}}`))
+	}
+}
+
+// WriteJSONErrorCode writes a standardized JSON error with an explicit code.
+// WriteJSONError derives the code from the status, which is enough when one
+// status means exactly one thing — but 502 covers "the upstream refused the
+// connection" as well as "the upstream answered something we could not read",
+// and a client (or a support conversation) needs to tell those apart. Callers
+// that resolved a more precise code pass it here; the error *type* still comes
+// from the status, so the shape of the envelope is unchanged.
+func WriteJSONErrorCode(w http.ResponseWriter, status int, code, message string) {
+	if code == "" {
+		WriteJSONError(w, status, message)
+		return
+	}
+
+	w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+	w.WriteHeader(status)
+
+	errType := "invalid_request_error"
+	if t, ok := errorTypes[status]; ok {
+		errType = t.errType
+	}
+
+	errResp := map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    errType,
+			"code":    code,
 		},
 	}
 	if err := json.MarshalWrite(w, errResp, deterministicJSON); err != nil {

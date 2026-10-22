@@ -56,6 +56,11 @@
   let providerAuthHint = $derived(catalogItem?.authHint || '')
   let providerWebsite = $derived(catalogItem?.website || '')
   let isCookie = $derived(providerAuthType === 'cookie' || catalogItem?.category === 'webCookie')
+  // A browser-login provider stores a pasted session credential, not an API key.
+  // The dashboard probe dispatcher already branches on authType 'cookie'
+  // (connection_probe.go), so persisting 'apikey' here made every cookie
+  // provider take the wrong probe path. Both submit paths read this one value.
+  let connectionAuthType = $derived(isCompatible ? 'compatible' : isCookie ? 'cookie' : 'apikey')
   let isOllamaLocal = $derived(providerId === 'ollama-local')
   let isXaiApiKey = $derived(providerId === 'xai' && !isCookie)
   let isAzure = $derived(providerId === 'azure')
@@ -261,7 +266,7 @@
       const isValid = await runValidation()
       await onSubmit({
         provider: providerId,
-        authType: isCompatible ? 'compatible' : 'apikey',
+        authType: connectionAuthType,
         name: formName.trim(),
         apiKey: formApiKey,
         priority: formPriority,
@@ -292,7 +297,7 @@
         })
         await api.createConnection({
           provider: providerId,
-          authType: 'apikey',
+          authType: connectionAuthType,
           name: entry.name,
           apiKey: entry.apiKey,
           priority: 1,

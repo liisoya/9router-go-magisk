@@ -8,8 +8,6 @@ import (
 	"testing"
 )
 
-// hostStub describes the OS facts Detect and the Windows guard read. Zero
-// values are meaningful: an empty bins/dirs map means nothing was found.
 type hostStub struct {
 	goos string
 	euid int
@@ -17,8 +15,7 @@ type hostStub struct {
 	dirs map[string]bool
 }
 
-// stubHost swaps the package seams for the duration of the test, so every OS,
-// privilege, and init branch can be exercised from one runner.
+// stubHost swaps the OS and privilege seams so every branch runs on one host.
 func stubHost(t *testing.T, h hostStub) {
 	t.Helper()
 	previousGoos, previousEuid := goos, geteuid
@@ -32,8 +29,6 @@ func stubHost(t *testing.T, h hostStub) {
 	})
 }
 
-// stubRunFunc records supervisor invocations and answers them with fn. A nil fn
-// answers every call with empty output and no error, matching stubRun.
 func stubRunFunc(t *testing.T, fn func(name string, args ...string) (string, error)) *[]svcCall {
 	t.Helper()
 	previous := run
@@ -49,9 +44,7 @@ func stubRunFunc(t *testing.T, fn func(name string, args ...string) (string, err
 	return calls
 }
 
-// redirectInitPaths points the root-owned OpenRC and runit locations at one
-// temp tree, so those backends' root branches can be tested without touching
-// the real /etc or /var.
+// redirectInitPaths points the root-owned OpenRC and runit paths at a temp tree.
 func redirectInitPaths(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -67,8 +60,8 @@ func redirectInitPaths(t *testing.T) string {
 	return root
 }
 
-// stubCrontab swaps the crontab readers for an in-memory one. It returns the
-// last content written so tests can assert what would reach the user's crontab.
+// stubCrontab swaps the crontab reader/writer for an in-memory one and returns
+// the last content written.
 func stubCrontab(t *testing.T, initial string) *string {
 	t.Helper()
 	previousRead, previousWrite := readCrontab, writeCrontab
@@ -83,11 +76,8 @@ func stubCrontab(t *testing.T, initial string) *string {
 	return written
 }
 
-// setHome points the user-scoped paths (systemd user unit, launchd plist,
-// autostart desktop, runit ~/service) at a fresh temp home. It swaps the
-// userHomeDir seam rather than HOME: os.UserHomeDir reads %USERPROFILE% on
-// Windows, so a HOME-only override resolves to the runner's real home there
-// and the tests would write into it.
+// setHome points the user-scoped paths at a temp home. It swaps the userHomeDir
+// seam rather than HOME because os.UserHomeDir reads %USERPROFILE% on Windows.
 func setHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -95,15 +85,11 @@ func setHome(t *testing.T) string {
 	return home
 }
 
-// stubNoHome simulates a machine with no resolvable home directory, which the
-// user-scoped backends must reject rather than fall back to a real path.
 func stubNoHome(t *testing.T) {
 	t.Helper()
 	stubUserHomeDir(t, "", errors.New("no home directory"))
 }
 
-// stubUserHomeDir swaps the home-directory seam. A non-nil err simulates a
-// machine where the home cannot be resolved.
 func stubUserHomeDir(t *testing.T, home string, err error) {
 	t.Helper()
 	previous := userHomeDir
@@ -111,8 +97,6 @@ func stubUserHomeDir(t *testing.T, home string, err error) {
 	t.Cleanup(func() { userHomeDir = previous })
 }
 
-// stubWindowsTaskUser pins the account the Windows scheduled task is created
-// for, so tests do not depend on the runner's USERNAME.
 func stubWindowsTaskUser(t *testing.T, user string) {
 	t.Helper()
 	previous := windowsTaskUser
@@ -120,12 +104,8 @@ func stubWindowsTaskUser(t *testing.T, user string) {
 	t.Cleanup(func() { windowsTaskUser = previous })
 }
 
-// linkStub records the symlink and removal calls the runit backend makes.
-// It still performs them for real when the runner allows it, so assertions
-// about the resulting filesystem keep working on Linux; on Windows, where
-// creating a symlink needs SeCreateSymbolicLinkPrivilege, the real call is
-// skipped and only the request is recorded. That keeps the runit activation
-// path covered on every runner instead of skipped outright.
+// linkStub records runit symlink/remove calls, still performing them where the
+// runner allows it; on Windows the symlink needs a privilege, so it is only recorded.
 type linkStub struct {
 	created []string
 	removed []string
@@ -151,9 +131,8 @@ func stubLinks(t *testing.T) *linkStub {
 	return stub
 }
 
-// probeSymlink reports whether this runner can create a symlink, by trying it
-// in a temp dir rather than assuming from the OS: developer mode, elevated
-// shells and CI images differ.
+// probeSymlink tries a real symlink in a temp dir: the privilege varies by OS,
+// developer mode, and CI image.
 func probeSymlink(t *testing.T) bool {
 	t.Helper()
 	target := filepath.Join(t.TempDir(), "target")

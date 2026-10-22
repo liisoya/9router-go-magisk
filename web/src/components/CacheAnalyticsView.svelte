@@ -13,6 +13,7 @@
   import PeriodSelect from './analytics/PeriodSelect.svelte'
   import { periodLabel, type Period } from './analytics/types'
   import type { ViewOption } from './analytics/types'
+  import { costIn } from '../lib/currency.svelte'
 
   type CacheView = 'prompt' | 'semantic'
 
@@ -384,7 +385,7 @@
         </div>
         <div class="mt-3">
           <div class="text-2xl font-bold text-emerald-500">
-            ${(pc?.estimatedCostSaved ?? 0).toFixed(2)}
+            {costIn(pc?.estimatedCostSaved ?? 0)}
           </div>
           <p class="text-xs text-text-subtle mt-1 truncate">Estimated savings</p>
         </div>

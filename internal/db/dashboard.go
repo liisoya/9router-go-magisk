@@ -1,15 +1,14 @@
 package db
 
 import (
+	"9router/proxy/internal/models"
+	"context"
 	"database/sql"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
 	"time"
-
-	"9router/proxy/internal/handlerutil"
-	"9router/proxy/internal/models"
 )
 
 // UpdateProviderConnection updates a provider connection's name, priority, isActive, data, and updatedAt.
@@ -330,7 +329,10 @@ func (r *Repo) SetApiKeyBudget(keyID string, tokenQuota, queueTimeoutMs int) err
 }
 
 // GetApiKeyTokenUsage returns the cumulative prompt+completion tokens a key has
-// spent over its whole life, which is what tokenQuota is measured against.
+// spent since its budget was last reset, which is what tokenQuota is measured
+// against. A key that has never been reset spends against its whole life, the
+// pre-#365 answer; see ResetApiKeyQuota for why the reset is a baseline stamp
+// rather than a counter.
 //
 // Matching is by the raw key's masked form, because that is what this gateway
 // writes into usageHistory (maskAPIKey). The stored value is not uniform across
@@ -338,19 +340,15 @@ func (r *Repo) SetApiKeyBudget(keyID string, tokenQuota, queueTimeoutMs int) err
 // key, so both spellings are matched. A missing or empty history is 0 tokens
 // spent, not an error — a fresh key has simply spent nothing.
 func (r *Repo) GetApiKeyTokenUsage(rawKey string) (int, error) {
-	if rawKey == "" {
-		return 0, nil
-	}
-	var used int64
-	err := r.db.QueryRow(
-		`SELECT COALESCE(SUM(COALESCE(promptTokens,0) + COALESCE(completionTokens,0)), 0)
-		   FROM usageHistory WHERE apiKey = ? OR apiKey = ?`,
-		rawKey, handlerutil.MaskAPIKey(rawKey),
-	).Scan(&used)
+	// The limiter's reader interface predates context, and this method is the
+	// one it calls, so the lookup runs on the background context rather than
+	// widening a shipped interface from under the middleware package.
+	ctx := context.Background()
+	mark, err := r.quotaResetIDForKey(ctx, rawKey)
 	if err != nil {
-		return 0, fmt.Errorf("get api key token usage: %w", err)
+		return 0, err
 	}
-	return int(used), nil
+	return r.tokenUsageSince(ctx, rawKey, mark)
 }
 
 // SetApiKeyExpiry sets expiresAt for an API key.

@@ -206,3 +206,43 @@ func containsPlaceholder(body []byte) bool {
 	}
 	return false
 }
+
+// sameTail decides whether cleanup changed the tail of a conversation, and the
+// caller re-encodes the whole body when it says yes. It compared the two
+// messages by their JSON text, which cannot work: json/v2 marshals a Go map in
+// a non-deterministic order (v1 sorted the keys, v2 does not), so two identical
+// messages serialise differently about one time in ten. A clean body was then
+// re-encoded for no reason — and, because that re-encoding is itself
+// order-random, the same request produced different bytes on every attempt.
+func TestSameTail_ComparesByValueNotByJSONText(t *testing.T) {
+	tail := func() []any {
+		return []any{
+			map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "user", "content": "again"},
+		}
+	}
+
+	// Enough attempts that a text comparison would fail here reliably: the
+	// observed rate was roughly one in ten.
+	for i := 0; i < 500; i++ {
+		if !sameTail(tail(), tail()) {
+			t.Fatalf("identical tails reported as different on attempt %d", i)
+		}
+	}
+
+	changed := tail()
+	changed[len(changed)-1] = map[string]any{"role": "user", "content": "different"}
+	if sameTail(changed, tail()) {
+		t.Fatal("a genuinely different tail was reported as unchanged")
+	}
+
+	// A tail that gained the placeholder is a change even though the shared
+	// prefix is identical.
+	longer := append(tail(), map[string]any{
+		"role":    "user",
+		"content": []any{map[string]any{"type": "text", "text": TrailingUserPlaceholder}},
+	})
+	if sameTail(longer, tail()) {
+		t.Fatal("a repaired tail was reported as unchanged")
+	}
+}

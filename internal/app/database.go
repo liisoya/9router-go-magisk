@@ -108,7 +108,8 @@ func ProvideRepo(conn *sql.DB) *db.Repo {
 // cannot seal keeps working in plaintext, which is strictly better than a
 // gateway that refuses to start.
 func MigrateVault(repo *db.Repo, cfg *config.Config) error {
-	result, err := repo.MigratePlaintextCredentials(cfg.DatabasePath)
+	ctx := context.Background()
+	result, err := repo.MigratePlaintextCredentials(ctx, cfg.DatabasePath)
 	if err != nil {
 		log.Warn("vault", "plaintext credential migration skipped", "error", err)
 		return nil

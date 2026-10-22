@@ -29,6 +29,10 @@ import (
 // StatusClientClosedRequest is the canonical HTTP status for client connection aborts (nginx 499).
 const StatusClientClosedRequest = 499
 
+// clientClosedBody is the JSON body that travels with StatusClientClosedRequest.
+// Single-sourced so the combo and account-fallback paths cannot drift apart.
+const clientClosedBody = `{"error":{"message":"client closed request","type":"client_closed_request","code":499}}`
+
 // borrowZenKeyForGo returns the identity and key of an active opencode-zen
 // connection for the paid go lane, which shares the same backend account.
 // Only used when no go connection exists at all; resolution goes through the
@@ -186,6 +190,17 @@ func (h *ChatHandler) handleAccountFallback(
 				excludeIDs = append(excludeIDs, connObj.ID)
 				continue
 			}
+			// A free-tier refusal says nothing about the account: the gate is
+			// not serving this egress at the moment, and the same connection
+			// serves the next request once it reopens. Cooling it down would
+			// mark a healthy account unhealthy and skip it for later requests,
+			// so the refusal is reported without touching the cooldown.
+			if isOpencodeFreeTierRefusal(provider, ue) {
+				log.Warn("fallback", "opencode free-tier refusal, not locking the account",
+					"conn", connObj.ID, "provider", provider, "model", model)
+				excludeIDs = append(excludeIDs, connObj.ID)
+				continue
+			}
 			// Extract error text from upstream body for classification
 			errorText := extractErrorText(ue.Body)
 			// Get current backoff level from this connection
@@ -226,9 +241,52 @@ func (h *ChatHandler) handleAccountFallback(
 		return lastErr
 	}
 	if lastErr != nil {
-		return lastErr
+		return opencodeClosureError(provider, model, lastErr)
 	}
 	return fmt.Errorf("no available connections for provider: %s", provider)
+}
+
+// opencodeClosureError turns a free-tier refusal that survived the executor's
+// retries into a response the caller can act on, instead of forwarding the
+// upstream 403 verbatim.
+//
+// The gate answers 403 FreeTierError when it is not serving free traffic from
+// this egress at that moment. That is a temporary unavailability of a shared
+// free tier, not a verdict on the caller's credentials — but a 403 is read as
+// "you are not allowed" by every client, including this gateway's own
+// callers, so an agent loop stops mid-tool-call and the user is left with a
+// wall of text about downloading OpenCode.
+//
+// 503 + Retry-After is the honest signal for "temporarily not available, come
+// back": it tells a client to back off and retry rather than to give up or to
+// assume its key is wrong. The upstream's own wording is preserved in the
+// message so the cause is still diagnosable, and the type names the condition
+// so a client can branch on it without string matching.
+func opencodeClosureError(provider, model string, err error) error {
+	var ue *upstreamError
+	if !errors.As(err, &ue) || !isOpencodeFreeTierRefusal(provider, ue) {
+		return err
+	}
+	const retryAfterSeconds = 30
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": fmt.Sprintf(
+				"OpenCode's free tier is not serving requests right now. This is an upstream condition rather than a problem with your request or credentials. Retry in about %ds, or use a paid %s key or another provider.",
+				retryAfterSeconds, provider),
+			"type": "free_tier_unavailable",
+			"code": http.StatusServiceUnavailable,
+		},
+	})
+	log.Warn("fallback", "opencode free tier refused after retries; reporting unavailable instead of the raw 403",
+		"provider", provider, "model", model, "retry_after_s", retryAfterSeconds)
+	return &upstreamError{
+		StatusCode: http.StatusServiceUnavailable,
+		Body:       body,
+		Header: http.Header{
+			"Retry-After":  []string{fmt.Sprint(retryAfterSeconds)},
+			"Content-Type": []string{"application/json"},
+		},
+	}
 }
 
 // tryForwardWithConnection attempts a single upstream request using the given connection data.
@@ -509,10 +567,19 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	metrics := &streamMetrics{}
 	var fwdErr error
 
-	usagetracker.GetTracker().TrackPending(model, provider, connectionID, true, false)
+	// The names behind this in-flight request. The forwarder carries both: for
+	// a combo request RequestedModel is the combo the client asked for and
+	// ComboName marks that a combo served it, while model/provider name the
+	// member that is doing the work. The dashboard animates exactly that hop.
+	requestedName := f.RequestedModel
+	if requestedName == "" {
+		requestedName = translator.RequestedModelFromContext(ctx)
+	}
+	comboName := f.ComboName
+	usagetracker.GetTracker().TrackPendingRequested(requestedName, comboName, model, provider, connectionID, true, false)
 	defer func() {
 		hasErr := fwdErr != nil
-		usagetracker.GetTracker().TrackPending(model, provider, connectionID, false, hasErr)
+		usagetracker.GetTracker().TrackPendingRequested(requestedName, comboName, model, provider, connectionID, false, hasErr)
 	}()
 
 	// A connection bound to a pool that cannot serve traffic must fail before
@@ -604,7 +671,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	if reserved, ok := middleware.ReservedTokensFromContext(ctx); ok && h.RateLimiter != nil {
 		if clientKey := requestKeyFromContext(ctx); clientKey != nil {
 			ctx = middleware.WithTokenSettler(ctx, func(actual int) {
-				if limit := middleware.EffectiveTPM(h.rateLimitDefaults(), clientKey); limit > 0 {
+				if limit := h.RateLimiter.EffectiveTPM(h.rateLimitDefaults(), clientKey); limit > 0 {
 					h.RateLimiter.SettleTokenUsage(clientKey.ID, limit, reserved, actual)
 				}
 			})
@@ -882,6 +949,14 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	}
 
 	observ.IncUpstreamError(provider, model, statusCode)
+	// A client that hung up is not an upstream failure. Returning the raw error
+	// here made every abort surface as a bare 502 at the write sites in chat.go:
+	// the caller saw "upstream error: context canceled" and the request log
+	// recorded a 5xx for a disconnect the gateway did not cause. The combo path
+	// already reports this as 499, so the two agree.
+	if isClientCanceled(ctx, fwdErr) {
+		return &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(clientClosedBody)}
+	}
 	return fwdErr
 }
 func isClientCanceled(ctx context.Context, err error) bool {
@@ -967,6 +1042,21 @@ func (h *ChatHandler) applyTokenSavers(body []byte, claudeNative bool) ([]byte, 
 		prompt := tokensaver.GetADHDPrompt(h.TokenSaver.ADHDLevel())
 		if next, did := inject(out, prompt); did {
 			out = next
+		}
+	}
+	// Global system prompt, last in the chain so the prefix stays the first
+	// thing the model reads and the suffix its last word — after every style
+	// prompt has been appended in between.
+	if h.TokenSaver.SystemPromptEnabled() {
+		if prefix := h.TokenSaver.SystemPromptPrefix(); prefix != "" {
+			if next, did := tokensaver.InjectPrefixSystemPrompt(out, prefix, claudeNative); did {
+				out = next
+			}
+		}
+		if suffix := h.TokenSaver.SystemPromptSuffix(); suffix != "" {
+			if next, did := tokensaver.InjectSuffixSystemPrompt(out, suffix, claudeNative); did {
+				out = next
+			}
 		}
 	}
 	return out, origTokens, savedTokens, savedPct
@@ -1225,6 +1315,31 @@ func mentionsGate(lower string) bool {
 // credential failure. For model-scoped errors, only LockConnectionModel and
 // RecordConnectionError are set so that unrelated healthy models on the same account
 // remain available.
+// isOpencodeFreeTierRefusal reports whether an upstream failure is the OpenCode
+// free-tier gate refusing to serve this traffic, rather than a problem with the
+// account, key or request.
+//
+// The gate answers 403 with a body whose type is FreeTierError when it is not
+// serving free traffic from this egress at that moment. That says nothing about
+// the caller's credentials, and a 403 is read as "you are not allowed" by every
+// client — so it must not be forwarded verbatim; see opencodeClosureError.
+//
+// The provider check keeps every other provider's 403 handling untouched, and
+// the body check keeps a genuine OpenCode auth or quota 403 on the normal path.
+func isOpencodeFreeTierRefusal(provider string, ue *upstreamError) bool {
+	switch provider {
+	case "opencode", "opencode-zen", "opencode-go":
+	default:
+		return false
+	}
+	if ue == nil || ue.StatusCode != http.StatusForbidden {
+		return false
+	}
+	// Match the error type, not the prose: the gate's message text has already
+	// been reworded once.
+	return bytes.Contains(ue.Body, []byte("FreeTierError"))
+}
+
 func isModelScopedError(statusCode int, errorText string, model string) bool {
 	if model == "" {
 		return false

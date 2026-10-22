@@ -377,7 +377,7 @@ func TestFreebuff_RequestSession_ModelLocked_Recovery(t *testing.T) {
 	model := "z-ai/glm-5.3-flash"
 	clearFreebuffSession(token, model)
 
-	sess, err := requestFreebuffSession(context.Background(), srv.Client(), srv.URL, token, model)
+	sess, err := requestFreebuffSession(context.Background(), srv.Client(), srv.URL, token, model, nil)
 	if err != nil {
 		t.Fatalf("expected recovery when requestedModel==currentModel, got err: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestFreebuff_RequestSession_ModelLocked_ConflictError(t *testing.T) {
 	model := "mimo/mimo-v2.5"
 	clearFreebuffSession(token, model)
 
-	sess, err := requestFreebuffSession(context.Background(), srv.Client(), srv.URL, token, model)
+	sess, err := requestFreebuffSession(context.Background(), srv.Client(), srv.URL, token, model, nil)
 	if sess != nil {
 		t.Fatalf("expected nil session on model_locked mismatch, got %v", sess)
 	}
@@ -532,7 +532,7 @@ func TestFreebuff_RequestSession_EmptyInstanceID(t *testing.T) {
 	model := "z-ai/glm-5.3-flash"
 	clearFreebuffSession(token, model)
 
-	sess, err := requestFreebuffSession(context.Background(), srv.Client(), srv.URL, token, model)
+	sess, err := requestFreebuffSession(context.Background(), srv.Client(), srv.URL, token, model, nil)
 	if sess != nil {
 		t.Fatalf("expected nil session on empty instanceId, got %v", sess)
 	}

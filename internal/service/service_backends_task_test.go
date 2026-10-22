@@ -46,8 +46,7 @@ func TestInstallWindowsTaskOnWindows(t *testing.T) {
 	if create == nil {
 		t.Fatalf("calls = %v, want a schtasks /create", *calls)
 	}
-	// The task must not run as SYSTEM (it would read a different %APPDATA%
-	// data dir and need elevation to create) and must be a logon task.
+	// The task must not run as SYSTEM (different %APPDATA%, needs elevation).
 	if slices.Contains(create.args, "SYSTEM") {
 		t.Errorf("schtasks /create args = %v, must not run as SYSTEM", create.args)
 	}
@@ -71,10 +70,8 @@ func TestInstallWindowsTaskOnWindows(t *testing.T) {
 	}
 }
 
-// TestWindowsCommandLineQuotesForCmd pins the quoting contract: the /tr value
-// is read by cmd.exe, so a spaced path is wrapped verbatim. strconv.Quote
-// (correct for the POSIX targets) would emit "C:\\Program Files\\..." and the
-// task would never fire when installed under C:\Program Files.
+// TestWindowsCommandLineQuotesForCmd: the /tr value is read by cmd.exe, so a
+// spaced path is wrapped verbatim, not escaped the way strconv.Quote would.
 func TestWindowsCommandLineQuotesForCmd(t *testing.T) {
 	got := windowsCommandLine(`C:\Program Files\9router\9router-go.exe`, []string{"--rtk=true"})
 	want := `"C:\Program Files\9router\9router-go.exe" --rtk=true`
@@ -86,7 +83,6 @@ func TestWindowsCommandLineQuotesForCmd(t *testing.T) {
 	}
 }
 
-// argAfter returns the argument following flag, or "" when absent.
 func argAfter(args []string, flag string) string {
 	for i, arg := range args {
 		if arg == flag && i+1 < len(args) {
@@ -144,13 +140,12 @@ func TestStatusWindowsTask(t *testing.T) {
 		wantUnk  bool
 	}{
 		{name: "task present and running", state: "4", wantOK: true, wantAct: true},
-		// Ready is ordinal 3. Matching the string "Running" instead of the
-		// ordinal is what made this report false on a non-English Windows.
+		// Ready is ordinal 3; matching the localized "Running" string broke
+		// non-English Windows.
 		{name: "task present but ready", state: "3", wantOK: true, wantAct: false},
 		{name: "task disabled", state: "1", wantOK: true, wantAct: false},
 		{name: "query error", probeErr: errors.New("no task"), wantOK: false},
-		// PowerShell absent or blocked: the entry exists, but its state does
-		// not. Reporting Active: false there would be a guess stated as fact.
+		// PowerShell absent or blocked: report the state unknown, not false.
 		{name: "unprobeable state is reported as unknown", state: "", wantOK: true, wantUnk: true},
 	}
 	for _, tt := range tests {

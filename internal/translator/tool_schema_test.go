@@ -232,7 +232,7 @@ func TestEffortToBudget_AndExtractThoughtSig(t *testing.T) {
 }
 
 func TestFixAntigravityContents(t *testing.T) {
-	if fixAntigravityContents(nil) {
+	if fixAntigravityContents(nil, "") {
 		t.Error("expected false for nil")
 	}
 
@@ -254,7 +254,7 @@ func TestFixAntigravityContents(t *testing.T) {
 			},
 		},
 	}
-	changed := fixAntigravityContents(req)
+	changed := fixAntigravityContents(req, "")
 	if !changed {
 		t.Fatal("expected changed=true")
 	}

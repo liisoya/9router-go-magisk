@@ -2,11 +2,8 @@ package service
 
 import "testing"
 
-// TestDetect covers every branch of backend selection: the Windows and macOS
-// short-circuits, the override escape hatch (whose systemd aliases all resolve
-// to the unprivileged user unit), the generic non-Linux fallback, and the full
-// Linux init priority ladder — including OpenRC, which is detected wherever it
-// is the host init and refused without root at install time.
+// TestDetect covers every backend-selection branch: the OS short-circuits, the
+// override aliases, the non-Linux fallback, and the Linux init priority ladder.
 func TestDetect(t *testing.T) {
 	tests := []struct {
 		name     string

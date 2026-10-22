@@ -2,6 +2,7 @@ package providers
 
 import (
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"unique"
@@ -28,7 +29,19 @@ func InvalidateCapabilitiesCache() {
 }
 
 // SetCustomModelCaps registers caps for a custom model (provider/model).
+//
+// A model id the provider's static registry catalog already owns is refused
+// here: the catalog is what the gateway advertises for a known model (context
+// window, max output, modality flags), and a custom row saved under the same id
+// must not replace those numbers. The refusal lives at this one writer so that
+// every publisher obeys it — GET /v1/models and /api/models/caps both call this
+// — instead of each route remembering to filter its own input first. The map is
+// process-wide, so publishing on the wrong route used to change every later
+// capability read for the lifetime of the process.
 func SetCustomModelCaps(provider, model string, caps Capabilities) {
+	if staticCatalogOwnsModel(provider, model) {
+		return
+	}
 	key := provider + "||" + model
 	customCapsMu.Lock()
 	customCaps[key] = caps
@@ -43,6 +56,23 @@ func SetCustomModelCaps(provider, model string, caps Capabilities) {
 	customCapsMu.Unlock()
 	// Invalidate cache so new caps are picked up
 	InvalidateCapabilitiesCache()
+}
+
+// staticCatalogOwnsModel reports whether the static registry catalog for
+// provider already lists model. GetProviderModels resolves provider aliases
+// itself ("ocz" finds the opencode-zen catalog), and a provider-qualified id
+// ("ocz/mimo-v2.6-flash-free") is matched by its bare id as well, mirroring the
+// two keys SetCustomModelCaps writes. A provider node prefix has no static
+// catalog, so nothing published under one is refused.
+func staticCatalogOwnsModel(provider, model string) bool {
+	ids := GetProviderModels(provider)
+	if len(ids) == 0 {
+		return false
+	}
+	if _, base, ok := strings.CutLast(model, "/"); ok {
+		return slices.Contains(ids, model) || slices.Contains(ids, base)
+	}
+	return slices.Contains(ids, model)
 }
 
 // GetCustomModelCaps returns custom caps if present.
@@ -136,10 +166,10 @@ var DefaultCapabilities = Capabilities{
 }
 
 var modelCapabilities = map[string]Capabilities{
-	"claude-opus-5":                    {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-5-thinking":           {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-5-agentic":            {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-5-thinking-agentic":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-agentic":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-5-thinking-agentic": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	// Opus 5.5 — experimental preview on Kiro (1M context, 2x credits).
 	"claude-opus-5.5":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	"claude-opus-5.5-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
@@ -163,16 +193,16 @@ var modelCapabilities = map[string]Capabilities{
 	"claude-opus-5-5-high":     {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
 	"claude-opus-5-5-medium":   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
 	"claude-opus-5-5-low":      {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
-	"claude-opus-4.6":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4.7":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4-7":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4.8":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4-6":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4-8":                  {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4.8-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-opus-4-8-thinking":         {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-sonnet-4.6":                {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-sonnet-4-6":                {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.6":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.7":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-7":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.8":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-6":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-8":          {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4.8-thinking": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-opus-4-8-thinking": {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-4.6":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-sonnet-4-6":        {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
 	// Sonnet 5.5 on Antigravity (upstream v0.5.99, a07ed95b): the bare id
 	// already had a row, but only the base spelling — the four effort
 	// variants fell through to the *claude*sonnet* pattern and lost the 1M
@@ -209,8 +239,8 @@ var modelCapabilities = map[string]Capabilities{
 	// it, so those ids keep the default instead of inheriting 3.0's numbers,
 	// and no `agnes*` glob is added — a pattern would also capture any future
 	// id this provider ships (see the pattern-ownership rule).
-	"agnes-3.0-pro":                    {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 512000, MaxOutput: 65536},
-	"agnes-3.0-flash":                  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 512000, MaxOutput: 65536},
+	"agnes-3.0-pro":   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 512000, MaxOutput: 65536},
+	"agnes-3.0-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ContextWindow: 512000, MaxOutput: 65536},
 	// GLM-5.3-FLASH is the multimodal z.ai line and it carries the full 1M
 	// window. Upstream decolua/9router#4656: z.ai's docs state that "GLM-5.3
 	// and GLM-5.3-FLASH no longer support disabling thinking (an error will
@@ -219,33 +249,33 @@ var modelCapabilities = map[string]Capabilities{
 	// enable_thinking:false on any turn that asked for no reasoning — z.ai
 	// answers 400 code 1210 "Invalid API parameter". It looked intermittent
 	// because only some turns ask.
-	"glm-5.3-flash":                {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
+	"glm-5.3-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
 	// claude-fable-5 (no -1 suffix) is adaptive-only like fable-5-1; upstream
 	// capabilities.js only matches it through *claude*fable* -> claude-budget,
 	// which produced thinking{type:"enabled"} and a 400 on the real API.
-	"claude-fable-5":                   {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
-	"claude-fable-5-1":                 {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
-	"glm-5.2":                          {Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
-	"glm-4.6v":                         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
-	"glm-4.5v":                         {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
-	"deepseek-v4-flash-vision-exp":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
-	"deepseek-v4-vision":               {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true},
-	"deepseek-v4.1-flash":              {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"claude-fable-5":               {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive"},
+	"claude-fable-5-1":             {Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-adaptive", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 128000},
+	"glm-5.2":                      {Reasoning: true, Tools: true, ThinkingFormat: "zai", ThinkingCanDisable: new(false)},
+	"glm-4.6v":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
+	"glm-4.5v":                     {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "zai"},
+	"deepseek-v4-flash-vision-exp": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"deepseek-v4-vision":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek", ThinkingEffortSupported: true},
+	"deepseek-v4.1-flash":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
 	// Some gateways publish this model under the hyphenated id (dash instead
 	// of dot); without the row it fell through to the text-only `*deepseek-v4*`
 	// pattern and lost its vision and 1M window.
-	"deepseek-v4-1-flash":              {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
-	"deepseek-flash":                   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
-	"muse-spark-1.2-contributor-free":  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
-	"muse-spark-1.3-contributor-free":  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
-	"vision-model":                     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"},
-	"coder-model":                      {Reasoning: true, Tools: true, ThinkingFormat: "qwen"},
-	"kimi-k3":                          {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
-	"k3":                               {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
-	"kimi-for-coding":                  {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
-	"kimi-for-coding-highspeed":        {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
-	"kimi-k2.7-code":                   {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
-	"kimi-k2.7-code-highspeed":         {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"deepseek-v4-1-flash":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"deepseek-flash":                  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
+	"muse-spark-1.2-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	"muse-spark-1.3-contributor-free": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai"},
+	"vision-model":                    {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "qwen"},
+	"coder-model":                     {Reasoning: true, Tools: true, ThinkingFormat: "qwen"},
+	"kimi-k3":                         {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"k3":                              {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"kimi-for-coding":                 {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"kimi-for-coding-highspeed":       {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"kimi-k2.7-code":                  {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
+	"kimi-k2.7-code-highspeed":        {Vision: true, VideoInput: true, Reasoning: true, Tools: true, ThinkingFormat: "kimi", ThinkingCanDisable: new(false)},
 }
 
 // codexExtendedContextWindow is the context window the codex registry
@@ -264,6 +294,7 @@ func codexGpt56Caps(contextWindow int) Capabilities {
 		ThinkingFormat: "openai", ContextWindow: contextWindow, MaxOutput: 128000,
 	}
 }
+
 // devinCLIGPTCaps is Devin CLI's own GPT declaration (upstream
 // DEVIN_CLI_GPT_CAPS): a 200k window even though the models are GPT-5.4/5.5.
 var devinCLIGPTCaps = Capabilities{
@@ -314,12 +345,12 @@ var providerCapabilities = map[string]map[string]Capabilities{
 	// models.dev catalog while both are zero, so setting one alone would
 	// silently disable the catalog lookup for these ids.
 	"codebuddy-cn": {
-		"glm-5.2":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
-		"glm-5.1":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 200000, MaxOutput: 48000},
-		"glm-5.0-turbo":       {Reasoning: true, Tools: true},
-		"minimax-m3":          {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 512000, MaxOutput: 524288},
-		"minimax-m2.7":        {Reasoning: true, Tools: true},
-		"kimi-k2.5":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 164000, MaxOutput: 32000},
+		"glm-5.2":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
+		"glm-5.1":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 200000, MaxOutput: 48000},
+		"glm-5.0-turbo": {Reasoning: true, Tools: true},
+		"minimax-m3":    {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 512000, MaxOutput: 524288},
+		"minimax-m2.7":  {Reasoning: true, Tools: true},
+		"kimi-k2.5":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 164000, MaxOutput: 32000},
 		// Upstream #4614 drops glm-5v-turbo / kimi-k2.7 / kimi-k2.6 from the
 		// published server list, and v0.5.99 keeps them dropped. They stay here
 		// on purpose: a saved combo or connection naming one of them is still
@@ -327,17 +358,17 @@ var providerCapabilities = map[string]map[string]Capabilities{
 		// unroutable for no user-visible gain. The level divergence this
 		// causes is recorded in thinking_levels_fixture_test.go. The limits
 		// are the server's own figures.
-		"glm-5v-turbo":        {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 200000, MaxOutput: 64000},
-		"kimi-k2.7":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 256000, MaxOutput: 32000},
-		"kimi-k2.6":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 256000, MaxOutput: 32000},
-		"hy3-preview":         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 192000, MaxOutput: 64000},
-		"hy3":                 {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 192000, MaxOutput: 64000},
-		"hy3-x":               {Vision: true, Reasoning: true, Tools: true},
-		"hy4-preview":         {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 64000},
-		"hy4-preview-x":       {Vision: true, Reasoning: true, Tools: true},
-		"glm-5.3":             {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
-		"glm-5.3-flash":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
-		"kimi-k3-1":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 1048576},
+		"glm-5v-turbo":  {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 200000, MaxOutput: 64000},
+		"kimi-k2.7":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 256000, MaxOutput: 32000},
+		"kimi-k2.6":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 256000, MaxOutput: 32000},
+		"hy3-preview":   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 192000, MaxOutput: 64000},
+		"hy3":           {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 192000, MaxOutput: 64000},
+		"hy3-x":         {Vision: true, Reasoning: true, Tools: true},
+		"hy4-preview":   {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 64000},
+		"hy4-preview-x": {Vision: true, Reasoning: true, Tools: true},
+		"glm-5.3":       {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
+		"glm-5.3-flash": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(true), ContextWindow: 1000000, MaxOutput: 131072},
+		"kimi-k3-1":     {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "openai", ThinkingCanDisable: new(false), ContextWindow: 1000000, MaxOutput: 1048576},
 		// contextWindow is the server's contextWindow.defaultLength (300000),
 		// NOT maxInputTokens: k2.8 publishes supportedLengths [300000, 1000000]
 		// and the gateway only serves 1M to callers who opt in, which this
@@ -357,13 +388,13 @@ var providerCapabilities = map[string]map[string]Capabilities{
 	// gpt-5.4/5.5 rows now publish the 1.05M API window, so the gateway's own
 	// number has to be recorded here (upstream decolua/9router 89ffac5a).
 	"devin-cli": {
-		"gpt-5.4-high":    devinCLIGPTCaps,
-		"gpt-5.4-medium":  devinCLIGPTCaps,
-		"gpt-5.4-low":     devinCLIGPTCaps,
-		"gpt-5.5-xhigh":   devinCLIGPTCaps,
-		"gpt-5.5-high":    devinCLIGPTCaps,
-		"gpt-5.5-medium":  devinCLIGPTCaps,
-		"gpt-5.5-low":     devinCLIGPTCaps,
+		"gpt-5.4-high":   devinCLIGPTCaps,
+		"gpt-5.4-medium": devinCLIGPTCaps,
+		"gpt-5.4-low":    devinCLIGPTCaps,
+		"gpt-5.5-xhigh":  devinCLIGPTCaps,
+		"gpt-5.5-high":   devinCLIGPTCaps,
+		"gpt-5.5-medium": devinCLIGPTCaps,
+		"gpt-5.5-low":    devinCLIGPTCaps,
 	},
 	// MiniMax Code (mcode) credits lane — Anthropic messages on the mavis
 	// gateway, thinking as adaptive effort via output_config.effort
@@ -402,6 +433,34 @@ func init() {
 	providerCapabilities["ollama"] = map[string]Capabilities{
 		"deepseek-v4.1-flash:cloud": {Vision: true, Reasoning: true, Tools: true, ThinkingFormat: "deepseek"},
 	}
+
+	// gemini-web overrides the generic `*gemini-3*` pattern row. The web surface
+	// and the API surface both answer `gemini-3*` requests, but they are not the
+	// same product, and the pattern row was written for the API. What the site's
+	// own composer offers is text and three thinking levels: no image input, no
+	// audio, no video, and no search toggle the executor can set. Declaring them
+	// would advertise controls that silently do nothing.
+	//
+	// "gemini-level" is the site's own enum (low/medium/high) and it cannot be
+	// turned off: level 1 is thinking's own floor.
+	//
+	// Every catalogued name is listed, not only the versioned ones: a name that
+	// falls through to the generic `*gemini-3*` pattern row would advertise the
+	// API surface's vision and search flags, which is the outcome this override
+	// exists to prevent.
+	geminiWebCaps := Capabilities{Tools: true, Reasoning: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}
+	providerCapabilities["gemini-web"] = map[string]Capabilities{
+		"gemini-3.1-pro":        geminiWebCaps,
+		"gemini-3.7-flash":      geminiWebCaps,
+		"gemini-3.1-flash-lite": geminiWebCaps,
+		"gemini-pro":            geminiWebCaps,
+		"gemini-flash":          geminiWebCaps,
+		"gemini-flash-lite":     geminiWebCaps,
+		"gemini-argon":          geminiWebCaps,
+		"gemini-3-pro":          geminiWebCaps,
+		"gemini-4-argon":        geminiWebCaps,
+	}
+
 	providerCapabilities["opencode-go"] = map[string]Capabilities{
 		"glm-5.3-flash": {
 			Vision: true, VideoInput: true, PDF: true, Reasoning: true, Tools: true,
@@ -464,6 +523,14 @@ var patternCapabilities = []patternCapability{
 	{pattern: "*claude*", caps: Capabilities{Vision: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "claude-budget"}},
 
 	{pattern: "*gemini*image*", caps: Capabilities{Vision: true, ImageOutput: true, Tools: true}},
+	// Gemini 4 (Argon): LOW/MEDIUM/HIGH only — no "minimal" tier, no
+	// thinkingBudget, and thinking cannot be disabled. Same row upstream's
+	// PATTERN_CAPABILITIES carries; without it "gemini-argon" matched nothing
+	// and every consumer fell through to the 128k/4096 floor. The bridge
+	// publishes the bare id "gemini-argon" as well as the "gemini-4-argon"
+	// alias, so both spellings have to hit this row.
+	{pattern: "*gemini*argon*", caps: Capabilities{Vision: true, PDF: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
+	{pattern: "*gemini-4*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-3.8*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-3.7*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
 	{pattern: "*gemini-3*pro*", caps: Capabilities{Vision: true, AudioInput: true, VideoInput: true, Reasoning: true, Search: true, Tools: true, ThinkingFormat: "gemini-level", ThinkingCanDisable: new(false)}},
@@ -642,6 +709,55 @@ func GetModelTokenLimits(model string) (contextWindow int, maxOutput int) {
 	return res[0], res[1]
 }
 
+// providerTokenLimits holds per-provider limit declarations for gateways whose
+// figures differ from what the provider-blind substring table would guess.
+//
+// The substring table answers from the model name alone, so it has to pick one
+// number for every gateway serving that name. Where a gateway publishes its own
+// catalog — CodeBuddy declares 393216 output for deepseek-v4.1-flash — the
+// provider-qualified figure belongs here instead of in the shared table.
+//
+// Entries here are consulted by GetCapabilitiesDetailForModel before the
+// models.dev catalog and the substring table, and they carry limits only: the
+// capability flags and thinking shape still resolve through the normal chain,
+// which is why this is not expressed as a providerCapabilities row (those win
+// over patterns and would drag their thinking format along).
+var providerTokenLimits = map[string]map[string][2]int{
+	// CodeBuddy's product-config catalog, the same figures codebuddy-cn
+	// declares in providerCapabilities. codebuddy-intl serves the same ids
+	// but resolves its own thinking levels, so only the limits are shared.
+	"codebuddy-intl": {
+		"glm-5.2":             {1000000, 131072},
+		"glm-5.1":             {200000, 48000},
+		"glm-5.3":             {1000000, 131072},
+		"glm-5.3-flash":       {1000000, 131072},
+		"minimax-m3":          {512000, 524288},
+		"kimi-k2.5":           {164000, 32000},
+		"deepseek-v4-pro":     {1000000, 393216},
+		"deepseek-v4.1-flash": {1000000, 393216},
+	},
+}
+
+// lookupProviderTokenLimits returns the limits a provider declares for a model,
+// or (0, 0) when it declares none.
+func lookupProviderTokenLimits(provider, model string) (contextWindow, maxOutput int) {
+	byModel, ok := providerTokenLimits[strings.ToLower(provider)]
+	if !ok {
+		return 0, 0
+	}
+	base := model
+	if _, after, found := strings.CutLast(model, "/"); found {
+		base = after
+	}
+	if limits, found := byModel[base]; found {
+		return limits[0], limits[1]
+	}
+	if limits, found := byModel[model]; found {
+		return limits[0], limits[1]
+	}
+	return 0, 0
+}
+
 func lookupModelTokenLimits(model string) [2]int {
 	m := strings.ToLower(model)
 
@@ -652,7 +768,7 @@ func lookupModelTokenLimits(model string) [2]int {
 		return [2]int{1050000, 128000}
 	case strings.Contains(m, "deepseek-v4.1-flash") || strings.Contains(m, "deepseek-v4-flash"):
 		return [2]int{1000000, 128000}
-	case strings.Contains(m, "gemini-1.5") || strings.Contains(m, "gemini-2.0") || strings.Contains(m, "gemini-2.5") || strings.Contains(m, "gemini-3") || strings.Contains(m, "glm-5.3-flash"):
+	case strings.Contains(m, "gemini-1.5") || strings.Contains(m, "gemini-2.0") || strings.Contains(m, "gemini-2.5") || strings.Contains(m, "gemini-3") || strings.Contains(m, "gemini-4") || strings.Contains(m, "gemini-argon") || strings.Contains(m, "glm-5.3-flash"):
 		return [2]int{1048576, 65536}
 	case strings.Contains(m, "grok-4.5") || strings.Contains(m, "grok-4.6"):
 		return [2]int{524288, 32768}
@@ -945,22 +1061,63 @@ func AggregateComboCapabilities(leaves []CapabilitiesDetail) (ComboCapabilities,
 // context_length / max_completion_tokens mirrors.
 func GetCapabilitiesDetailForModel(provider, model string) CapabilitiesDetail {
 	caps := GetCapabilitiesForModel(provider, model)
-	// A provider entry that declares its own limits (CommandCode) is more
-	// specific than the catalog, so it wins. Everything else keeps the
-	// catalog-then-table-then-floor chain.
-	cw, maxOut := caps.ContextWindow, caps.MaxOutput
-	if cw == 0 && maxOut == 0 {
-		// Upstream resolves limits from the models.dev-synced catalog keyed by
-		// provider + model before falling back to its pattern table and the
-		// DEFAULT_CAPABILITIES floor; the catalog is the authoritative source, so
-		// it wins here too and the substring table only fills the gaps.
-		cw, maxOut = GetCatalogLimits(provider, model)
+	// Each level only fills what is still unset, so a source that declares
+	// just one of the two numbers does not block the next level from
+	// answering the other. Order is most specific first:
+	//
+	//   1. a custom row that declares contextWindow/maxOutput — the operator's
+	//      own declaration for this exact endpoint,
+	//   2. a provider-qualified limit declaration (providerTokenLimits),
+	//   3. a provider entry that declares its own limits (CommandCode, the
+	//      codebuddy catalogs) — the gateway's own number,
+	//   4. the models.dev-synced catalog keyed by provider + model — the
+	//      authoritative per-gateway figure,
+	//   5. whatever GetCapabilitiesForModel already resolved, which past this
+	//      point can only be a pattern-table guess,
+	//   6. the substring table,
+	//   7. the 128k floor.
+	//
+	// The catalog has to outrank the pattern table even when the pattern
+	// already filled ContextWindow: `*glm-5.3*` hardcodes 1000000/128000, but
+	// OpenCode's free tier serves the same weights with a 200000/32000 window.
+	// Letting the pattern win published 1M for a 200k endpoint, so clients
+	// budgeted five times the context the gateway would actually accept.
+	var cw, maxOut int
+	fill := func(c, m int) {
+		if cw == 0 && c > 0 {
+			cw = c
+		}
+		if maxOut == 0 && m > 0 {
+			maxOut = m
+		}
 	}
-	if cw == 0 && maxOut == 0 {
-		cw, maxOut = GetModelTokenLimits(model)
+
+	if custom, ok := lookupCustomModelCaps(provider, model); ok {
+		fill(custom.ContextWindow, custom.MaxOutput)
 	}
-	if cw == 0 && maxOut == 0 {
-		cw, maxOut = GetModelTokenLimits(provider + "/" + model)
+	if c, m := lookupProviderTokenLimits(provider, model); c > 0 || m > 0 {
+		fill(c, m)
+	}
+	if pCaps, ok := providerCapabilities[provider]; ok {
+		baseModel := model
+		if _, after, found := strings.CutLast(model, "/"); found {
+			baseModel = after
+		}
+		if c, found := pCaps[model]; found {
+			fill(c.ContextWindow, c.MaxOutput)
+		} else if c, found := pCaps[baseModel]; found {
+			fill(c.ContextWindow, c.MaxOutput)
+		}
+	}
+	if c, m := GetCatalogLimits(provider, model); c > 0 || m > 0 {
+		fill(c, m)
+	}
+	fill(caps.ContextWindow, caps.MaxOutput)
+	if c, m := GetModelTokenLimits(model); c > 0 || m > 0 {
+		fill(c, m)
+	}
+	if c, m := GetModelTokenLimits(provider + "/" + model); c > 0 || m > 0 {
+		fill(c, m)
 	}
 	if cw == 0 {
 		cw = 128000

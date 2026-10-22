@@ -61,7 +61,12 @@ func ProvideTokenSaverConfig(repo *db.Repo, params CLIParams) *handlers.TokenSav
 func ProvideRouter(repo *db.Repo, ts *handlers.TokenSaverConfig) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.MaxBody(middleware.DefaultMaxBodySize))
+	// Body limits are path-aware: JSON APIs keep the 10MB ceiling, the media
+	// endpoints that receive multipart video/audio bodies get their own larger
+	// one (middleware.MediaBodyLimitRules). One middleware decides the ceiling
+	// per request — stacking a second MaxBody above this one would leave the
+	// smaller limit still cutting first (#125).
+	r.Use(middleware.MaxBodyByPath(middleware.DefaultMaxBodySize, middleware.MediaBodyLimitRules()))
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(middleware.RequestLogger)
 

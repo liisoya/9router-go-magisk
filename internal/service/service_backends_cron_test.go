@@ -2,6 +2,8 @@ package service
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,10 +143,8 @@ func TestUninstallCron(t *testing.T) {
 		}
 	})
 
-	// The crontab entry is gone but the desktop entry survived, so the gateway
-	// would still autostart at the next graphical login. Reporting success
-	// there told the user something untrue; this pins the removal as the
-	// source of truth, the rule launchd and OpenRC already follow.
+	// The crontab entry is gone but the desktop entry survived: the gateway
+	// would still autostart at the next graphical login.
 	t.Run("a desktop entry that survives removal is not reported as uninstalled", func(t *testing.T) {
 		home := setHome(t)
 		stubCrontab(t, "")
@@ -162,4 +162,86 @@ func TestUninstallCron(t *testing.T) {
 			t.Error("test setup: the desktop entry should still be present")
 		}
 	})
+}
+
+// TestCronLineHasRebootSchedule pins the @reboot schedule and the trailing
+// ownership marker.
+func TestCronLineHasRebootSchedule(t *testing.T) {
+	line := renderCronLine("/usr/local/bin/9router-go", []string{"--rtk=true"})
+	if !strings.HasPrefix(line, "@reboot ") {
+		t.Fatalf("cron line = %q, want an @reboot schedule", line)
+	}
+	if !strings.HasSuffix(line, cronMarker) {
+		t.Errorf("cron line = %q, want the ownership marker last", line)
+	}
+	command := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "@reboot "), cronMarker))
+	if command == "" {
+		t.Fatal("cron line has an empty command")
+	}
+	if !strings.Contains(command, " start") {
+		t.Errorf("cron command = %q, want the `start` subcommand", command)
+	}
+}
+
+// TestAutostartDesktopIsAValidEntry validates the XDG autostart entry with
+// desktop-file-validate where present, plus the required keys and marker.
+func TestAutostartDesktopIsAValidEntry(t *testing.T) {
+	entry := renderAutostartDesktop("/usr/local/bin/9router-go", []string{"--rtk=true"})
+
+	section, keys := parseDesktopEntry(t, entry)
+	if section != "Desktop Entry" {
+		t.Errorf("first section = %q, want Desktop Entry", section)
+	}
+	if keys["Type"] != "Application" {
+		t.Errorf("Type = %q, want Application", keys["Type"])
+	}
+	if keys["Name"] == "" {
+		t.Error("Name is required and empty")
+	}
+	if keys["Exec"] == "" || !strings.Contains(keys["Exec"], "start") {
+		t.Errorf("Exec = %q, want the start command", keys["Exec"])
+	}
+	if keys["Terminal"] != "false" {
+		t.Errorf("Terminal = %q, want false", keys["Terminal"])
+	}
+	if !strings.Contains(entry, cronMarker) {
+		t.Errorf("autostart entry must carry the ownership marker as a comment:\n%s", entry)
+	}
+
+	validate, err := exec.LookPath("desktop-file-validate")
+	if err != nil {
+		t.Logf("desktop-file-validate not installed, structural checks only")
+		return
+	}
+	path := filepath.Join(t.TempDir(), "9router-go.desktop")
+	if err := os.WriteFile(path, []byte(entry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(validate, path).CombinedOutput(); err != nil {
+		t.Fatalf("desktop-file-validate rejected the entry: %v\n%s", err, out)
+	}
+}
+
+func parseDesktopEntry(t *testing.T, data string) (string, map[string]string) {
+	t.Helper()
+	keys := map[string]string{}
+	section := ""
+	for i, raw := range strings.Split(data, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			if section == "" {
+				section = strings.Trim(line, "[]")
+			}
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			t.Fatalf("desktop line %d is not key=value: %q", i+1, line)
+		}
+		keys[line[:eq]] = line[eq+1:]
+	}
+	return section, keys
 }

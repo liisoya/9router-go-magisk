@@ -21,8 +21,14 @@ import (
 // the same question through the same code. A client that can list a model but
 // not call it (or worse, call one it cannot see) is the bug this file exists to
 // prevent, so there is exactly ONE loader (effectiveAllowedModels), ONE matcher
-// (providers.MatchModelPattern, the model resolver's own) and ONE decision
-// function (modelAllowed). Handlers never re-derive an allowlist.
+// (providers.MatchAllowPattern) and ONE decision function (modelAllowed).
+// Handlers never re-derive an allowlist.
+//
+// The matcher is deliberately the allowlist one and not the resolver's own
+// segment-local providers.MatchModelPattern: `*claude*` has to reach
+// `anthropic/claude-sonnet` (#365). Both live in the providers package, side by
+// side and documented, so the two globs stay visibly distinct instead of
+// quietly drifting apart.
 
 // ErrModelNotAllowed is the typed 403 the handlers translate. Callers match it
 // with errors.As; it is deliberately distinct from a resolution failure, which
@@ -41,14 +47,17 @@ func IsModelNotAllowed(err error) bool {
 	return errors.As(err, &target)
 }
 
-// effectiveAllowedModels is the ONE place a key's allowlist is read. Both
-// dispatch (checkModelAccess) and listing (filterModelsByAccess) go through it.
+// effectiveAllowedModels is the ONE loader a key's allowlist passes through.
+// Both dispatch (checkModelAccess) and listing (filterModelsByAccess) go
+// through it, so a client can never list a model it may not call.
 //
-// An empty result means "no allowlist configured" and allows every model, which
-// is what keeps every key minted before this feature behaving exactly as it did.
-// A nil key (no API-key middleware on the route) also returns empty. A storage
-// failure degrades the same way rather than turning into a 500: a broken policy
-// read must not take down traffic the key has always been allowed to send.
+// The result is the key's own patterns unioned with the ones its plan grants
+// (F-3). An empty result means "no allowlist configured" and allows every
+// model, which is what keeps every key minted before this feature behaving
+// exactly as it did. A nil key (no API-key middleware on the route) also
+// returns empty. A storage failure degrades the same way rather than turning
+// into a 500: a broken policy read must not take down traffic the key has
+// always been allowed to send.
 func (h *ChatHandler) effectiveAllowedModels(key *models.APIKey) ([]string, error) {
 	if h == nil || key == nil || key.ID == "" || h.Repo == nil {
 		return nil, nil
@@ -58,10 +67,10 @@ func (h *ChatHandler) effectiveAllowedModels(key *models.APIKey) ([]string, erro
 		log.Warn("chat", "model allowlist read failed, allowing all", "error", err, "apiKeyId", key.ID)
 		return nil, nil
 	}
-	return patterns, nil
+	return h.withPlanPatterns(key.ID, key.PlanID, patterns), nil
 }
 
-// allowedModelPatterns is effectiveAllowedModels for callers that hold a key id
+// allowedModelPatterns is the same loader for callers that hold a key id
 // rather than the key itself — the capacity-adapter pool filter runs deep in
 // dispatch, long after the request context is gone. It returns nil for an
 // empty id, which modelAllowed reads as "no allowlist".
@@ -74,31 +83,135 @@ func (h *ChatHandler) allowedModelPatterns(keyID string) []string {
 		log.Warn("chat", "model allowlist read failed, allowing all", "error", err, "apiKeyId", keyID)
 		return nil
 	}
-	return patterns
+	return h.withPlanPatterns(keyID, nil, patterns)
 }
 
-// modelAllowed is the single allow/deny decision. An empty pattern set allows
-// everything; otherwise some pattern must match some candidate id.
+// withPlanPatterns widens a key's allowlist with the patterns its plan grants.
+//
+// The two sides are UNIONED, so the result can only ever add a model, never
+// take one away: a plan names what every key on it may call, and the key's own
+// rows are how an operator widens that for this one key. An empty list on
+// either side contributes nothing, which keeps "no plan" and "no allowlist"
+// both reading as "no constraint".
+//
+// planID may be nil when the caller holds only a key id, in which case the
+// plan is fetched with one joined query. A caller that already holds the key
+// passes its plan id: an empty one — every key minted before F-3 — skips that
+// query entirely, so the common case pays nothing extra.
+func (h *ChatHandler) withPlanPatterns(keyID string, planID *string, own []string) []string {
+	if h.Repo == nil {
+		return own
+	}
+	var planPatterns []string
+	if planID != nil && strings.TrimSpace(*planID) != "" {
+		plan, err := h.Repo.GetPlan(strings.TrimSpace(*planID))
+		if err == nil {
+			planPatterns = plan.AllowedModels
+		}
+	} else if planID == nil {
+		// The caller holds only a key id, so the plan id is unknown: one joined
+		// read answers it. A caller that passed a known-empty plan id is not
+		// here, so a key with no plan skips this query entirely.
+		plans, err := h.Repo.GetPlansForKeys([]string{keyID})
+		if err == nil {
+			planPatterns = plans[keyID].AllowedModels
+		}
+	}
+	if len(planPatterns) == 0 {
+		return own
+	}
+	return unionModelPatterns(own, planPatterns)
+}
+
+// unionModelPatterns merges two allowlists in stable order, dropping
+// duplicates and blanks. Either side may be nil, which means "no constraint"
+// and therefore contributes nothing.
+func unionModelPatterns(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, m := range list {
+			m = strings.TrimSpace(m)
+			if m == "" || seen[m] {
+				continue
+			}
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// modelAllowed is the single allow/deny decision.
+//
+// An empty pattern set — or one holding nothing but blanks — means "no
+// allowlist configured" and allows everything, which is what keeps every key
+// minted before this feature behaving exactly as it did.
+//
+// Otherwise the set is parsed into an allowlist and a deny list (#365):
+//
+//   - `!term` / `-term` entries deny. A deny always wins, even over a positive
+//     rule that would have allowed the same model.
+//   - A set with no positive entry at all is deny-only: everything not named is
+//     allowed, which is how an operator excludes one model without having to
+//     enumerate the rest of the catalogue.
+//   - Positive entries match as allowlist globs (`*claude*`, `oc/*`), see
+//     providers.MatchAllowPattern.
 //
 // candidates carries both spellings of the same model — the bare id and the
 // `provider/model` form — because a client may request either and an operator
-// may write the allowlist as either.
+// may write the allowlist as either. Deny terms are checked against every
+// spelling, so `-haiku` cannot be dodged by requesting the provider-qualified
+// id.
 func modelAllowed(patterns []string, candidates ...string) bool {
-	if len(patterns) == 0 {
+	allows, denies, entries := parseAllowRules(patterns)
+	if entries == 0 {
 		return true
 	}
-	for _, pattern := range patterns {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" {
-			continue
-		}
+	for _, deny := range denies {
 		for _, candidate := range candidates {
-			if candidate != "" && providers.MatchModelPattern(pattern, candidate) {
+			if providers.MatchDenyEntry(deny, candidate) {
+				return false
+			}
+		}
+	}
+	if len(allows) == 0 {
+		// Deny-only: open except what was denied above.
+		return true
+	}
+	for _, pattern := range allows {
+		for _, candidate := range candidates {
+			if providers.MatchAllowPattern(pattern, candidate) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// parseAllowRules splits an allowlist into its positive patterns and its deny
+// terms, and reports how many non-blank entries the list held.
+//
+// entries counts positives and denies together: it is what distinguishes "no
+// allowlist" from "a deny-only allowlist", and only the caller can make that
+// call because only the caller knows the list came from a key's policy.
+func parseAllowRules(patterns []string) (allows, denies []string, entries int) {
+	allows = make([]string, 0, len(patterns))
+	denies = make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if term, ok := providers.IsDenyEntry(pattern); ok {
+			denies = append(denies, term)
+			entries++
+			continue
+		}
+		allows = append(allows, pattern)
+		entries++
+	}
+	return allows, denies, entries
 }
 
 // accessCandidates returns the id spellings a request for modelID can arrive

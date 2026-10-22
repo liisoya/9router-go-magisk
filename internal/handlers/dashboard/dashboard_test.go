@@ -99,6 +99,13 @@ func setupTestDB(t *testing.T) (*db.Repo, func()) {
 		cleanup()
 		t.Fatalf("failed to create keirouter tables: %v", err)
 	}
+	// The ledger carryover is a Go-only table like the KeiRouter ones, and
+	// tokenUsageSince reads it unconditionally: a fixture without it fails every
+	// quota read with "no such table" rather than the pre-prune answer.
+	if err := db.EnsureLedgerTables(database); err != nil {
+		cleanup()
+		t.Fatalf("failed to create ledger tables: %v", err)
+	}
 	if err := db.EnsureAdditiveColumns(database); err != nil {
 		cleanup()
 		t.Fatalf("failed to apply additive columns: %v", err)

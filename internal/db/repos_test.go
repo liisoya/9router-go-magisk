@@ -701,6 +701,7 @@ func TestInsertUsageHistory(t *testing.T) {
 		model TEXT,
 		connectionId TEXT,
 		apiKey TEXT,
+		clientKey TEXT,
 		endpoint TEXT,
 		promptTokens INTEGER,
 		completionTokens INTEGER,
@@ -1016,5 +1017,92 @@ func TestGetCustomModels_KeyFallbackAndNonLLM(t *testing.T) {
 	}
 	if cm, ok := foundMap["node-ar/qwen-2.5"]; !ok || !cm.Caps["reasoning"] {
 		t.Errorf("expected node-ar/qwen-2.5 with reasoning cap, got %+v", cm)
+	}
+}
+
+// A caps map is decoded as flags, but rows written by other builds (and by
+// hand) put non-boolean metadata in it. Decoding straight into
+// map[string]bool fails on such a value, and encoding/json/v2 abandons the
+// object at the failing member — so contextWindow/maxOutput, which the
+// dashboard writes *after* caps, were silently dropped and the row read as
+// "no limits declared". The endpoint then published the 128000/4096 floor for
+// a model that had declared 1048576/65536.
+func TestGetCustomModels_SurvivesNonBooleanCaps(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// The real shape: gsb/gemini-argon as saved by a bridge-backed node, with
+	// thinkingFormat (a string) inside caps and the limits after it.
+	raw := `{"id":"gemini-argon","providerAlias":"openai-compatible-chat-gsb","type":"llm",` +
+		`"name":"gemini-argon","caps":{"vision":true,"reasoning":true,"search":true,"tools":true,` +
+		`"thinkingEffortSupported":true,"thinkingCanDisable":false,"thinkingFormat":"effort"},` +
+		`"contextWindow":1048576,"maxOutput":65536}`
+	if _, err := db.Exec(`INSERT INTO kv (scope, key, value) VALUES ('customModels', ?, ?)`,
+		"openai-compatible-chat-gsb|gemini-argon|llm", raw); err != nil {
+		t.Fatalf("seed customModels: %v", err)
+	}
+
+	repo := NewRepo(db)
+	customs, err := repo.GetCustomModels()
+	if err != nil {
+		t.Fatalf("GetCustomModels failed: %v", err)
+	}
+	if len(customs) != 1 {
+		t.Fatalf("expected 1 custom model, got %d", len(customs))
+	}
+	cm := customs[0]
+	if cm.ID != "gemini-argon" || cm.ProviderAlias != "openai-compatible-chat-gsb" {
+		t.Errorf("identity lost: %+v", cm)
+	}
+	if cm.ContextWindow != 1048576 || cm.MaxOutput != 65536 {
+		t.Errorf("declared limits = (%d, %d), want (1048576, 65536)", cm.ContextWindow, cm.MaxOutput)
+	}
+	// The boolean flags survive; the string member is dropped, exactly like
+	// upstream sanitizeCaps drops anything that is not a boolean.
+	for _, flag := range []string{"vision", "reasoning", "search", "tools", "thinkingEffortSupported"} {
+		if !cm.Caps[flag] {
+			t.Errorf("cap %q lost from a row with one non-boolean member", flag)
+		}
+	}
+	// thinkingCanDisable is false in the row; the flag has to survive as an
+	// explicit false, not vanish into "not declared".
+	if v, present := cm.Caps["thinkingCanDisable"]; !present || v {
+		t.Errorf("cap thinkingCanDisable = (%v, present=%v), want an explicit false", v, present)
+	}
+	if _, present := cm.Caps["thinkingFormat"]; present {
+		t.Errorf("non-boolean cap thinkingFormat should be dropped, got %v", cm.Caps)
+	}
+}
+
+// The lenient decoder must not invent caps where the row has none.
+func TestGetCustomModels_NilAndNonObjectCaps(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	_, err := db.Exec(`INSERT INTO kv (scope, key, value) VALUES
+		('customModels', 'node-a|no-caps|llm', '{"providerAlias":"node-a","id":"no-caps","type":"llm"}'),
+		('customModels', 'node-a|null-caps|llm', '{"providerAlias":"node-a","id":"null-caps","type":"llm","caps":null,"contextWindow":256000}'),
+		('customModels', 'node-a|odd-caps|llm', '{"providerAlias":"node-a","id":"odd-caps","type":"llm","caps":"nope","maxOutput":16000}')`)
+	if err != nil {
+		t.Fatalf("seed customModels: %v", err)
+	}
+
+	repo := NewRepo(db)
+	customs, err := repo.GetCustomModels()
+	if err != nil {
+		t.Fatalf("GetCustomModels failed: %v", err)
+	}
+	byID := make(map[string]*CustomModel, len(customs))
+	for _, cm := range customs {
+		byID[cm.ID] = cm
+	}
+	if cm := byID["no-caps"]; cm == nil || len(cm.Caps) != 0 {
+		t.Errorf("no-caps should have no caps, got %+v", cm)
+	}
+	if cm := byID["null-caps"]; cm == nil || len(cm.Caps) != 0 || cm.ContextWindow != 256000 {
+		t.Errorf("null caps should keep the declared window, got %+v", cm)
+	}
+	if cm := byID["odd-caps"]; cm == nil || len(cm.Caps) != 0 || cm.MaxOutput != 16000 {
+		t.Errorf("a non-object caps block should keep the declared output, got %+v", cm)
 	}
 }

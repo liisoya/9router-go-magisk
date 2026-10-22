@@ -93,3 +93,54 @@ func TestModelTokenLimits_Gemini38(t *testing.T) {
 		t.Errorf("expected 1048576/65536 for gemini-3.8, got %d/%d", cw, maxOut)
 	}
 }
+
+// Gemini 4 (Argon) ids must resolve to their real window, not the 128k/4096
+// floor. Both spellings occur: bridges publish the bare "gemini-argon" and
+// gateways expose "gemini-4-argon".
+func TestModelTokenLimits_Gemini4Argon(t *testing.T) {
+	for _, id := range []string{"gemini-argon", "gemini-4-argon", "gsb/gemini-argon", "gemini-4-argon@think=high"} {
+		cw, maxOut := GetModelTokenLimits(id)
+		if cw != 1048576 || maxOut != 65536 {
+			t.Errorf("%q: limits = (%d, %d), want (1048576, 65536)", id, cw, maxOut)
+		}
+	}
+}
+
+// The pattern row has to carry the Gemini 4 thinking shape: three levels, no
+// minimal tier, thinking not disableable.
+func TestCapabilities_Gemini4Argon(t *testing.T) {
+	InvalidateCapabilitiesCache()
+	t.Cleanup(InvalidateCapabilitiesCache)
+	for _, id := range []string{"gemini-argon", "gemini-4-argon"} {
+		caps := GetCapabilitiesForModel("gsb", id)
+		if !caps.Vision || !caps.Reasoning || !caps.Search {
+			t.Errorf("%q resolved as %+v, want vision+reasoning+search", id, caps)
+		}
+		if caps.ThinkingFormat != "gemini-level" {
+			t.Errorf("%q thinkingFormat = %q, want gemini-level", id, caps.ThinkingFormat)
+		}
+		if caps.ThinkingCanDisable == nil || *caps.ThinkingCanDisable {
+			t.Errorf("%q must not be able to disable thinking", id)
+		}
+	}
+}
+
+// Gemini 4 (Argon) takes LOW/MEDIUM/HIGH only: "minimal" is a 400 upstream and
+// thinking cannot be disabled, so the picker must not offer either.
+func TestThinkingLevels_Gemini4Argon(t *testing.T) {
+	InvalidateCapabilitiesCache()
+	t.Cleanup(InvalidateCapabilitiesCache)
+	want := []string{"low", "medium", "high"}
+	for _, id := range []string{"gemini-argon", "gemini-4-argon"} {
+		got := GetThinkingLevels("gsb", id)
+		if len(got) != len(want) {
+			t.Fatalf("%q levels = %v, want %v", id, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%q levels = %v, want %v", id, got, want)
+				break
+			}
+		}
+	}
+}

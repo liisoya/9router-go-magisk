@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// TestTryEnableLinger covers the user-selection order: an install run through
-// sudo must linger the invoking user, not root.
+// TestTryEnableLinger: an install through sudo must linger the invoking user.
 func TestTryEnableLinger(t *testing.T) {
 	t.Run("prefers SUDO_USER", func(t *testing.T) {
 		t.Setenv("SUDO_USER", "alice")

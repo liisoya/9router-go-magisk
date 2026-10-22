@@ -78,6 +78,6 @@ export function formatCheckAllSummary(statuses: Record<string, ModelTestStatus>)
 
 export function getBlockedModelIds(statuses: Record<string, ModelTestStatus>): string[] {
   return Object.entries(statuses)
-    .filter(([_, s]) => s === 'blocked')
+    .filter(([, s]) => s === 'blocked')
     .map(([id]) => id)
 }

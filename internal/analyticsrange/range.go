@@ -24,10 +24,10 @@ import (
 )
 
 // maxWindowHours bounds every window, including the unbounded one. usageHistory
-// holds one row per request and is never pruned, so `all` is genuinely
-// open-ended; the ceiling only stops a typo'd period from asking for a scan
-// that cannot finish. Ten years is far past any ledger this build has written.
-//
+// holds one row per request. When an operator has configured a retention
+// window, `all` spans as far back as rows are kept; when retention is off (the
+// default), it is open-ended. The ceiling stops a typo'd period from asking for
+// a scan that cannot finish. Ten years is past any ledger this build has written.
 // The bound also keeps the arithmetic below inside time.Duration: a ceiling near
 // the 292-year limit makes now.Sub(cutoff) overflow rather than clamp, and the
 // overflow reads back as a window far shorter than the one that was asked for.

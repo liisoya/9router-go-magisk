@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
+import { describe, expect, test, afterEach } from 'bun:test'
 import { copyToClipboard } from './clipboard'
 
 describe('copyToClipboard', () => {

@@ -3,6 +3,17 @@ export interface DatabaseStats {
   reclaimableBytes: number
   requestDetailsCount: number
   usageHistoryCount: number
+  usageHistoryOldestTimestamp?: string
+  usageHistoryNewestTimestamp?: string
+}
+
+export interface PruneUsageResult {
+  success: boolean
+  dryRun: boolean
+  wouldDelete?: number
+  pruned?: number
+  carriedTokens?: number
+  cutoff: string
 }
 // Typed API client for 9router-go Native Dashboard
 
@@ -99,6 +110,8 @@ export interface APIKey {
   rateLimitConcurrency?: number
   /** Lifetime prompt+completion token budget. 0 means unlimited. */
   tokenQuota?: number
+  /** Spend recorded against tokenQuota since the budget was last reset (#365). */
+  usedTokens?: number
   /** How long a request waits for a free concurrency slot, in ms. 0 uses the server default. */
   queueTimeoutMs?: number
   /** RFC3339 UTC. Empty means the key never expires. */
@@ -107,6 +120,8 @@ export interface APIKey {
   usedCount?: number
   /** Free-form JSON object, e.g. { customerId, priceCents }. */
   metadata?: string
+  /** Plan template this key inherits from. Empty means no plan. */
+  planId?: string
 }
 
 export interface APIKeyPolicy {
@@ -121,7 +136,32 @@ export interface APIKeyPolicy {
   metadata?: string
   /** Renames the key. An empty string clears the stored name. */
   name?: string
+  /** Plan template to inherit. An empty string detaches the key. */
+  planId?: string
 }
+
+/** A reusable policy template (F-3). Keys inherit its limits as defaults. */
+export interface Plan {
+  id: string
+  name: string
+  description: string
+  limitMicros: number
+  limitTokens: number
+  rpmLimit: number
+  tpmLimit: number
+  concurrencyLimit: number
+  period: PlanPeriod
+  alertPct: number
+  hardCutoff: boolean
+  allowedModels: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+export type PlanPeriod = 'daily' | 'weekly' | 'monthly' | 'total'
+
+/** A plan write. Omitted fields keep their stored value on update. */
+export type PlanInput = Partial<Omit<Plan, 'id' | 'createdAt' | 'updatedAt'>>
 
 export interface GuardrailPolicy {
   id: string
@@ -217,10 +257,30 @@ export interface Settings {
   /** Serve requests from the account that frees up first when all are cooling down. */
   forceFallback?: boolean
   enableObservability?: boolean
+  /** Global system prompt: prefix leads the system prompt, suffix ends it. */
+  systemPromptEnabled?: boolean
+  systemPromptPrefix?: string
+  systemPromptSuffix?: string
   outboundProxyEnabled?: boolean
   outboundProxyUrl?: string
   outboundNoProxy?: string
   providerStrategies?: Record<string, ProviderStrategyConfig>
+  /**
+   * Feature Visibility: sidebar entry ids the operator hid. The canonical id
+   * list lives in web/src/lib/nav.ts; the server only checks the shape
+   * (internal/handlers/dashboard/navvisibility.go).
+   */
+  navVisibility?: { hidden?: string[] }
+  /**
+   * Display currency for every cost surface. Costs themselves are stored in USD;
+   * see web/src/lib/currency.ts for the catalog and the formatting rules.
+   */
+  displayCurrency?: {
+    code?: string
+    rates?: Record<string, number>
+    showBoth?: boolean
+    updatedAt?: string
+  }
   [key: string]: unknown
 }
 
@@ -484,6 +544,52 @@ export interface ConnectionUsageResponse {
   plan?: string
   quotas?: Record<string, ConnectionQuotaInfo> | ConnectionQuotaInfo[]
   error?: string
+}
+
+// Usage dashboard (Details section): heatmap cells, lifetime cards, node health.
+export interface UsageDailyPoint {
+  date: string
+  requests: number
+  tokens: number
+  cost: number
+}
+export interface UsageTopModel {
+  model: string
+  provider?: string
+  tokens: number
+}
+export interface UsageLifetime {
+  totalRequests: number
+  totalTokens: number
+  peakTokens: number
+  peakDate: string
+  currentStreak: number
+  longestStreak: number
+  topModel: UsageTopModel | null
+  cacheHitRate: number | null
+}
+export interface UsageNodeHealth {
+  name?: string
+  model?: string
+  provider: string
+  requests: number
+  errors: number
+  successRate: number
+  avgLatencyMs: number | null
+  avgTtftMs: number | null
+  avgSpeed: number | null
+  hasPerfData: boolean
+  score: number | null
+  promptTokens: number
+  completionTokens: number
+  cost: number
+  lastUsed: string
+}
+export interface UsageDashboardResponse {
+  daily: UsageDailyPoint[]
+  nodes: UsageNodeHealth[]
+  models: UsageNodeHealth[]
+  lifetime: UsageLifetime | null
 }
 
 // Codex reset credits. `selectionToken` is the field the dashboard selects
@@ -823,6 +929,7 @@ export function handleUnauthorized(path?: string) {
     path === '/api/auth/login' ||
     path === '/api/auth/status' ||
     path === '/api/settings/require-login' ||
+    path === '/api/settings/database/stats' ||
     path === '/api/changelog'
   ) {
     return
@@ -1113,6 +1220,16 @@ export const api = {
     request<{ status: string; id: string; key: string }>(`/api/keys/${encodeURIComponent(id)}/rotate`, {
       method: 'POST',
     }),
+  /**
+   * Clears a key's spent token budget (#365). The server stamps the usage mark
+   * the budget is measured from, so the key starts over while its history stays
+   * intact, and the response carries the spend it now has (0).
+   */
+  resetApiKeyQuota: (id: string) =>
+    request<{ status: string; id: string; usedTokens: number; tokenQuota: number; quotaResetId: number }>(
+      `/api/keys/${encodeURIComponent(id)}/reset-quota`,
+      { method: 'POST' },
+    ),
   setApiKeyActive: (id: string, isActive: boolean) =>
     request<{ status: string; id: string; isActive: boolean }>(
       `/api/keys/${encodeURIComponent(id)}/toggle`,
@@ -1133,6 +1250,23 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ models }),
     }),
+
+  // F-3 plan templates: the reusable policy a key inherits from.
+  getPlans: () => request<{ plans: Plan[] }>('/api/plans'),
+  getPlan: (id: string) => request<Plan>(`/api/plans/${encodeURIComponent(id)}`),
+  createPlan: (plan: PlanInput) =>
+    request<Plan>('/api/plans', { method: 'POST', body: JSON.stringify(plan) }),
+  updatePlan: (id: string, plan: PlanInput) =>
+    request<Plan>(`/api/plans/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(plan),
+    }),
+  deletePlan: (id: string) =>
+    request<{ status: string; id: string }>(`/api/plans/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  getPlanKeys: (id: string) =>
+    request<{ id: string; keys: number }>(`/api/plans/${encodeURIComponent(id)}/keys`),
 
   // F-5 credential vault
   getVaultStatus: () => request<VaultStatus>('/api/vault/status'),
@@ -1265,11 +1399,37 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(settings),
     }),
+  /**
+   * Reads live USD rates for the requested codes and overlays them on the
+   * stored table. `codes` is the catalog the dashboard offers
+   * (web/src/lib/currency.ts), `ratesStored` counts the rates the provider
+   * answered with, and `ratesMissing` names the requested codes it did not
+   * publish, whose manual rates were kept.
+   */
+  refreshCurrencyRates: (payload: { code: string; showBoth: boolean; codes: string[] }) =>
+    request<{ displayCurrency: unknown; source: string; ratesStored: number; ratesMissing: string[] }>(
+      '/api/settings/currency/refresh',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
   getDatabaseStats: () => request<DatabaseStats>('/api/settings/database/stats'),
   pruneDatabase: () =>
     request<{ success: boolean; pruned: number }>('/api/settings/database/prune', {
       method: 'POST',
     }),
+  pruneUsageHistory: (params?: { days?: number; before?: string; dryRun?: boolean }) => {
+    const query = new URLSearchParams()
+    if (params?.dryRun) query.set('dryRun', '1')
+    if (typeof params?.days === 'number') query.set('days', String(params.days))
+    if (params?.before) query.set('before', params.before)
+    const qs = query.toString()
+    return request<PruneUsageResult>(`/api/settings/database/prune-usage${qs ? `?${qs}` : ''}`, {
+      method: 'POST',
+      body: params?.days || params?.before ? JSON.stringify({ days: params.days, before: params.before }) : undefined,
+    })
+  },
   vacuumDatabase: () =>
     request<{ success: boolean; databaseSizeBytes: number; reclaimableBytes: number }>(
       '/api/settings/database/vacuum',
@@ -1516,6 +1676,13 @@ export const api = {
 
   // Usage & Telemetry
   getUsageStats: (period = 'today') => request<any>(`/api/usage/stats?period=${encodeURIComponent(period)}`),
+  /** One chart point: bucket label (HH:MM or MMM D), totals, and the per-model-family token split. */
+  getUsageChart: (period = '7d') =>
+    request<{ label: string; tokens: number; cost: number; byModel: Record<string, number> }[]>(
+      `/api/usage/chart?period=${encodeURIComponent(period)}`
+    ),
+  /** Details-section dashboard payload: heatmap days, lifetime cards, node health. */
+  getUsageDashboard: () => request<UsageDashboardResponse>('/api/usage/dashboard'),
   getRequestDetails: (limit = 50, offset = 0) =>
     request<any>(`/api/usage/request-details?limit=${limit}&offset=${offset}`),
   /** Full stored payload for one request; the list omits request/response bodies. */

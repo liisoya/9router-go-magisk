@@ -414,6 +414,33 @@ func TestIsOpencodeGoResponsesModel(t *testing.T) {
 	}
 }
 
+func TestIsOpencodeFreeModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"big-pickle", false},
+		{"big-pickle(high)", false},
+		{"longcat-2.5-preview-free", true},
+		{"longcat-2.5-preview-free(thinking)", true},
+		{"deepseek-v4-flash-free", true},
+		{"muse-spark-1.3-contributor-free", true},
+		{"space-bunny-free", true},
+		{"jev-1.13-free", true},
+		{"deepseek-v4-pro", false},
+		{"grok-4.6", false},
+		{"gpt-5.6-luna", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := isOpencodeFreeModel(tt.model); got != tt.want {
+				t.Errorf("isOpencodeFreeModel(%q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
 // A paid go Muse Spark model must stay on the go Responses lane with the v1
 // identity — the free-executor narrowing must never leak into this lane.
 func TestForwardOpencodeGo_MuseSparkResponsesRouting(t *testing.T) {
@@ -487,6 +514,57 @@ func TestForwardOpencodeGo_SpaceBunnyFreeTakesInferenceGate(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", rec.Code)
+	}
+}
+
+func TestForwardOpencodeGo_GeminiWire(t *testing.T) {
+	var capturedPath string
+	var capturedAPIKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path + "?" + r.URL.RawQuery
+		capturedAPIKey = r.Header.Get("x-goog-api-key")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"candidates": [{
+				"content": {
+					"parts": [{"text": "Hello from Gemini 4 Argon on OpenCode Go"}],
+					"role": "model"
+				},
+				"finishReason": "STOP",
+				"index": 0
+			}],
+			"usageMetadata": {
+				"promptTokenCount": 5,
+				"candidatesTokenCount": 8,
+				"totalTokenCount": 13
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	cfg := &providers.ProviderConfig{BaseURL: srv.URL + "/inference/go/v1/models"}
+	rec := httptest.NewRecorder()
+	req := &Request{
+		Client: srv.Client(), Config: cfg, APIKey: "test-goog-key",
+		Body:     []byte(`{"model":"opencode-go/gemini-4-argon-contributor","messages":[{"role":"user","content":"hi"}]}`),
+		IsStream: false, TranslateResp: false,
+	}
+	if err := ForwardOpencodeGo(rec, req); err != nil {
+		t.Fatalf("ForwardOpencodeGo failed: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rec.Code)
+	}
+	if !strings.Contains(capturedPath, "/gemini-4-argon-contributor:generateContent") {
+		t.Errorf("expected path to contain /gemini-4-argon-contributor:generateContent, got %s", capturedPath)
+	}
+	if capturedAPIKey != "test-goog-key" {
+		t.Errorf("expected x-goog-api-key test-goog-key, got %s", capturedAPIKey)
+	}
+	if !strings.Contains(rec.Body.String(), "Hello from Gemini 4 Argon on OpenCode Go") {
+		t.Errorf("expected response to contain translated text, got %s", rec.Body.String())
 	}
 }
 

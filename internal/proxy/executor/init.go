@@ -64,6 +64,15 @@ func RegisterAll() {
 	Register("iflow", func() Executor { return ForwardIflow })
 	Register("kimchi", func() Executor { return ForwardKimchi })
 	Register("kiro", func() Executor { return ForwardKiro })
+	// deepseek-web authenticates with a browser-login userToken exchanged for a
+	// short-lived access token, and gates every completion on a proof of work, so
+	// it needs the full executor rather than the shared passthrough.
+	Register("deepseek-web", func() Executor { return ForwardDeepSeekWeb })
+	// gemini-web talks to gemini.google.com over plain HTTP. It is not an API,
+	// but the site answers an anonymous client, so it needs the full executor —
+	// the session tokens, the nested request array and the line stream are not
+	// anything the shared passthrough can express.
+	Register("gemini-web", func() Executor { return ForwardGeminiWeb })
 	// One executor serves both Bedrock entries: the registry entry's Format picks the
 	// wire shape (Anthropic Messages vs OpenAI Chat Completions), the way one Vertex
 	// executor serves vertex and vertex-partner.

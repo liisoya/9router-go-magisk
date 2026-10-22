@@ -9,7 +9,219 @@ on:
 permissions:
   contents: read
 
+# One run per ref. A force-push, or a second push to the same PR while the
+# first is still running, supersedes it: without this the old run keeps burning
+# runner minutes to a conclusion nobody will read, and its check run can land
+# after the newer one and overwrite the result a reviewer is looking at.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Fast feedback, and it builds nothing: every job below rebuilds the SPA
+  # before it can compile a Go package (web/embed.go has no files to embed
+  # otherwise), while this one lints source, so a formatting slip or a reachable
+  # CVE is reported in about a minute — roughly while `test` is still installing
+  # Bun. A one-file stub of web/dist is enough for the linters.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth 0 so the baseline rev below is resolvable: a PR needs
+          # origin/<base> for the merge-base, and a push needs HEAD~1, which a
+          # depth-1 checkout does not have.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # golangci-lint reports an absent web/dist as `pattern dist/*: no matching
+      # files found (typecheck)` and fails the job on it, so the embedded asset
+      # tree is stubbed first. The linters here read source; the jobs that
+      # actually ship the SPA build it for real.
+      - name: Stub embedded web assets
+        run: |
+          mkdir -p web/dist
+          printf '<!doctype html><title>stub</title>' > web/dist/index.html
+
+      # The rev is resolved here rather than in the action's args because args
+      # is passed to the action literally — an env var or `${{ env.* }}` inside
+      # it is not expanded. GITHUB_BASE_REF is read from the environment and not
+      # interpolated into the script, so a branch name cannot inject anything.
+      #
+      # A push is judged against its parent commit (HEAD~1). origin/<base> would
+      # be right for a PR and wrong here: on main it is the same commit.
+      - name: Resolve the lint baseline
+        id: base
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            # The fetch is what makes the base resolvable: a plain checkout
+            # only writes the checked-out ref into the remote-tracking
+            # namespace, and a PR from a fork keeps its base on the upstream
+            # remote. FETCH_HEAD is used rather than origin/<base> for that
+            # reason.
+            git fetch --no-tags origin "${GITHUB_BASE_REF}"
+            REV="FETCH_HEAD"
+          else
+            REV="HEAD~1"
+          fi
+          # Resolved to a bare commit hash before it leaves this step. A
+          # symbolic name would be a dependency on how golangci-lint resolves
+          # it, and on a name that only exists because the fetch above put it
+          # there; if it did not resolve, the linter would compare against
+          # nothing and pass everything, which is the one failure mode this
+          # gate must not have. rev-parse here fails the job loudly instead.
+          SHA="$(git rev-parse --verify "${REV}^{commit}")" || {
+            echo "::error::lint baseline '${REV}' does not resolve."
+            exit 1
+          }
+          echo "rev=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "lint baseline: ${REV} -> ${SHA}"
+
+      # --new-from-rev is a ratchet, the same shape as the svelte-check one in
+      # §6.E. The tree carries 141 pre-existing findings and 147 files gofmt
+      # would rewrite, so a whole-tree gate would fail on its first PR and be
+      # disabled by its second. Scoping to the diff stops the debt growing
+      # without one unreviewable reformat commit that would conflict with every
+      # open PR. Paying the baseline down is a separate, reviewable change.
+      - name: golangci-lint (new findings only)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          args: --timeout 10m --new-from-rev=${{ steps.base.outputs.rev }}
+
+      # Unlike a dependency scanner, govulncheck reports only CVEs the code can
+      # actually reach, and it needs no web/dist. It has already paid for itself
+      # once: the goldmark advisory this PR pins away was reachable from
+      # tools/sitegen, which no other gate looks at. Pinned rather than @latest
+      # so an upstream release cannot redden this job without a commit here.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+      # oxlint ran nowhere: `bun run build` answers to tsc and Vite, not to it,
+      # so warnings accumulated silently. --deny-warnings turns the three that
+      # had collected into the reason this step exists.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install web deps
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: oxlint
+        working-directory: web
+        run: bunx oxlint --deny-warnings
+
+      # The workflow files are code that only ever executes on GitHub, where a
+      # typo in an expression or a bad `needs:` name fails after the push.
+      # actionlint reads them statically. shellcheck stays off the runner on
+      # purpose: it lints the run: scripts inside release.yml, which carry two
+      # pre-existing (harmless) warnings, and gating on those would be a second
+      # ratchet to maintain for no signal.
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+  # The fragment rule in §7.6 and .changes/README.md was enforced by review
+  # alone, and review missed: of the last forty merged PRs, five carry no
+  # fragment and only three of those are the `chore: bump` and `[ImgBot]`
+  # commits the rule exempts. Those two entries were never written, so their
+  # work is invisible to `GET /api/changelog` and will be absent from the next
+  # release page — the exact silent loss the fragments were introduced to stop.
+  #
+  # A missing fragment fails. Touching CHANGELOG.md fails harder: that file is
+  # written only by `make changelog-merge` at release time, and a hand edit is
+  # what re-creates the [Unreleased] conflicts the fragment split removed.
+  changeset:
+    name: Changelog fragment
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The three-dot diff below needs a merge base, which a depth-1 clone
+          # does not have.
+          fetch-depth: 0
+
+      - name: Verify the PR carries a changelog fragment
+        env:
+          # Passed as an environment variable, never interpolated into the
+          # script: a PR title is attacker-controlled text, and `${{ ... }}`
+          # inside a run: block would let it close the string and run a command.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # Resolved to a bare commit hash rather than a symbolic name. The
+          # fetch is what makes the base resolvable — origin/<base> only exists
+          # when the checked-out ref happened to be the base branch — and an
+          # unresolvable base would leave the diff below empty, which reports
+          # "docs-only" and passes everything.
+          git fetch --no-tags origin "${BASE_REF}"
+          BASE="$(git rev-parse --verify 'FETCH_HEAD^{commit}')" || {
+            echo "::error::cannot resolve the merge base for the diff."
+            exit 1
+          }
+
+          CHANGED="$(git diff --name-only "${BASE}...HEAD")"
+          echo "changed files:"
+          printf '%s\n' "${CHANGED}"
+          echo
+
+          if printf '%s\n' "${CHANGED}" | grep -qx 'CHANGELOG.md'; then
+            echo "::error::this PR edits CHANGELOG.md."
+            echo "That file is written only by 'make changelog-merge' at release"
+            echo "time. Move the entry into a new fragment instead:"
+            echo "  .changes/<pr-number>-<slug>.md"
+            echo "See .changes/README.md and AGENTS.md §7.6."
+            exit 1
+          fi
+
+          # The titles that legitimately carry no fragment: a version bump
+          # (VERSION plus the updater fallback, whose release page is written by
+          # hand at tag time) and the bot's image optimisation. Matching the
+          # documented exemption keeps the rule exactly that narrow.
+          case "${PR_TITLE}" in
+            chore:*|\[ImgBot\]*)
+              echo "exempt title, no fragment required: ${PR_TITLE}"
+              exit 0
+              ;;
+          esac
+
+          # A docs-only change produces no user-visible behaviour to log. The
+          # README and .changes/ itself are covered by the *.md arm, so a
+          # fragment never ends up requiring its own fragment.
+          DOCS_ONLY=true
+          while IFS= read -r f; do
+            [ -z "${f}" ] && continue
+            case "${f}" in
+              docs/*|*.md) ;;
+              *) DOCS_ONLY=false; break ;;
+            esac
+          done <<< "${CHANGED}"
+          if [ "${DOCS_ONLY}" = true ]; then
+            echo "documentation-only change, no fragment required"
+            exit 0
+          fi
+
+          if ! printf '%s\n' "${CHANGED}" | grep -qE '^\.changes/[^/]+\.md$'; then
+            echo "::error::no changelog fragment in .changes/."
+            echo "Add one named after this PR, containing the entry as it would"
+            echo "appear under ## [Unreleased]:"
+            echo "  .changes/<pr-number>-<slug>.md"
+            echo "See .changes/README.md and AGENTS.md §7.6."
+            exit 1
+          fi
+
+          echo "changelog fragment present."
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -266,3 +478,127 @@ jobs:
             exit 1
           }
           go version -m /tmp/from-image | grep -- '-pgo='
+
+  # `make cross` is what release.yml runs on a tag, and it ran nowhere else.
+  # Every way it can break stayed invisible until a release, where the only fix
+  # is a re-tag: a build tag that does not compile for one GOOS, a dependency
+  # that suddenly needs cgo, a syscall that exists on Linux and not on Windows.
+  # This job runs the same `make cross` and then asserts what the artifacts have
+  # to be, so a broken target fails on the PR that breaks it.
+  cross:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # web/dist is embedded into every one of the five binaries.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # `make cross` starts five go builds, and Go fills the module cache as it
+      # goes — so a single transient read error from the module proxy aborts
+      # whichever target hit it and reddens the job. That is not hypothetical:
+      # the first run of this job on main failed with
+      #   modernc.org/sqlite@v1.54.0: read
+      #   "https://proxy.golang.org/.../v1.54.0.zip":
+      #   stream error: stream ID 1; INTERNAL_ERROR; received from peer
+      # and the identical job passed on a re-run with no code change.
+      #
+      # A network hiccup must not read as "a release target is broken", which
+      # is exactly what this job exists to report. `go mod download` pulls the
+      # whole graph into the cache in one step first, so the five builds that
+      # follow do not touch the network; it is retried three times because it
+      # is the only step that does.
+      #
+      # The cache is `go env GOMODCACHE`, the same within this job — the
+      # dependency-cache restores of actions/setup-go are per-module and do not
+      # give a full off-line graph, and a `go build` hit is not something this
+      # job can stage.
+      - name: Warm the module cache (retried)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if go mod download all; then
+              echo "module graph cached on attempt ${attempt}"
+              exit 0
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::go mod download failed 3 times; the proxy is unreachable."
+              echo "This is infrastructure, not a defect in the diff — re-run the job."
+              exit 1
+            fi
+            echo "attempt ${attempt} failed (transient proxy error); retrying in 5s"
+            sleep 5
+          done
+
+      # Identical to the release command. Building the SPA through the Makefile
+      # rather than by hand also exercises web/scripts/web-build.ts, which the
+      # release path depends on.
+      - name: Build every release target
+        run: make cross
+
+      # `go build` exits 0 for every one of these, so a green build says only
+      # that the compiler was willing. `file` is what says the artifact is the
+      # architecture the asset name claims: the updater picks a download by
+      # matching the OS and arch substrings in the asset name, so an
+      # arm64-labelled file holding an x86-64 binary installs and then fails to
+      # exec on the user's machine.
+      #
+      # The exact expected strings are copied from the shipped artifacts, not
+      # guessed.
+      - name: Assert each artifact matches its target
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            path="$1"; name="$2"; want="$3"
+            if [ ! -f "$path" ]; then
+              echo "::error::$path was not produced"
+              fail=1
+              return
+            fi
+            got="$(file -b "$path")"
+            case "$got" in
+              *"$want"*) echo "ok   $name: $got" ;;
+              *)
+                echo "::error::$name does not look like $want"
+                echo "  file: $got"
+                fail=1
+                ;;
+            esac
+          }
+          check 9router-go-linux-amd64        linux/amd64   "x86-64"
+          check 9router-go-linux-arm64        linux/arm64   "aarch64"
+          check 9router-go-darwin-amd64       darwin/amd64  "Mach-O 64-bit x86_64"
+          check 9router-go-darwin-arm64       darwin/arm64  "Mach-O 64-bit arm64"
+          check 9router-go-windows-amd64.exe  windows/amd64 "PE32+"
+          exit "$fail"
+
+      # The updater verifies a download against SHA256SUMS.txt before it renames
+      # anything over the running binary, so a release whose sums are absent or
+      # malformed is a release nobody can self-update from. `make cross`
+      # generates the file; this asserts it landed and covers all five names.
+      - name: Assert SHA256SUMS covers every artifact
+        run: |
+          set -euo pipefail
+          for f in 9router-go-linux-amd64 9router-go-linux-arm64 \
+                   9router-go-darwin-amd64 9router-go-darwin-arm64 \
+                   9router-go-windows-amd64.exe; do
+            grep -q "  $f\$" SHA256SUMS.txt || {
+              echo "::error::SHA256SUMS.txt has no entry for $f"
+              exit 1
+            }
+          done
+          echo "SHA256SUMS.txt covers all five artifacts:"
+          cat SHA256SUMS.txt
+          # sha256sum -c reads the file it is given and exits non-zero on any
+          # mismatch, which is the property the updater relies on.
+          sha256sum -c SHA256SUMS.txt

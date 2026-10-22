@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { api, type APIKey, type APIKeyPolicy } from '../../api/client'
+  import { api, type APIKey, type APIKeyPolicy, type Plan } from '../../api/client'
   import { Loader2, Save, X } from 'lucide-svelte'
+  import { isNavEntryHidden } from '../../lib/navVisibility.svelte'
 
   interface Props {
     apiKey: APIKey
@@ -39,6 +40,15 @@
   // the policy this modal edits, so it has to be present on open rather than
   // behind a button press.
   let hasLoadedModels = $state(false)
+  // F-3 plan assignment. The plan is part of this same policy, so it is loaded
+  // on open next to the allowlist rather than behind a second dialog.
+  let planId = $state(apiKey.planId ?? '')
+  let plans = $state<Plan[]>([])
+  let isLoadingPlans = $state(false)
+
+  // The Plan field belongs to the Advanced usage feature: with the sidebar
+  // entry hidden, the plans page is unreachable, so the field is not offered.
+  let plansHidden = $derived(isNavEntryHidden('plans'))
 
   function toLocalInput(rfc3339?: string): string {
     if (!rfc3339) return ''
@@ -83,9 +93,26 @@
   // empty and only filled after "Load" was pressed, so the modal claimed "every
   // model is allowed" for a key that was in fact restricted — and the empty
   // draft that resulted then overwrote the stored list on the next save.
+  // Plans are the templates this key can inherit from. They are read once on
+  // open: a failed read leaves the select empty but does NOT block the save,
+  // because the plan is only written when the operator picks one — an omitted
+  // planId leaves the stored assignment alone.
   $effect(() => {
     if (!hasLoadedModels) loadModels()
+    if (!plansHidden) void loadPlans()
   })
+
+  async function loadPlans() {
+    isLoadingPlans = true
+    try {
+      const res = await api.getPlans()
+      plans = res.plans ?? []
+    } catch {
+      plans = []
+    } finally {
+      isLoadingPlans = false
+    }
+  }
 
   async function save(e: SubmitEvent) {
     e.preventDefault()
@@ -128,6 +155,10 @@
         expiresAt: toRFC3339(expiresLocal),
         metadata: metadataValue,
         name: name.trim(),
+        // The plan is written only when one is selected: an empty string is a
+        // deliberate detach, and the server refuses an id that does not exist
+        // rather than storing a dangling one.
+        planId,
       }
       await api.updateApiKeyPolicy(apiKey.id, policy)
       // The allowlist is part of the same policy the operator pressed Save for.
@@ -199,6 +230,38 @@
           class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs text-text-main focus:outline-none focus:border-brand-500"
         />
       </section>
+
+      <!-- F-3 plan template. Part of the Advanced usage feature: with the
+           sidebar entry hidden the plans page is unreachable, so the field goes
+           with it instead of pointing at a page that redirects. -->
+      {#if !plansHidden}
+        <section class="space-y-3">
+          <div>
+            <h3 class="font-headline text-xs font-bold text-text-main">Plan</h3>
+            <p class="text-text-subtle mt-0.5">
+              The key inherits this plan's limits as defaults. Any limit set below overrides the plan.
+              Choose <span class="font-code">No plan</span> to detach the key.
+            </p>
+          </div>
+          <select
+            bind:value={planId}
+            aria-label="Plan"
+            class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs text-text-main focus:outline-none focus:border-brand-500"
+          >
+            <option value="">No plan — this key's own columns only</option>
+            {#each plans as plan (plan.id)}
+              <option value={plan.id}>{plan.name}</option>
+            {/each}
+          </select>
+          {#if isLoadingPlans}
+            <p class="text-text-subtle text-[11px]">Loading plans…</p>
+          {:else if plans.length === 0}
+            <p class="text-text-subtle text-[11px]">
+              No plans defined yet. Create one on the Plans page.
+            </p>
+          {/if}
+        </section>
+      {/if}
 
       <!-- Rate limits -->
       <section class="space-y-3">
@@ -311,15 +374,21 @@
         <div>
           <h3 class="font-headline text-xs font-bold text-text-main">Resale metadata</h3>
           <p class="text-text-subtle mt-0.5">
-            Free-form JSON kept with the key, e.g.
-              <span class="font-code">&#123;"customerId":"acme","priceCents":5000&#125;</span>
+            JSON object kept with the key. Accepted keys:
+            <span class="font-code">customerId</span>,
+            <span class="font-code">priceCents</span> (whole cents),
+            <span class="font-code">billingCycle</span> (one-off, monthly, quarterly, yearly),
+            <span class="font-code">contact</span>,
+            <span class="font-code">notes</span>
+            — up to 2 KB. Any other key is refused, so a typo cannot silently drop
+            the key out of the resale report.
           </p>
         </div>
         <textarea
           bind:value={metadata}
           rows="3"
           spellcheck="false"
-          placeholder={'{\n  "customerId": "acme",\n  "priceCents": 5000\n}'}
+          placeholder={'{\n  "customerId": "acme",\n  "priceCents": 5000,\n  "billingCycle": "monthly"\n}'}
           class="w-full bg-surface border border-border rounded-lg px-3 py-2 font-code text-[11px] text-text-main focus:outline-none focus:border-brand-500 resize-y"
         ></textarea>
       </section>

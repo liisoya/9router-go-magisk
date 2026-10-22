@@ -1,0 +1,31 @@
+{
+ "v": 0,
+ "syncedAt": "2026-10-17T10:41:31Z",
+ "models": {},
+ "providers": {
+  "opencode": {
+   "beam-free": {
+    "contextWindow": 1048576,
+    "maxOutput": 131072
+   },
+   "big-pickle": {
+    "contextWindow": 200000,
+    "maxOutput": 32000
+   },
+   "glm-5.3-flash-free": {
+    "contextWindow": 200000,
+    "maxOutput": 32000
+   }
+  },
+  "nvidia": {
+   "glm-5.3": {
+    "contextWindow": 1000000,
+    "maxOutput": 131072
+   },
+   "glm-5.3-flash": {
+    "contextWindow": 1000000,
+    "maxOutput": 131072
+   }
+  }
+ }
+}

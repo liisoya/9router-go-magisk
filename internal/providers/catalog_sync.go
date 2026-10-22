@@ -105,6 +105,12 @@ var ProviderAliases = map[string]string{
 	"hunyuan":       "tencent",
 	"doubao":        "volcengine",
 	"cloudflare-ai": "cloudflare-workers-ai",
+	// OpenCode's free tier ships as a user-created "openai-compatible-chat-*"
+	// node, so the catalog lookup is keyed by that generated id. models.dev
+	// files the same weights under `opencode`, and without this mapping every
+	// zen/* model missed the catalog and fell through to the substring table
+	// (128000/4096) even though the catalog carries the real window.
+	"openai-compatible-chat-opencode-free-bridge": "opencode",
 }
 
 // GetCatalogState returns the current synchronization state.
@@ -191,11 +197,21 @@ func GetCatalogLimits(provider, model string) (contextWindow, maxOutput int) {
 		return 0, 0
 	}
 	base := strings.ToLower(model)
-	if idx := strings.Index(base, "/"); idx != -1 {
-		base = base[idx+1:]
-	}
 	if idx := strings.Index(base, ":"); idx != -1 {
 		base = base[:idx]
+	}
+	// A model id can carry more than one qualifier: the published
+	// `nvidia/z-ai/glm-5.3` has both the provider alias and the vendor
+	// namespace, while the catalog files it under the bare `glm-5.3`. Try the
+	// id minus its first segment first, because catalog keys may themselves
+	// contain a slash (`deepseek-ai/deepseek-v4.1-flash`), then fall back to
+	// the last segment alone.
+	candidates := []string{base}
+	if idx := strings.Index(base, "/"); idx != -1 {
+		candidates = append(candidates, base[idx+1:])
+	}
+	if idx := strings.LastIndex(base, "/"); idx != -1 && base[idx+1:] != candidates[len(candidates)-1] {
+		candidates = append(candidates, base[idx+1:])
 	}
 
 	catalogMu.RLock()
@@ -212,8 +228,10 @@ func GetCatalogLimits(provider, model string) (contextWindow, maxOutput int) {
 		if !ok {
 			continue
 		}
-		if limits, ok := byModel[base]; ok {
-			return limits.ContextWindow, limits.MaxOutput
+		for _, candidate := range candidates {
+			if limits, found := byModel[candidate]; found {
+				return limits.ContextWindow, limits.MaxOutput
+			}
 		}
 	}
 	return 0, 0

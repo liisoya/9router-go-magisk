@@ -37,7 +37,7 @@ func TestRequestFreebuffSession_CountryRefusalBecomesAStructuredError(t *testing
 	}))
 	defer server.Close()
 
-	_, err := requestFreebuffSession(context.Background(), server.Client(), server.URL, "tok", "deepseek/deepseek-v4-flash")
+	_, err := requestFreebuffSession(context.Background(), server.Client(), server.URL, "tok", "deepseek/deepseek-v4-flash", nil)
 	if err == nil {
 		t.Fatal("expected a country refusal to fail admission")
 	}
@@ -76,7 +76,7 @@ func TestRequestFreebuffSession_AdmittedSessionInABlockedRegionStillWorks(t *tes
 	}))
 	defer server.Close()
 
-	sess, err := requestFreebuffSession(context.Background(), server.Client(), server.URL, "tok", "deepseek/deepseek-v4-flash")
+	sess, err := requestFreebuffSession(context.Background(), server.Client(), server.URL, "tok", "deepseek/deepseek-v4-flash", nil)
 	if err != nil {
 		t.Fatalf("expected the session to be admitted, got %v", err)
 	}

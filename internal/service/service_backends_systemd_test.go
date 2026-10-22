@@ -3,7 +3,9 @@ package service
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -141,12 +143,8 @@ func TestControlSystemd(t *testing.T) {
 	})
 }
 
-// Linger is what keeps the unit alive after logout, and it was only reached
-// when `systemctl start` succeeded — the early return on the failure path
-// skipped it. A failed start is exactly the case install exists for: the
-// gateway already holds the port from `9router-go start`, the unit still
-// boots, and losing linger there killed it at logout while the CLI reported
-// the entry as enabled.
+// Linger must run on both paths: the early return when `systemctl start` fails
+// used to skip it, so the unit died at logout while the CLI reported it enabled.
 func TestInstallSystemdEnablesLingerOnBothPaths(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -192,5 +190,31 @@ func TestInstallSystemdEnablesLingerOnBothPaths(t *testing.T) {
 func TestLogHint(t *testing.T) {
 	if got := logHint(); !strings.Contains(got, "journalctl --user") {
 		t.Errorf("logHint() = %q, want the user journal", got)
+	}
+}
+
+// TestSystemdUnitAcceptedBySystemd has the real parser read the unit back.
+// Skipped where systemd-analyze is absent, not silently passed.
+func TestSystemdUnitAcceptedBySystemd(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd-analyze is a Linux tool")
+	}
+	analyze, err := exec.LookPath("systemd-analyze")
+	if err != nil {
+		t.Skipf("systemd-analyze not installed: %v", err)
+	}
+	// ExecStart points at this test binary: verify rejects a unit whose command
+	// does not exist, which would hide a format error behind a missing fixture.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot resolve the test binary: %v", err)
+	}
+	t.Setenv("DATA_DIR", "/data/custom dir")
+	unit := filepath.Join(t.TempDir(), unitName)
+	if err := os.WriteFile(unit, []byte(renderSystemdUnit(exe, []string{"--rtk=true"})), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(analyze, "verify", unit).CombinedOutput(); err != nil {
+		t.Fatalf("systemd-analyze verify rejected the rendered unit: %v\n%s", err, out)
 	}
 }

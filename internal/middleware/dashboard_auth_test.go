@@ -78,6 +78,10 @@ func TestRequireDashboardAuth(t *testing.T) {
 	if rec := serve(httptest.NewRequest(http.MethodGet, "/api/connections", nil)); rec.Code != http.StatusOK {
 		t.Errorf("expected open dashboard when requireLogin=false, got %d", rec.Code)
 	}
+	// Database stats is a read-only stats endpoint and must be accessible when requireLogin=false.
+	if rec := serve(httptest.NewRequest(http.MethodGet, "/api/settings/database/stats", nil)); rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for database stats when requireLogin=false, got %d", rec.Code)
+	}
 	// Always-protected routes reject client API key even if key is valid.
 	apiDbReq := httptest.NewRequest(http.MethodGet, "/api/settings/database", nil)
 	apiDbReq.Header.Set("Authorization", "Bearer valid-token")
@@ -291,7 +295,17 @@ func TestPasswordHeaderScopeKeepsOtherCredentialsWorking(t *testing.T) {
 		t.Fatalf("sign: %v", err)
 	}
 
-	for _, path := range []string{"/api/version/shutdown", "/api/version/update", PasswordHeaderCarriesOwnAuth} {
+	for _, path := range []string{
+		"/api/version/shutdown",
+		"/api/version/update",
+		PasswordHeaderCarriesOwnAuth,
+		"/api/settings/database/prune",
+		"/api/settings/database/prune-usage",
+		"/api/settings/database/vacuum",
+	} {
+		if !IsAlwaysProtectedPath(path) {
+			t.Errorf("%s is not always-protected: a destructive settings route would answer an unauthenticated local caller when requireLogin is off", path)
+		}
 		cliReq := httptest.NewRequest(http.MethodPost, path, nil)
 		cliReq.Header.Set(auth.CLITokenHeader, auth.CLIToken())
 		if rec := httptest.NewRecorder(); func() int {

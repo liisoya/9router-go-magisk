@@ -2,6 +2,7 @@ package providers
 
 import (
 	"math"
+	"net/http"
 	"strings"
 )
 
@@ -60,6 +61,50 @@ var ErrorRules = []ErrorRule{
 	{Status: 502, Backoff: true},
 	{Status: 503, Backoff: true},
 	{Status: 504, Backoff: true},
+}
+
+// ModelFitErrorPatterns are the upstream messages that mean "this model cannot
+// hold the request", as opposed to "this account cannot serve it". Matched
+// case-insensitively against the error body.
+//
+// The distinction matters inside a combo: an account fault is worth another
+// connection, but a prompt that does not fit the model gets the same answer from
+// every connection to it, so the only useful move is a member with a bigger
+// context window (#338).
+var ModelFitErrorPatterns = []string{
+	"context_length_exceeded",
+	"maximum context length",
+	"prompt is too long",
+	"reduce the length of the messages",
+	"input is too long",
+	"too many tokens",
+	"context window",
+	"exceeds the maximum number of tokens",
+}
+
+// ModelFitStatusCodes are the statuses an upstream uses to reject an oversized
+// request. A 400 carries it almost everywhere; 413 and 422 are the other two
+// spellings seen in the wild. Gating on the status keeps a provider's prose from
+// triggering the classification on an unrelated failure.
+var ModelFitStatusCodes = map[int]bool{
+	http.StatusBadRequest:            true, // 400
+	http.StatusRequestEntityTooLarge: true, // 413
+	http.StatusUnprocessableEntity:   true, // 422
+}
+
+// IsModelFitError reports whether an upstream failure means the chosen model is
+// too small for the request rather than the connection being at fault.
+func IsModelFitError(statusCode int, body []byte) bool {
+	if !ModelFitStatusCodes[statusCode] || len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	for _, pattern := range ModelFitErrorPatterns {
+		if strings.Contains(text, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetQuotaCooldown calculates exponential backoff cooldown for rate limits.

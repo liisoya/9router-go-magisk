@@ -29,7 +29,12 @@
   } from '../../lib/oauth-handoff'
   import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
   import { copyToClipboard } from '../../lib/clipboard'
-  import { notifyCustomModelsChanged } from '../../lib/customModels'
+  import {
+    importCustomModelsBestEffort,
+    notifyCustomModelsChanged,
+    type CustomModelImportOutcome,
+    type CustomModelWrite,
+  } from '../../lib/customModels'
   import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
   import { loadDeprecations, refreshDeprecations, subscribeDeprecations } from '../../lib/modelDeprecations.svelte'
   import DeprecatedBadge from '../../lib/ui/DeprecatedBadge.svelte'
@@ -250,9 +255,11 @@
   let isAddingCompatibleModel = $state(false)
   let isImportingCompatibleModels = $state(false)
   let isImportingLiveCatalogModels = $state(false)
-  let compatibleTestId = $state<string | null>(null)
-  let compatibleTestResults = $state<Record<string, 'ok' | 'error'>>({})
+  let compatibleTesting = $state<Record<string, boolean>>({})
+  let compatibleTestResults = $state<Record<string, ModelTestStatus>>({})
   let compatibleTestErrors = $state<Record<string, string | null>>({})
+  let compatibleTestLatency = $state<Record<string, number>>({})
+  let compatibleTestAllRunning = $state(false)
   let compatibleRows = $derived.by(() => {
     const rows: Array<{ id: string; source: 'custom' | 'legacyAlias'; alias?: string }> = []
     const seen = new Set<string>()
@@ -2287,29 +2294,53 @@
   }
 
   async function handleTestCompatibleModel(modelId: string) {
-    if (compatibleTestId) return
-    compatibleTestId = modelId
+    if (compatibleTesting[modelId]) return
+    compatibleTesting[modelId] = true
     compatibleTestErrors[modelId] = null
     try {
       const res = await api.testModel(`${storageAlias}/${modelId}`)
-      if (res.ok) {
-        compatibleTestResults[modelId] = 'ok'
-        compatibleTestErrors[modelId] = null
-      } else {
-        compatibleTestResults[modelId] = 'error'
-        const err = res.error || 'Model test failed'
-        compatibleTestErrors[modelId] = err
-        activeModelTestError = `${modelId}: ${err}`
-      }
+      compatibleTestLatency[modelId] = res.latencyMs ?? 0
+      const verdict = parseModelTestVerdict(res)
+      compatibleTestResults[modelId] = verdict.status
+      compatibleTestErrors[modelId] = verdict.error
     } catch (err) {
       compatibleTestResults[modelId] = 'error'
-      const msg = err instanceof Error ? err.message : 'Model test failed'
-      compatibleTestErrors[modelId] = msg
-      activeModelTestError = `${modelId}: ${msg}`
+      compatibleTestErrors[modelId] = err instanceof Error ? err.message : 'Model test failed'
     } finally {
-      compatibleTestId = null
+      compatibleTesting[modelId] = false
     }
   }
+
+  // Each probe is a real completion that consumes account quota, so Test all
+  // runs at most 2 at once; a lower ceiling than the registry sweep's 6.
+  const COMPATIBLE_TEST_CONCURRENCY = 2
+
+  // Bounded pool: see COMPATIBLE_TEST_CONCURRENCY above. Guarded the way
+  // runModelSweep is: a run that outlives its panel stops writing, because
+  // storageAlias may already belong to the next provider by then.
+  async function handleTestAllCompatibleModels() {
+    if (compatibleTestAllRunning) return
+    const pid = providerId
+    const ids = compatibleRows.map((r) => r.id)
+    if (ids.length === 0) return
+    compatibleTestAllRunning = true
+    compatibleTestResults = {}
+    compatibleTestErrors = {}
+    compatibleTestLatency = {}
+    try {
+      let cursor = 0
+      const workers = Array.from({ length: Math.min(COMPATIBLE_TEST_CONCURRENCY, ids.length) }, async () => {
+        while (cursor < ids.length && pid === providerId) {
+          await handleTestCompatibleModel(ids[cursor++])
+        }
+      })
+      await Promise.allSettled(workers)
+    } finally {
+      if (pid === providerId) compatibleTestAllRunning = false
+    }
+  }
+
+  let compatibleTestSummary = $derived(formatCheckAllSummary(compatibleTestResults))
 
   function copyCompatibleModel(modelId: string) {
     copyToClipboard(`${displayAlias()}/${modelId}`)
@@ -2317,7 +2348,24 @@
     setTimeout(() => (copiedModelId = null), 2000)
   }
 
-  async function handleImportCompatibleModels() {
+  // Mirrors providers.IsFreeTierModel (internal/providers/registry_models.go).
+  function isFreeTierModelId(id: string): boolean {
+    return id.endsWith(':free') || id.endsWith('/free') || id.endsWith('-free')
+  }
+
+  // The server names the occupant in the refusal body, so the summary can say
+  // what has to be renamed instead of only that the id was skipped.
+  function reportImportRefusals(outcome: CustomModelImportOutcome) {
+    if (outcome.refused.length === 0) return
+    const noun = outcome.refused.length === 1 ? 'model' : 'models'
+    alert(
+      `Imported ${outcome.imported} model${outcome.imported === 1 ? '' : 's'}. ` +
+        `${outcome.refused.length} ${noun} could not be registered:\n\n` +
+        outcome.refused.map((r) => `${r.id} — ${r.reason}`).join('\n'),
+    )
+  }
+
+  async function handleImportCompatibleModels(freeOnly = false) {
     if (isImportingCompatibleModels) return
     const active = providerConnections.find((c) => c.isActive !== 0)
     if (!active) return
@@ -2329,19 +2377,22 @@
         alert('No models returned from /models.')
         return
       }
-      let imported = 0
+      const pending: CustomModelWrite[] = []
       for (const m of models) {
         const modelId = typeof m === 'string' ? m : (m.id || m.name || m.model || '')
         if (!modelId || compatibleRows.some((r) => r.id === modelId)) continue
-        await api.saveCustomModel(`${storageAlias}|${modelId}|llm`, {
+        if (freeOnly && !isFreeTierModelId(modelId)) continue
+        pending.push({
           id: modelId,
-          providerAlias: storageAlias,
-          type: 'llm',
+          key: `${storageAlias}|${modelId}|llm`,
+          value: { id: modelId, providerAlias: storageAlias, type: 'llm' },
         })
-        imported += 1
       }
+      const outcome = await importCustomModelsBestEffort(pending, api.saveCustomModel)
       await refreshCompatibleModels()
-      if (imported > 0) notifyCustomModelsChanged()
+      if (outcome.imported > 0) notifyCustomModelsChanged()
+      else if (outcome.refused.length === 0 && freeOnly) alert('No free models found in /models.')
+      reportImportRefusals(outcome)
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to import models')
     } finally {
@@ -2382,7 +2433,7 @@
         alert('No models returned from /models.')
         return
       }
-      let imported = 0
+      const pending: CustomModelWrite[] = []
       for (const m of models) {
         const modelId = typeof m === 'string' ? m : (m.id || m.name || m.model || '')
         if (!modelId) continue
@@ -2408,19 +2459,24 @@
           typeof m === 'object' && m !== null && 'max_completion_tokens' in m
             ? Number(m.max_completion_tokens) || 0
             : 0
-        await api.saveCustomModel(`${storageAlias}|${modelId}|llm`, {
+        pending.push({
           id: modelId,
-          providerAlias: storageAlias,
-          type: 'llm',
-          ...(caps ? { caps } : {}),
-          ...(declaredCtxLen > 0 ? { contextWindow: declaredCtxLen } : {}),
-          ...(declaredMaxOut > 0 ? { maxOutput: declaredMaxOut } : {}),
+          key: `${storageAlias}|${modelId}|llm`,
+          value: {
+            id: modelId,
+            providerAlias: storageAlias,
+            type: 'llm',
+            ...(caps ? { caps } : {}),
+            ...(declaredCtxLen > 0 ? { contextWindow: declaredCtxLen } : {}),
+            ...(declaredMaxOut > 0 ? { maxOutput: declaredMaxOut } : {}),
+          },
         })
-        imported++
       }
+      const outcome = await importCustomModelsBestEffort(pending, api.saveCustomModel)
       const modelsData = await fetchProviderModelsData(providerId, storageAlias)
       customModels = modelsData.customModels
-      if (imported > 0) notifyCustomModelsChanged()
+      if (outcome.imported > 0) notifyCustomModelsChanged()
+      reportImportRefusals(outcome)
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to import models')
     } finally {
@@ -2452,6 +2508,14 @@
     modelTestErrors = {}
     checkAllSummary = null
     activeModelTestError = null
+    // The compatible-model probes share this panel's lifetime too: without
+    // these, a provider switch shows the previous provider's verdicts and
+    // latencies against the new provider's model list.
+    compatibleTesting = {}
+    compatibleTestResults = {}
+    compatibleTestErrors = {}
+    compatibleTestLatency = {}
+    compatibleTestAllRunning = false
   })
 
   // Providers whose /models the backend can enumerate
@@ -3526,14 +3590,33 @@
         </button>
         <button
           type="button"
-          onclick={handleImportCompatibleModels}
+          onclick={() => handleImportCompatibleModels(false)}
           disabled={!canImportCompatible || isImportingCompatibleModels}
           class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-8 px-4 text-xs rounded-[8px] disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <span class="material-symbols-outlined text-[18px]">download</span>
           {isImportingCompatibleModels ? 'Importing...' : 'Import from /models'}
         </button>
+        <button
+          type="button"
+          onclick={() => handleImportCompatibleModels(true)}
+          disabled={!canImportCompatible || isImportingCompatibleModels}
+          class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-8 px-4 text-xs rounded-[8px] disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <span class="material-symbols-outlined text-[18px]">savings</span>
+          Import free only
+        </button>
+        <button
+          type="button"
+          onclick={handleTestAllCompatibleModels}
+          disabled={compatibleRows.length === 0 || compatibleTestAllRunning}
+          class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-8 px-4 text-xs rounded-[8px] disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <span class="material-symbols-outlined text-[18px]">{compatibleTestAllRunning ? 'progress_activity' : 'science'}</span>
+          {compatibleTestAllRunning ? `Testing ${compatibleTestSummary.total}/${compatibleRows.length}...` : 'Test all models'}
+        </button>
       </div>
+      <p class="text-xs text-text-muted">Test all sends a real completion per model and consumes account quota.</p>
       {#if !canImportCompatible}
         <p class="text-xs text-text-muted">Add a connection to enable importing models.</p>
       {/if}
@@ -3542,13 +3625,13 @@
           {#each compatibleRows as row (row.source + ':' + row.id)}
             {@const tStatus = compatibleTestResults[row.id]}
             {@const tError = compatibleTestErrors[row.id]}
-            {@const isTestingRow = compatibleTestId === row.id}
-            <div class="flex items-start gap-3 p-3 rounded-lg border {tStatus === 'ok' ? 'border-green-500/40' : tStatus === 'error' ? 'border-red-500/40' : 'border-border'} hover:bg-sidebar/50">
+            {@const isTestingRow = compatibleTesting[row.id]}
+            <div class="flex items-start gap-3 p-3 rounded-lg border {tStatus === 'ok' ? 'border-green-500/40' : tStatus === 'blocked' ? 'border-amber-500/40' : tStatus === 'error' ? 'border-red-500/40' : 'border-border'} hover:bg-sidebar/50">
               <span
                 class="material-symbols-outlined text-base text-text-muted mt-0.5"
-                style={tStatus === 'ok' ? 'color:#22c55e' : tStatus === 'error' ? 'color:#ef4444' : undefined}
+                style={tStatus === 'ok' ? 'color:#22c55e' : tStatus === 'blocked' ? 'color:#f59e0b' : tStatus === 'error' ? 'color:#ef4444' : undefined}
               >
-                {tStatus === 'ok' ? 'check_circle' : tStatus === 'error' ? 'cancel' : 'smart_toy'}
+                {tStatus === 'ok' ? 'check_circle' : tStatus === 'blocked' ? 'schedule' : tStatus === 'error' ? 'cancel' : 'smart_toy'}
               </span>
               <div class="flex-1 min-w-0">
                 <p class="text-sm font-medium truncate">{row.id}</p>
@@ -3582,6 +3665,9 @@
                         {isTestingRow ? 'Testing...' : 'Test'}
                       </span>
                     </div>
+                  {/if}
+                  {#if tStatus && compatibleTestLatency[row.id] !== undefined}
+                    <span class="text-xs text-text-muted font-mono">{compatibleTestLatency[row.id]} ms</span>
                   {/if}
                 </div>
                 {#if tError}

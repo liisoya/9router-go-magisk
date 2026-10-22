@@ -9,8 +9,8 @@ import (
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
-	"9router/proxy/internal/models"
 	"9router/proxy/internal/keikey"
+	"9router/proxy/internal/models"
 )
 
 // ContextKey is a custom type for context keys to avoid collisions.
@@ -122,6 +122,29 @@ func verifyApiKey(plaintext string, apiKey *models.APIKey) bool {
 // GetAuthenticatedApiKey retrieves the authenticated APIKey object from the request context.
 func GetAuthenticatedApiKey(r *http.Request) *models.APIKey {
 	val := r.Context().Value(ApiKeyContextKey)
+	if val == nil {
+		return nil
+	}
+	keyObj, ok := val.(*models.APIKey)
+	if !ok {
+		return nil
+	}
+	return keyObj
+}
+
+// AuthenticatedApiKeyFromContext retrieves the authenticated API key from a
+// context rather than a request.
+//
+// The usage ledger needs it after the response is written, when the request
+// object is gone (#365): a per-key token budget is measured from what the
+// caller spent, so the row has to name the caller. The auth middleware already
+// stores the key on the request context, so this is the same value the request
+// path sees, read through the only handle the writer still holds.
+func AuthenticatedApiKeyFromContext(ctx context.Context) *models.APIKey {
+	if ctx == nil {
+		return nil
+	}
+	val := ctx.Value(ApiKeyContextKey)
 	if val == nil {
 		return nil
 	}

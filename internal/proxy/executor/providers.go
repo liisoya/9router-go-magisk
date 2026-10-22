@@ -10,6 +10,7 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"runtime"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"9router/proxy/internal/constants"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
 	"9router/proxy/internal/translator"
@@ -592,7 +594,10 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 			return fmt.Errorf("transform body for muse-spark: %w", err)
 		}
 
-		transformedBody, err = normalizeMuseSparkResponsesBody(transformedBody, cleanModel)
+		// reqObj.Model, not cleanModel: the "(level)" override and the
+		// reasoning effort it encodes live in the untouched id (see
+		// normalizeMuseSparkResponsesBody).
+		transformedBody, err = normalizeMuseSparkResponsesBody(transformedBody, reqObj.Model)
 		if err != nil {
 			return fmt.Errorf("normalize muse-spark body: %w", err)
 		}
@@ -624,7 +629,9 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, apiKey, transformedBody, req.IsStream)
+		resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+			return forwardOpencodeRequest(ctx, req.Client, &cfg, apiKey, transformedBody, req.IsStream)
+		})
 		if err != nil {
 			return fmt.Errorf("ForwardOpencode (muse-spark responses): %w", err)
 		}
@@ -673,7 +680,9 @@ func ForwardOpencode(w http.ResponseWriter, req *Request) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, apiKey, body, true)
+	resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+		return forwardOpencodeRequest(ctx, req.Client, &cfg, apiKey, body, true)
+	})
 	if err != nil {
 		return fmt.Errorf("ForwardOpencode: %w", err)
 	}
@@ -741,15 +750,14 @@ func isOpenCodeAutoToolChoiceModel(cleanModel string) bool {
 // free tier. Keyed zen requests for these ids answer 403 ("free tier can only
 // be used from within OpenCode"), so the zen lane forwards them to the
 // keyless /inference/v1 gate with public credentials. The source of truth is
-// the curated registry (providers.IsOpencodeFreeTierModel) — never suffix
-// matching.
+// the curated registry and -free suffix matching (providers.IsOpencodeFreeTierModel).
 func isOpencodeFreeModel(cleanModel string) bool {
 	base := cleanModel
 	if parenIdx := strings.IndexByte(base, '('); parenIdx != -1 {
 		base = base[:parenIdx]
 	}
-	// IsOpencodeFreeTierModel already requires catalog membership, so this
-	// stays catalog-driven across all three lanes (free, zen, go).
+	// IsOpencodeFreeTierModel handles catalog membership and -free suffix rules,
+	// keeping resolution consistent across all three lanes (free, zen, go).
 	for _, provider := range []string{"opencode", "opencode-zen", "opencode-go"} {
 		if providers.IsOpencodeFreeTierModel(provider, base) {
 			return true
@@ -759,14 +767,15 @@ func isOpencodeFreeModel(cleanModel string) bool {
 }
 
 var opencodeGoMessagesModels = map[string]bool{
-	"minimax-m3":    true,
-	"minimax-m2.7":  true,
-	"minimax-m2.5":  true,
-	"qwen3.8-max":   true,
-	"qwen3.8-flash": true,
-	"qwen3.7-max":   true,
-	"qwen3.7-plus":  true,
-	"qwen3.6-plus":  true,
+	"claude-haiku-5-5": true,
+	"minimax-m3":       true,
+	"minimax-m2.7":     true,
+	"minimax-m2.5":     true,
+	"qwen3.8-max":      true,
+	"qwen3.8-flash":    true,
+	"qwen3.7-max":      true,
+	"qwen3.7-plus":     true,
+	"qwen3.6-plus":     true,
 }
 
 // EnsureClaudeMessages exposes the OpenAI→Claude Messages request conversion
@@ -863,7 +872,7 @@ func ensureMessagesFor(body []byte, provider, model string) []byte {
 	// 4. messages & system
 	if msgs, ok := reqMap["messages"].([]any); ok && len(msgs) > 0 {
 		extractedSys, claudeMsgs := convertOpenAIMessagesToClaude(msgs)
-		reqMap["messages"] = claudeMsgs
+		reqMap["messages"] = cleanupConvertedClaudeMessages(body, claudeMsgs)
 		if extractedSys != "" {
 			if existingSys, ok := reqMap["system"].(string); ok && existingSys != "" {
 				reqMap["system"] = existingSys + "\n\n" + extractedSys
@@ -1047,6 +1056,34 @@ func sanitizeToolUseID(id string, mapping map[string]string) string {
 	return newID
 }
 
+// cleanupConvertedClaudeMessages applies the Messages-API content rule to a
+// conversation this package built itself.
+//
+// The OpenAI to Claude conversion passes the client content arrays through
+// unchanged, so a turn the client left empty — or a turn that only held parts
+// this conversion drops — reaches a Claude-shaped lane as an empty content
+// array, and the provider 400s the whole request. The Claude-client path never
+// had that hole: SanitizeClaudePassthrough drops those turns. This calls the
+// same rule from the same place (translator.DropNonContentfulClaudeMessages)
+// instead of restating it, so the two paths cannot drift apart.
+//
+// intentionalPrefill is read from the body the client sent: an OpenAI caller
+// that ends on an assistant turn asked for a prefill, and the trailing-turn
+// repair must not overwrite it (translator.ClaudeIntentionalPrefill).
+//
+// A conversation the filter empties completely keeps its turns. Dropping the
+// last one would trade an invalid empty-content turn for an equally invalid
+// empty messages array, and neither shape can be answered — this way the
+// caller that emptied the turn still gets the reason the provider gives.
+func cleanupConvertedClaudeMessages(clientBody []byte, claudeMsgs []any) []any {
+	cleaned, dropped := translator.DropNonContentfulClaudeMessages(
+		claudeMsgs, translator.ClaudeIntentionalPrefill(clientBody))
+	if !dropped || len(cleaned) == 0 {
+		return claudeMsgs
+	}
+	return cleaned
+}
+
 func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMessages []any) {
 	// Anthropic requires tool_use.id / tool_use_id to match ^[a-zA-Z0-9_-]+$.
 	// History from other upstreams (e.g. Gemini) can contain ids with other
@@ -1135,24 +1172,22 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 						"input": inputMap,
 					})
 				}
-				newMsg := make(map[string]any)
-				for k, v := range msgMap {
-					if k != "tool_calls" && k != "content" {
-						newMsg[k] = v
-					}
-				}
-				newMsg["role"] = "assistant"
-				newMsg["content"] = contentBlocks
-				intermediate = append(intermediate, newMsg)
+				// The rebuilt turn carries only what the Messages API accepts: the
+				// client's remaining keys are its OpenAI shape, not Claude's.
+				intermediate = append(intermediate, map[string]any{
+					"role":    "assistant",
+					"content": contentBlocks,
+				})
 				continue
 			}
 		}
 
-		newMsg := make(map[string]any, len(msgMap))
-		for k, v := range msgMap {
-			newMsg[k] = v
-		}
-		intermediate = append(intermediate, newMsg)
+		// Nothing to reshape on this turn, but it still arrives in the client's
+		// OpenAI shape. Replayed assistant turns are the ones that matter: an
+		// OpenAI client echoes back the `reasoning_content` this proxy streamed
+		// to it, and Anthropic rejects the field as an extra input, poisoning
+		// every later turn of that conversation.
+		intermediate = append(intermediate, claudeMessage(msgMap))
 	}
 
 	var merged []any
@@ -1171,6 +1206,25 @@ func convertOpenAIMessagesToClaude(messages []any) (systemText string, claudeMes
 
 	systemText = strings.Join(systemParts, "\n\n")
 	return systemText, merged
+}
+
+// claudeMessageAllowedKeys are the only keys a Messages API message object
+// accepts. Anthropic answers anything else with
+// "messages.<n>.<key>: Extra inputs are not permitted" and refuses the request.
+var claudeMessageAllowedKeys = map[string]bool{
+	"role":    true,
+	"content": true,
+}
+
+// claudeMessage returns msgMap reduced to the keys the Messages API accepts.
+func claudeMessage(msgMap map[string]any) map[string]any {
+	clean := make(map[string]any, len(claudeMessageAllowedKeys))
+	for k, v := range msgMap {
+		if claudeMessageAllowedKeys[k] {
+			clean[k] = v
+		}
+	}
+	return clean
 }
 
 func combineClaudeContent(c1, c2 any) any {
@@ -1245,7 +1299,102 @@ func deriveOpencodeSession(rawSession, clientTool, connID string) string {
 	return proxy.TranslateOpenCodeSessionID(raw, clientTool)
 }
 
-func normalizeMuseSparkResponsesBody(body []byte, cleanModel string) ([]byte, error) {
+// museSparkMinOutputTokens is the output-budget floor for Muse Spark. These
+// models spend 570-1320 hidden reasoning tokens before emitting any completion
+// text, so a caller-set budget below the floor is consumed entirely by
+// reasoning: the upstream answers 200 with an empty message, or stalls the
+// stream until the gateway's watchdog reports a 502, and the caller sees a
+// failure that names neither the model nor the budget.
+//
+// 512 is upstream's measured boundary (max_tokens 64/100 → empty content,
+// 256/512/1024 → content present), not a round number picked here. Port of
+// OmniRoute MUSE_SPARK_MIN_OUTPUT_TOKENS
+// (open-sse/executors/opencodeMuseSpark.ts).
+const museSparkMinOutputTokens = 512
+
+// museSparkOutputBudgetFields are the three spellings an OpenAI-shaped request
+// may use for its output cap: Chat Completions' max_tokens, Responses'
+// max_output_tokens, and the OpenAI-compatible max_completion_tokens. A Muse
+// Spark request may arrive on either lane, so all three are clamped.
+var museSparkOutputBudgetFields = []string{"max_tokens", "max_output_tokens", "max_completion_tokens"}
+
+// clampMuseSparkOutputBudget raises a caller-set output budget to the floor and
+// returns the fields it changed. It only ever raises: an explicit larger budget
+// and a request that set no budget at all stay byte-identical, because
+// synthesizing a cap the caller never asked for would silently shorten real
+// answers.
+func clampMuseSparkOutputBudget(m map[string]any, cleanModel string) []string {
+	if m == nil || !isOpencodeResponsesModel(cleanModel) {
+		return nil
+	}
+	var raised []string
+	for _, field := range museSparkOutputBudgetFields {
+		budget, ok := outputBudgetOf(m[field])
+		if !ok || budget >= museSparkMinOutputTokens {
+			continue
+		}
+		m[field] = museSparkMinOutputTokens
+		raised = append(raised, field)
+	}
+	return raised
+}
+
+// outputBudgetOf reads the numeric shape an output cap decodes to. A JSON
+// integer may arrive as int64, int or float64 depending on how the body was
+// decoded, so all three are accepted; a string ("1024") is not a budget and a
+// non-finite float is not one either.
+func outputBudgetOf(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return 0, false
+		}
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
+// museSparkEffortSuffix returns the reasoning effort a caller encoded in the
+// model id, e.g. "muse-spark-1.3(high)". The parenthesised level is 9router
+// request notation and never part of the wire id — which is why the callers
+// strip it before dispatch — but the intent it carried is still the caller's.
+func museSparkEffortSuffix(rawModel string) string {
+	open := strings.LastIndex(rawModel, "(")
+	if open == -1 || !strings.HasSuffix(rawModel, ")") {
+		return ""
+	}
+	level := strings.ToLower(strings.TrimSpace(rawModel[open+1 : len(rawModel)-1]))
+	switch level {
+	case "high", "medium", "low":
+		return level
+	default:
+		return ""
+	}
+}
+
+// museSparkCleanModel reduces the model as the client asked for it to the
+// catalog id: no client prefix and no parenthesised request override.
+func museSparkCleanModel(model string) string {
+	id := strings.TrimPrefix(model, "oc/")
+	id = strings.TrimPrefix(id, "opencode-go/")
+	id = strings.TrimPrefix(id, "opencode/")
+	if open := strings.IndexByte(id, '('); open != -1 {
+		id = id[:open]
+	}
+	return id
+}
+
+// normalizeMuseSparkResponsesBody reshapes an OpenAI Responses body for the
+// Muse Spark lane. model is the id exactly as the client sent it (prefix and
+// "(level)" override included) so the request modifier survives the cleaning.
+func normalizeMuseSparkResponsesBody(body []byte, model string) ([]byte, error) {
+	cleanModel := museSparkCleanModel(model)
+
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return body, nil
@@ -1264,7 +1413,15 @@ func normalizeMuseSparkResponsesBody(body []byte, cleanModel string) ([]byte, er
 			rMap["effort"] = "xhigh"
 		}
 		rMap["summary"] = "auto"
+	} else if effort := museSparkEffortSuffix(model); effort != "" {
+		// Fill-only: an explicit body effort already won above, so the model-id
+		// override never silently replaces what the caller asked for in the body.
+		m["reasoning"] = map[string]any{
+			"effort":  effort,
+			"summary": "auto",
+		}
 	}
+	clampMuseSparkOutputBudget(m, cleanModel)
 	// PR #4061: Strip prior reasoning items & continuity properties
 	if inList, ok := m["input"].([]any); ok {
 		cleanInput := make([]any, 0, len(inList))
@@ -1347,7 +1504,9 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, "public", body, true)
+	resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+		return proxy.ForwardOpenAI(ctx, req.Client, &cfg, "public", body, true)
+	})
 	if err != nil {
 		return fmt.Errorf("ForwardOpencodeGo (free lane): %w", err)
 	}
@@ -1369,6 +1528,61 @@ func forwardOpencodeGoFree(w http.ResponseWriter, req *Request, cleanModel strin
 		data = converted
 	}
 	return jsonResponse(req.Ctx, w, bytes.NewReader(data), req.TranslateResp, req.ResponseBuf)
+}
+
+func isOpencodeGoGeminiModel(cleanModel string) bool {
+	if mf, ok := providers.GetModelFormats("opencode-go", cleanModel); ok {
+		return mf.TargetFormat == providers.FormatGemini
+	}
+	return strings.HasPrefix(strings.ToLower(cleanModel), "gemini-")
+}
+
+func forwardOpencodeGoGemini(w http.ResponseWriter, req *Request, cleanModel, sessionHeader string) error {
+	action := "generateContent"
+	if req.IsStream {
+		action = "streamGenerateContent?alt=sse"
+	}
+
+	geminiURL := fmt.Sprintf("https://opencode.ai/inference/go/v1/models/%s:%s", cleanModel, action)
+	if req.Config != nil && req.Config.BaseURL != "" && !strings.Contains(req.Config.BaseURL, "opencode.ai") {
+		base := strings.TrimSuffix(strings.TrimRight(req.Config.BaseURL, "/"), "/chat/completions")
+		geminiURL = fmt.Sprintf("%s/%s:%s", base, cleanModel, action)
+	}
+
+	geminiBody, err := translator.TranslateOpenAIToGemini(req.Body)
+	if err != nil {
+		return fmt.Errorf("translate to Gemini for opencode-go: %w", err)
+	}
+
+	headers := map[string]string{
+		"Content-Type":       "application/json",
+		"x-goog-api-key":     req.APIKey,
+		"x-opencode-session": sessionHeader,
+	}
+	if req.IsStream {
+		headers["Accept"] = "text/event-stream"
+	}
+
+	ctx := req.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	resp, err := proxy.DoRequest(ctx, req.Client, "POST", geminiURL, headers, geminiBody)
+	if err != nil {
+		return fmt.Errorf("ForwardOpencodeGo (gemini route): %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, constants.UpstreamErrLimit))
+		return &proxy.UpstreamError{StatusCode: resp.StatusCode, Body: errBody, Header: resp.Header}
+	}
+
+	if req.IsStream {
+		return geminiStream(w, resp.Body, ctx)
+	}
+	return geminiNonStream(w, resp.Body)
 }
 
 func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
@@ -1396,6 +1610,10 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		return forwardOpencodeGoFree(w, req, cleanModel)
 	}
 
+	if isOpencodeGoGeminiModel(cleanModel) {
+		return forwardOpencodeGoGemini(w, req, cleanModel, sessionHeader)
+	}
+
 	if isOpencodeGoResponsesModel(cleanModel) {
 		// Route through Responses API format: https://opencode.ai/zen/go/v1/responses (#3819, #3820, v0.5.75)
 		transformedBody, _, err := buildResponsesBody(req.Body)
@@ -1403,7 +1621,7 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 			return fmt.Errorf("transform body for opencode-go muse-spark: %w", err)
 		}
 
-		transformedBody, err = normalizeMuseSparkResponsesBody(transformedBody, cleanModel)
+		transformedBody, err = normalizeMuseSparkResponsesBody(transformedBody, reqObj.Model)
 		if err != nil {
 			return fmt.Errorf("normalize opencode-go muse-spark body: %w", err)
 		}
@@ -1444,7 +1662,9 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, transformedBody, req.IsStream)
+		resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+			return proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, transformedBody, req.IsStream)
+		})
 		if err != nil {
 			return fmt.Errorf("ForwardOpencodeGo (muse-spark responses): %w", err)
 		}
@@ -1509,6 +1729,9 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 		if cleanModel != "" {
 			reqGoMap["model"] = cleanModel
 		}
+		if strings.HasPrefix(strings.ToLower(cleanModel), "deepseek") {
+			delete(reqGoMap, "response_format")
+		}
 		// Deterministic marshaling keeps the serialized request prefix
 		// stable across turns, which DeepSeek's prefix prompt cache
 		// requires; json/v2 randomizes map member order by default.
@@ -1539,7 +1762,9 @@ func ForwardOpencodeGo(w http.ResponseWriter, req *Request) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resp, err := proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, body, req.IsStream)
+	resp, err := forwardOpenCode(ctx, func() (*http.Response, error) {
+		return proxy.ForwardOpenAI(ctx, req.Client, &cfg, req.APIKey, body, req.IsStream)
+	})
 	if err != nil {
 		return fmt.Errorf("ForwardOpencodeGo (default route): %w", err)
 	}

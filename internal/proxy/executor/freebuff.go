@@ -57,6 +57,31 @@ func freebuffOrigin(baseURL string) string {
 	return "https://www.codebuff.com"
 }
 
+// applyRelayHeaders points a freebuff control-plane request at its real
+// destination through an edge relay.
+//
+// A relay connection rewrites BaseURL to the relay host, and the relay forwards
+// to x-relay-target + x-relay-path while ignoring the URL it was dialed at
+// (internal/handlers/media/deploy.go, netlify_relay.go). So the path has to be
+// the endpoint THIS call needs, not the one the connection stamped:
+// BuildEdgeRelayHeaders derives x-relay-path from the provider base URL, and for
+// freebuff the registry base URL is the chat route
+// (https://www.codebuff.com/api/v1/chat/completions) — copying it verbatim sent
+// every session/run/release call to the chat-completions endpoint.
+//
+// The origin is the provider host and is the same for all of these calls, so it
+// comes from StaticHeaders. Freebuff owns its CLI identity headers; nothing else
+// is copied. No x-relay-target means the connection is not relayed, so this is a
+// no-op and the call goes straight to the origin freebuffOrigin already built.
+func applyRelayHeaders(req *http.Request, headers map[string]string, path string) {
+	target := headers["x-relay-target"]
+	if target == "" {
+		return
+	}
+	req.Header.Set("x-relay-target", target)
+	req.Header.Set("x-relay-path", path)
+}
+
 func ensureFreebuffMarker(body map[string]any) {
 	rawMsgs, ok := body["messages"].([]any)
 	if !ok || len(rawMsgs) == 0 {
@@ -115,7 +140,7 @@ func ensureFreebuffEndTurnTool(body map[string]any) {
 	body["tools"] = append(rawTools, endTurnTool)
 }
 
-func startFreebuffRun(ctx context.Context, client *http.Client, baseURL, token, model string) (string, error) {
+func startFreebuffRun(ctx context.Context, client *http.Client, baseURL, token, model string, headers map[string]string) (string, error) {
 	origin := freebuffOrigin(baseURL)
 	reqURL := origin + freebuffRunPath
 
@@ -136,6 +161,7 @@ func startFreebuffRun(ctx context.Context, client *http.Client, baseURL, token, 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", freebuffCLIUserAgent)
+	applyRelayHeaders(req, headers, freebuffRunPath)
 
 	resp, err := DoFreebuffHTTP(ctx, client, req)
 	if err != nil {
@@ -161,7 +187,7 @@ func startFreebuffRun(ctx context.Context, client *http.Client, baseURL, token, 
 	return data.RunID, nil
 }
 
-func finishFreebuffRun(ctx context.Context, client *http.Client, baseURL, token, runID, status string) {
+func finishFreebuffRun(ctx context.Context, client *http.Client, baseURL, token, runID, status string, headers map[string]string) {
 	if runID == "" {
 		return
 	}
@@ -185,6 +211,7 @@ func finishFreebuffRun(ctx context.Context, client *http.Client, baseURL, token,
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", freebuffCLIUserAgent)
+	applyRelayHeaders(req, headers, freebuffRunPath)
 
 	resp, err := DoFreebuffHTTP(finishCtx, client, req)
 	if err == nil {
@@ -223,7 +250,7 @@ func ForwardFreebuff(w http.ResponseWriter, req *Request) error {
 	sess, ok := getFreebuffSessionWithStore(store, token, model)
 	if !ok {
 		var err error
-		sess, err = requestFreebuffSessionWithStore(ctx, store, client, req.Config.BaseURL, token, model)
+		sess, err = requestFreebuffSessionWithStore(ctx, store, client, req.Config.BaseURL, token, model, req.Config.StaticHeaders)
 		if err != nil {
 			log.Warn("freebuff", "session request failed", "model", model, "error", err)
 			var ue *proxy.UpstreamError
@@ -239,14 +266,14 @@ func ForwardFreebuff(w http.ResponseWriter, req *Request) error {
 	}
 
 	// 2. Start Agent Run
-	runID, err := startFreebuffRun(ctx, client, req.Config.BaseURL, token, model)
+	runID, err := startFreebuffRun(ctx, client, req.Config.BaseURL, token, model, req.Config.StaticHeaders)
 	if err != nil {
 		log.Warn("freebuff", "run start failed", "model", model, "error", err)
 		return err
 	}
 	runStatus := "failed"
 	defer func() {
-		finishFreebuffRun(context.Background(), client, req.Config.BaseURL, token, runID, runStatus)
+		finishFreebuffRun(context.Background(), client, req.Config.BaseURL, token, runID, runStatus, req.Config.StaticHeaders)
 	}()
 	// 3. Transform body
 	delete(parsedBody, "reasoning_effort")
@@ -348,7 +375,7 @@ func ForwardFreebuff(w http.ResponseWriter, req *Request) error {
 			dropFreebuffLease(store, token, model, sess.InstanceID)
 		}
 		clearFreebuffSession(token, model)
-		newSess, sessErr := requestFreebuffSessionWithStore(ctx, store, client, req.Config.BaseURL, token, model)
+		newSess, sessErr := requestFreebuffSessionWithStore(ctx, store, client, req.Config.BaseURL, token, model, req.Config.StaticHeaders)
 		if sessErr == nil && newSess != nil {
 			sess = newSess
 			codebuffMeta["freebuff_instance_id"] = sess.InstanceID

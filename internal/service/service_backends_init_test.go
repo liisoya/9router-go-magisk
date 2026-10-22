@@ -3,14 +3,14 @@ package service
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
 )
 
-// TestInstallOpenRCNeedsRoot: OpenRC is a system service with no per-user
-// scope, so a non-root install must fail with a clear hint rather than
-// silently installing a different backend.
+// TestInstallOpenRCNeedsRoot: OpenRC has no per-user scope, so a non-root
+// install must fail rather than silently pick another backend.
 func TestInstallOpenRCNeedsRoot(t *testing.T) {
 	stubHost(t, hostStub{goos: "linux", euid: 1000})
 	crontab := stubCrontab(t, "")
@@ -243,10 +243,8 @@ func TestInstallRunitRootActivatesTheService(t *testing.T) {
 	if !fileExists(filepath.Join(runitSystemDir, "run")) {
 		t.Fatalf("run script not written under %s", runitSystemDir)
 	}
-	// The activation symlink is what makes runsv pick the service up, so this
-	// is the whole point of the root branch. It is asserted as a request
-	// rather than a file: an unelevated Windows runner cannot create one, and
-	// failing there left the path uncovered on every Windows machine.
+	// The activation symlink is what makes runsv start the service; asserted as
+	// a requested link because an unelevated Windows runner cannot create one.
 	if len(links.created) != 1 || links.created[0] != runitSystemLink {
 		t.Errorf("activation symlink requests = %v, want [%s]", links.created, runitSystemLink)
 	}
@@ -354,9 +352,8 @@ func TestUninstallRunit(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(runitSystemLink), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		// Provision the activation link through the seam rather than a bare
-		// os.Symlink: creating one needs SeCreateSymbolicLinkPrivilege, so this
-		// line failed on every unelevated Windows runner.
+		// Provision the link through the seam: a bare os.Symlink needs
+		// SeCreateSymbolicLinkPrivilege and fails on unelevated Windows.
 		if err := symlink(runitSystemDir, runitSystemLink); err != nil {
 			t.Fatal(err)
 		}
@@ -365,8 +362,7 @@ func TestUninstallRunit(t *testing.T) {
 		if _, ok := uninstallRunit(); !ok {
 			t.Fatal("uninstallRunit() = false, want true")
 		}
-		// A leftover activation link keeps runsv starting the service, so the
-		// uninstall is only honest once it is removed too.
+		// A leftover activation link keeps runsv starting the service.
 		if !slices.Contains(links.removed, runitSystemLink) {
 			t.Errorf("removal requests = %v, want %s", links.removed, runitSystemLink)
 		}
@@ -395,5 +391,34 @@ func TestControlRunit(t *testing.T) {
 	want := filepath.Join(home, "service", "9router-go")
 	if len(*calls) != 1 || (*calls)[0].name != "sv" || !slices.Contains((*calls)[0].args, want) {
 		t.Errorf("calls = %v, want sv restart %s", *calls, want)
+	}
+}
+
+// TestInitScriptsParseAsShell runs the OpenRC and runit scripts through /bin/sh,
+// so a quoting mistake in a spaced path or arg is caught.
+func TestInitScriptsParseAsShell(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("sh not installed: %v", err)
+	}
+	tests := []struct {
+		name   string
+		script string
+	}{
+		{"openrc plain", renderOpenRCScript("/usr/local/bin/9router-go", []string{"--rtk=true"})},
+		{"openrc spaced path and arg", renderOpenRCScript("/opt/my apps/9router-go", []string{"--name=a b"})},
+		{"runit plain", renderRunitRun("/usr/local/bin/9router-go", []string{"--rtk=true"})},
+		{"runit spaced path and arg", renderRunitRun("/opt/my apps/9router-go", []string{"--name=a b"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "script")
+			if err := os.WriteFile(path, []byte(tt.script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command(sh, "-n", path).CombinedOutput(); err != nil {
+				t.Fatalf("sh -n rejected the script: %v\n%s\n---\n%s", err, out, tt.script)
+			}
+		})
 	}
 }

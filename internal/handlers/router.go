@@ -147,6 +147,9 @@ func SetupRoutes(r interface {
 	r.Get("/api/usage/stream", HandleUsageStream(repo))
 	r.Get("/usage/stats", HandleUsageStats(repo))
 	r.Get("/api/usage/stats", HandleUsageStats(repo))
+	r.Get("/usage/chart", HandleUsageChart(repo))
+	r.Get("/api/usage/chart", HandleUsageChart(repo))
+	r.Get("/api/usage/dashboard", HandleUsageDashboard(repo))
 	r.Get("/api/usage/request-details", HandleRequestDetails(repo))
 	r.Get("/api/usage/request-details/{id}", HandleRequestDetail(repo))
 	r.Get("/api/usage/providers", dashH.HandleGetUsageProviders)
@@ -193,6 +196,8 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Get("/usage/stream", HandleUsageStream(repo))
 	r.Get("/api/usage/stats", HandleUsageStats(repo))
 	r.Get("/usage/stats", HandleUsageStats(repo))
+	r.Get("/api/usage/chart", HandleUsageChart(repo))
+	r.Get("/api/usage/dashboard", HandleUsageDashboard(repo))
 	r.Get("/api/usage/request-details", HandleRequestDetails(repo))
 	r.Get("/api/usage/request-details/{id}", HandleRequestDetail(repo))
 	r.Get("/api/usage/providers", dashH.HandleGetUsageProviders)
@@ -247,9 +252,16 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Delete("/api/keys/{id}", dashH.HandleDeleteApiKey)
 	r.Put("/api/keys/{id}/toggle", dashH.HandleToggleApiKey)
 	r.Post("/api/keys/{id}/rotate", dashH.HandleRotateApiKey)
+	r.Post("/api/keys/{id}/reset-quota", dashH.HandleResetApiKeyQuota)
 	r.Get("/api/keys/{id}/models", dashH.HandleGetApiKeyModels)
 	r.Put("/api/keys/{id}/models", dashH.HandleSetApiKeyModels)
 	r.Put("/api/keys/{id}", dashH.HandleUpdateApiKey)
+	r.Get("/api/plans", dashH.HandleListPlans)
+	r.Post("/api/plans", dashH.HandleCreatePlan)
+	r.Get("/api/plans/{id}", dashH.HandleGetPlan)
+	r.Put("/api/plans/{id}", dashH.HandleUpdatePlan)
+	r.Delete("/api/plans/{id}", dashH.HandleDeletePlan)
+	r.Get("/api/plans/{id}/keys", dashH.HandlePlanKeys)
 	r.Get("/api/metrics", observ.Handler().ServeHTTP)
 	r.Get("/api/vault/status", dashH.HandleGetVaultStatus)
 	r.Get("/api/guardrails/policies", dashH.HandleGetGuardrailPolicies)
@@ -291,8 +303,13 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Post("/api/settings/database", dashH.HandleImportDatabase)
 	r.Get("/api/settings/database/stats", dashH.HandleGetDatabaseStats)
 	r.Post("/api/settings/database/prune", dashH.HandlePruneDatabase)
+	r.Post("/api/settings/database/prune-usage", dashH.HandlePruneUsageHistory)
 	r.Post("/api/settings/database/vacuum", dashH.HandleVacuumDatabase)
 	r.Post("/api/settings/proxy-test", dashH.HandleProxyTest)
+
+	// Currency rates (profile page): reads live USD rates for the catalog codes
+	// and stores the subset the display uses.
+	r.Post("/api/settings/currency/refresh", dashH.HandleRefreshCurrencyRates)
 
 	// Token saver testing benches & filter catalog
 	r.Get("/api/tokensaver/rtk/filters", dashH.HandleGetRTKFilters)
@@ -523,6 +540,9 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	// sized against it, so changing it has to restart the gateway.
 	window := time.Duration(repo.GetRateLimitDefaults().WindowSeconds) * time.Second
 	rateLimiter := middleware.NewRateLimiter(window)
+	// The plan tier (F-3) is resolved from the repository, so a plan change
+	// applies to the next request without a restart.
+	rateLimiter.SetPlanSource(repo)
 	// The fallback itself is read per request, so an operator can raise or drop
 	// a global default without a restart. Only the window, which the live
 	// windows already depend on, is pinned at boot.

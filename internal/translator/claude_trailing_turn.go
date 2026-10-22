@@ -2,6 +2,7 @@ package translator
 
 import (
 	json "encoding/json/v2"
+	"reflect"
 	"strings"
 )
 
@@ -158,13 +159,50 @@ func sameTail(repaired, original []any) bool {
 	if !aOK || !bOK {
 		return true
 	}
-	left, err := json.Marshal(a)
-	if err != nil {
-		return true
+	// Compare the decoded values, not their JSON text: json/v2 marshals a Go map
+	// in a non-deterministic order (v1 sorted the keys, v2 does not), so two
+	// identical messages serialise differently about half the time. Comparing
+	// text made this report a change that had not happened, and the caller then
+	// re-encoded a body it should have forwarded untouched.
+	return reflect.DeepEqual(a, b)
+}
+
+// DropNonContentfulClaudeMessages drops the turns Anthropic rejects for
+// carrying no content, then repairs a tail the removal promoted to an
+// assistant turn. It is the third pass of SanitizeClaudePassthrough, exported
+// because a caller that builds a Claude conversation itself needs the same
+// cleanup for the same reason: a turn whose content is an empty array, a blank
+// string or only dropped parts is a 400 from the provider whichever path
+// produced it.
+//
+// The trailing user turn is not invented around: a conversation the filter
+// empties completely is returned empty rather than carrying placeholder text,
+// and the caller decides. It reports whether anything changed, so a caller
+// holding the client's own bytes can forward them untouched.
+func DropNonContentfulClaudeMessages(messages []any, intentionalPrefill bool) ([]any, bool) {
+	filtered := make([]any, 0, len(messages))
+	changed := false
+	for i, mRaw := range messages {
+		msgMap, ok := mRaw.(map[string]any)
+		if !ok {
+			filtered = append(filtered, mRaw)
+			continue
+		}
+		contentRaw, exists := msgMap["content"]
+		if !exists {
+			filtered = append(filtered, mRaw)
+			continue
+		}
+		if !isContentfulContent(contentRaw) && !isTrailingUserTurn(messages, i) {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, mRaw)
 	}
-	right, err := json.Marshal(b)
-	if err != nil {
-		return true
+	repaired := EnsureTrailingUserTurn(filtered, intentionalPrefill)
+	if len(repaired) != len(filtered) || !sameTail(repaired, filtered) {
+		filtered = repaired
+		changed = true
 	}
-	return string(left) == string(right)
+	return filtered, changed
 }

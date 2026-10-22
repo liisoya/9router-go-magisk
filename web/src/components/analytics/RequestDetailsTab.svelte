@@ -5,6 +5,7 @@
   import Card from '../../lib/ui/Card.svelte'
   import ProviderArtwork from '../providers/ProviderArtwork.svelte'
   import { api, normalizeLastError, type ProviderConnection } from '../../api/client'
+  import UsageDashboard from './UsageDashboard.svelte'
   import { copyToClipboard } from '../../lib/clipboard'
   import {
     cachedTokensFor,
@@ -16,6 +17,7 @@
     formatLocalTimestamp,
     type RequestDetailItem,
   } from './types'
+  import { costIn } from '../../lib/currency.svelte'
 
   interface Props {
     details?: RequestDetailItem[]
@@ -113,6 +115,8 @@
     })
   })
 </script>
+
+<UsageDashboard />
 
 <Card padding="none" class="overflow-hidden border border-border">
   <div class="px-5 py-3 border-b border-border flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-surface-2">
@@ -251,7 +255,7 @@
                 {fmt(cachedTokensFor(item))}
               </td>
               <td class="py-3 px-4 text-right font-mono text-emerald-500 text-[11px]">
-                {item.cost ? `$${item.cost.toFixed(4)}` : '—'}
+                {item.cost ? costIn(item.cost, 4) : '—'}
               </td>
               <td class="py-3 px-4 text-right">
                 <button
@@ -486,7 +490,7 @@
           <div class="p-3 rounded-xl bg-surface-2 border border-border space-y-1">
             <div class="text-text-muted text-[10px] uppercase font-bold tracking-wider">Est. Cost</div>
             <div class="font-code text-xs text-emerald-500 font-bold">
-              ${selectedDetail.cost ? selectedDetail.cost.toFixed(4) : '0.0000'}
+              {costIn(selectedDetail.cost ?? 0, 4)}
             </div>
           </div>
           {#if selectedDetail.id}

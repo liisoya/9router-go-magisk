@@ -148,6 +148,38 @@ Every upstream provider in this repository (`antigravity`, `opencode`, `claude`,
 - **Error Inspection**: Use `errors.Is(err, target)` for sentinels and `errors.As(err, &target)` for custom types. Never rely on `strings.Contains(err.Error(), ...)`.
 - **Zero Panic Policy**: No `panic()` in handlers, services, or proxy execution. Recover gracefully and emit appropriate HTTP/SSE error payloads.
 
+### F. Dependencies & Portability
+
+The build ships one binary per target from pure Go source. That guarantee is the
+only thing that constrains a dependency here — not its size, and not how heavy it
+looks. A large pure-Go library is fine; a small one that needs cgo is not.
+
+- **A new dependency is allowed. Do not refuse one on the grounds that it looks heavy.** Judge it by the two conditions below, not by its import graph or download size. Opaque or heavyweight is a reason to measure the cost and say so; it is not a reason to declare the approach impossible.
+- **The two conditions are mandatory and both are cheap to check. Run them before proposing the dependency, not after:**
+  1. **Portability.** Every pair in `CROSS_TARGETS` still builds with cgo disabled. Read the list from the `Makefile` rather than restating it, so a target added there cannot be forgotten here:
+     ```bash
+     for pair in $(grep -E '^CROSS_TARGETS *:=' Makefile | sed 's/.*:=[[:space:]]*//'); do
+       CGO_ENABLED=0 GOOS=${pair%-*} GOARCH=${pair#*-} \
+         go build -o /dev/null ./cmd/9router-go/ || echo "FAIL $pair"
+     done
+     ```
+     This needs `web/dist` to exist first (`make web-build`), because `web/embed.go` is a `//go:embed all:dist` directive — a fresh clone fails here for that reason and not for portability. `make cross` runs the same loop but also invokes `web-build`, so it needs Bun; the raw loop is the cheap check for a Go-only change.
+  2. **A coherent module graph.** `go mod tidy` leaves `go.mod` unchanged, and a module the repository actually imports is listed as a **direct** require rather than `// indirect`.
+- **Never claim a library cannot be used without building it.** A statement about *build* behaviour costs one command to verify, so verify it. An unverified "this is impossible here" is the expensive mistake: it discards a working approach, and the redesign that follows is paid for by everyone who later has to work around its absence.
+- **State the cost you measured rather than the cost you assumed.** When an approach has a heavier and a lighter variant, name both and their measured difference — binary size, module count, or both — so the choice is made on a number. Prefer the lighter variant when it meets the requirement; take the heavier one when the requirement genuinely needs what it adds, and say which requirement that is.
+- **Forbidden regardless of size:**
+  - Any library requiring cgo. It ends the `CGO_ENABLED=0` guarantee for every target at once.
+  - Build tags or platform-specific files that break any target in `CROSS_TARGETS`. These turn a single portable binary into a per-platform build, which is the one property this pipeline exists to keep.
+
+
+### G. Deployment Target: Small Hardware
+
+The gateway is expected to serve from a **1 vCPU box with a small memory ceiling** — an operator's router, a Raspberry Pi, or the cheapest VPS they own. That is why §4.A–§4.F read the way they do: stream instead of buffering, bound every cache and goroutine, reuse the pooled `http.Client`. Code can be correct and still be a regression here.
+
+- **A change that measurably raises steady RSS or per-request CPU on that box is a regression**, even when every test passes and the wire contract is unchanged. Measure the real binary on a real request path before and after, and put the number in the PR.
+- **Bound everything that grows.** A cache needs a size or a TTL, per-connection state needs a lifetime, and a goroutine per request needs a reason to exist. An unbounded map keyed by a client-supplied value is a memory leak with a schedule.
+- **Take the smaller mechanism when both meet the requirement** — a slice over a map, a counter over a histogram, `json.RawMessage` over `map[string]any` on a hot path. When the heavier one is genuinely needed, say which requirement needs it.
+
 ---
 
 ## 5. Idiomatic Go Unit Testing Convention (`testing.T`)
@@ -162,6 +194,8 @@ Every bug fix — engine (Go) or module layer (shell/JS) — MUST ship a **regre
 2. Engine fixes: Go test in the same package (e.g. `TestSetupServerRouter_ModelTestSessionAuth`).
 3. Module JS fixes: node --test case in `module/webroot/test/` (parsers / bridge-commands suites).
 4. Shell environment quirks (mksh vs POSIX: `[^…]` caret is a LITERAL in mksh/dash — use `[!…]`; `|` in parameter-expansion patterns is ALTERNATION — escape as `\|`) must be captured in a test or a comment with the device-verified evidence.
+
+This rule is about test *style*, not about dependencies in general: it forbids adopting a BDD framework as the way tests are written, and says nothing against a new runtime dependency that satisfies §4.F. The two sections do not conflict — §4.F governs what may enter `go.mod`, this one governs how tests are shaped once it has.
 
 ### A. Table-Driven Tests Pattern
 For functions with multiple inputs, edge cases, or status transformations, always structure tests using table-driven tests:
@@ -364,6 +398,22 @@ cd web && bun run ratchet:svelte -- --update
 
 Never widen the baseline to make a failure disappear — fix the error, or split the PR and land the debt reduction on its own. The `--tsconfig tsconfig.app.json` flag is mandatory: the default resolves `tsconfig.json`, which has `files: []`, and silently checks **zero** components.
 
+
+### F. Client Weight Budget
+
+The dashboard is embedded in the binary and served by the same small box, usually to a phone. Weight is a review criterion here, not a matter of taste. Note the axis: §4.F governs what may enter `go.mod`, this governs what ships to the browser.
+
+Measured on `main`, 2026-10-18 (`cd web && bun run build`):
+
+- `dist/` total: **7.2 MB**
+- Material Symbols woff2: **3.9 MB** — the heaviest single file, and every dashboard visit fetches it through the `@font-face` in the built CSS
+- JS bundle: 1.2 MB · CSS: 112 KB · `dist/providers` artwork: 2.1 MB (only the views that render it)
+
+- **Report the numbers for a UI change**: `bun run build`, then `du -sh dist` and the largest files. A few percent of drift is noise; a larger jump needs a reason in the PR.
+- **A new runtime dependency has to pay for itself.** Icon packs, chart libraries, date/utility bundles and animation frameworks are the usual offenders. State what it buys and what it adds.
+- **Costs that never appear in the bundle still count on this box**: an animation or transition on a list that can hold hundreds of rows, a poll faster than the data changes, an unbounded client-side array, one DOM node per data point, `backdrop-filter` or a large blur inside a scrolling container, and per-frame JS on a view that stays open.
+- **A visual addition that costs measurably more than it gives may be refused, with the measured reason attached** — name the asset or the per-frame cost, and what the user gets for it. The build output is the measurement; "it is only a small card" is not.
+
 ---
 
 ## 7. Upstream Sync Workflow (Step-by-Step)
@@ -391,6 +441,13 @@ When tasked with syncing a feature, bugfix, or provider from upstream:
    ```bash
    rtk go test ./...
    make build
+   # Any change to go.mod needs the portability gate (§4.F): the five release
+   # targets must still build with CGO disabled, or the "single portable binary"
+   # guarantee has quietly become a per-platform build.
+   for pair in $(grep -E '^CROSS_TARGETS *:=' Makefile | sed 's/.*:=[[:space:]]*//'); do
+     CGO_ENABLED=0 GOOS=${pair%-*} GOARCH=${pair#*-} \
+       go build -o /dev/null ./cmd/9router-go/ || echo "FAIL $pair"
+   done
    make vet-svelte   # svelte-check ratchet — see §6.E
    # A CHANGELOG.md hunk in a PR is a violation of §7.6. Both forms matter:
    # the committed range catches what was pushed, the worktree the rest.
@@ -493,8 +550,33 @@ cd web && bun run build
 # Svelte type-check ratchet (blocks unresolved identifiers, pins type debt)
 make vet-svelte
 
+# Go lint/dispatch ratchet (CI `lint` job: golangci-lint on the diff, govulncheck,
+# oxlint, actionlint). golangci-lint reads source, but web/dist must exist or it
+# reports `pattern dist/*: no matching files found` as a typecheck failure:
+mkdir -p web/dist && printf '<!doctype html>' > web/dist/index.html
+golangci-lint run --new-from-rev="$(git merge-base origin/main HEAD)" ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+cd web && bunx oxlint --deny-warnings
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+# The full 141-finding baseline (not the diff) is printed by the same command
+# with no --new-from-rev; the lint step is a ratchet, not a clean tree.
+
+# Cross-compile check (CI `cross` job: identical to the release build, then
+# `file`-asserts each artifact's architecture and verifies SHA256SUMS.txt)
+make cross
+
 # Build binary (automatically builds web SPA into web/dist first)
 make build
+
+# Portability gate — required after any go.mod change (§4.F). Every release
+# target must still build with CGO disabled; `make cross` does the same but
+# also runs web-build, so it needs Bun. Requires web/dist to exist first
+# (`make web-build`): web/embed.go is a `//go:embed all:dist` directive, so a
+# fresh clone fails here for that reason rather than for portability.
+for pair in $(grep -E '^CROSS_TARGETS *:=' Makefile | sed 's/.*:=[[:space:]]*//'); do
+  CGO_ENABLED=0 GOOS=${pair%-*} GOARCH=${pair#*-} \
+    go build -o /dev/null ./cmd/9router-go/ || echo "FAIL $pair"
+done
 
 # Run dev server with live go run (PORT=20130 default)
 make dev
