@@ -101,11 +101,11 @@ jobs:
             echo "$NOTES" > /tmp/changelog.md
           else
             # Fallback to git log
-            PREV_TAG=$(git tag --sort=-version:refname | grep '^v' | head -2 | tail -1)
+            PREV_TAG="$(git tag --sort=-version:refname | grep '^v' | head -2 | tail -1)"
             if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${GITHUB_REF_NAME}" ]; then
-              LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+              LOG="$(git log --pretty=format:"- %s (%h)" --no-merges)"
             else
-              LOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${PREV_TAG}..${GITHUB_REF_NAME})
+              LOG="$(git log --pretty=format:"- %s (%h)" --no-merges "${PREV_TAG}..${GITHUB_REF_NAME}")"
             fi
             echo "$LOG" > /tmp/changelog.md
           fi
