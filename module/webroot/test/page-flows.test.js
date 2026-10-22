@@ -17,6 +17,13 @@ const assert = require('node:assert');
 const { createHarness } = require('./lib/app-harness.js');
 
 // refresh() 会问 panel：给一份最小可解析的 payload，避免用空串去撞解析层
+// 候选池单一来源文件的最小形状（page-dns 芯片/优选读取；与 module/etc/dns-candidates 同格式）
+const CAND_FILE = [
+  '# 9router-go · DNS 优选候选池（单一事实源）',
+  'cat=明文 label=腾讯     nameserver 119.29.29.29',
+  'cat=明文 label=阿里     nameserver 223.6.6.6'
+].join('\n');
+
 const PANEL_OK = 'port=20130 bind=loopback module_version=v1.0.0-r1 versioncode=100 ' +
   'engine_version=1.0.0 engine_ver_src=runtime engine_ver_healed=0 lan_ip=127.0.0.1 ' +
   'dns=up dns_pid=2 engine=up engine_pid=1 watchdog=up watchdog_pid=3 ' +
@@ -41,9 +48,15 @@ function boot(opts) {
         if (opts.reload === false) return 'write-ok-reload-failed';
         return 'write-ok-reloaded';
       }
+      if (cmd.includes('echo write-ok')) return 'write-ok';   // KB.writeFile（候选临时文件等）
       if (cmd.includes('restore-upstreams')) return opts.restore === false ? 'restore-none' : 'restore-ok-reloaded';
       // refresh()：opts.panel 让用例能注入"面板带回来的字段"（例：验证 mod_url 不被采纳）
       if (cmd.includes('panel')) return opts.panel || PANEL_OK;
+      if (cmd.includes('etc/dns-candidates')) {
+        // 候选池单一来源（cat=/label= 元数据行，readFile 走 __READ_OK__ 哨兵）
+        return (opts.candidates || CAND_FILE) + '\n__READ_OK__';
+      }
+      if (cmd.includes('optimize-dns')) return 'reoptimized';   // 优选 seam 判据词
       if (cmd.includes('-P -j 8')) return opts.probe || '';   // dnsfwd 探测输出（优选用）
       if (cmd.includes('rm -f')) return 'rm-ok';   // KB.remove 自报标记（2026-10-01 起写族自报）
       if (cmd.includes('am start')) return 'Starting: Intent { act=android.intent.action.VIEW }';
@@ -205,42 +218,36 @@ test('B1b 备份次序的唯一所有者已随写入搬进 seam：life_upstreams
   assert.ok(!/KB\.backupOnce\(UPSTREAMS/.test(page), 'page-dns 又在自发备份（纪律应只在 seam）');
 });
 
-// ── 优选排序契约（2026-10-01）：以本机实测为准，而不是"推荐顺序" ──────────
-// 问过的问题是"按推荐做还是按实测做"。答案落到可执行事实：
-// 内置清单里「腾讯」排在「阿里」之前（DNS_CANDIDATES 的排列），这里让阿里快得多 ——
-// 若哪天优选改成"按清单顺序"，阿里会被压到腾讯后面，这两条会红。
-const PROBE_FAST_ALI = [
-  '  119.29.29.29                       v4  www.baidu.com              300ms  2/2  1.2.3.4',
-  '  223.6.6.6                          v4  www.baidu.com                8ms  2/2  1.2.3.4'
+// ── 优选契约（2026-10-22 完整优选收编后）：排序与写盘都在 shell 侧 ──────────
+// 旧契约（JS 编排探测→Top5→write-upstreams）随 ADR-0010 完整优选落地而退役：
+// 评分公式唯一实现在 dnsfwd.c probe_score（TSV score 列），写盘/排序唯一实现在
+// ops.sh optimize-dns（lifecycle.life_dns_reoptimize）。页面职责 = 候选池展示 +
+// rows-gate 预检 + 发动作命令 + 翻译判据词。这里钉住页面侧行为：
+//   ① 探测输出有 ≥50% 可用行 → 发 optimize-dns（rows-gate 不拦健康路径）
+//   ② 全部 <50% → 不发动作、不改写（门禁仍由页面本阶段求值）
+//   ③ 写盘内容/顺序由 tools/test-dns-optimize.sh 在 shell 侧钉住（单一所有者）
+const PROBE_TSV_FAST_ALI = [
+  'upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\tanswers\tfakeip\ttcp_ms\ttcp_ok/total\ttcp_ip\tscore',
+  '119.29.29.29\tv4\twww.baidu.com\t300\t2/2\t1\t1.2.3.4\tno\t-1\t0/0\t-\t40.0',
+  '223.6.6.6\tv4\twww.baidu.com\t8\t2/2\t1\t1.2.3.4\tno\t-1\t0/0\t-\t92.0'
 ].join('\n');
-// 候选清单经 KB.writeFile（临时文件），最终配置经 seam（KB.writeUpstreams）——
-// 取最后一条 write-upstreams = 真正落盘的那份。内容是 base64 过 stdin 的
-// （printf '%s' '<b64>' | ops.sh write-upstreams），断言顺序必须先解出来 ——
-// 否则比的是编码串，顺序断言等于没断言。
-const lastWrite = cmds => {
-  const c = cmds.filter(c => c.includes('write-upstreams')).pop() || '';
-  const m = c.match(/printf '%s' '([A-Za-z0-9+/=]+)'/);
-  return m ? Buffer.from(m[1], 'base64').toString('utf8') : c;
-};
 
-test('优选排序：按本机实测评分降序（内置清单的排列顺序不参与排序）', async () => {
-  const { els, cmds } = boot({ probe: PROBE_FAST_ALI, backup: true });
+test('优选：有可用上游 → 动作命令下发（optimize-dns seam，2026-10-22 收编）', async () => {
+  const { els, cmds } = boot({ probe: PROBE_TSV_FAST_ALI, backup: true });
   await els.get('btn-opt').onclick();
-  const w = lastWrite(cmds);
-  const iAli = w.indexOf('223.6.6.6'), iTx = w.indexOf('119.29.29.29');
-  assert.ok(iAli >= 0 && iTx >= 0, `写入内容里缺上游：${w}`);
-  assert.ok(iAli < iTx,
-    `阿里 8ms 必须排在腾讯 300ms 之前 —— 现在按清单顺序排了（推荐值压过了实测）：${w}`);
+  assert.ok(cmds.some(c => c.includes('optimize-dns')), '优选动作没经 ops.sh optimize-dns');
+  assert.ok(els.get('toast').textContent.includes('优选已应用'),
+    `判据词没翻译成用户提示：「${els.get('toast').textContent}」`);
 });
 
-test('优选排序：手写的自定义项保留在最前（契约②的例外，即使它没过门槛）', async () => {
-  const { els, cmds } = boot({ probe: PROBE_FAST_ALI, backup: true });
-  els.get('upstreams').value = 'nameserver 1.1.1.1';   // 不在探针输出里 = 本次没通过门槛
+test('优选：全部 <50% → 不发动作、保持原配置（rows-gate 仍由页面求值）', async () => {
+  const weak = PROBE_TSV_FAST_ALI.split('\n')[0] +
+    '\n119.29.29.29\tv4\twww.baidu.com\t300\t0/2\t1\t-\tno\t-1\t0/0\t-\t0.0';
+  const { els, cmds } = boot({ probe: weak, backup: true });
   await els.get('btn-opt').onclick();
-  const w = lastWrite(cmds);
-  const iCustom = w.indexOf('1.1.1.1'), iAli = w.indexOf('223.6.6.6');
-  assert.ok(iCustom >= 0, `自定义项被丢了（用户手写的不能被一次优选淘汰）：${w}`);
-  assert.ok(iCustom < iAli, `手写项必须留在最前，实际顺序：${w}`);
+  assert.ok(!cmds.some(c => c.includes('optimize-dns')), '无可用上游却发了写盘动作');
+  assert.ok(els.get('opt-table').innerHTML.includes('没有可用率'),
+    '门禁拒绝原因没展示给用户');
 });
 
 // ── 更新源必须固定（2026-10-01）：不接受用户自定义 ──────────────────────

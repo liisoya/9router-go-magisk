@@ -307,8 +307,15 @@ func TestHandleAudioVoices_elevenlabs(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := chat.NewChatHandler(nil)
-	req := httptest.NewRequest("GET", "/v1/audio/voices?provider=elevenlabs", nil)
+	// 桩 URL（原实现打真网 api.elevenlabs.io —— 违反 §5.4"测试不许碰网络"，
+	// 国内网络必红；改用 edgeVoicesURL 同款 var 桩模式）
+	oldURL := elevenVoicesURL
+	elevenVoicesURL = upstream.URL + "/v1/voices"
+	defer func() { elevenVoicesURL = oldURL }()
+
+	handler := newTestMediaHandler(nil)
+	handler.Client = upstream.Client()
+	req := httptest.NewRequest("GET", "/v1/audio/voices?provider=elevenlabs&apiKey=test-key", nil)
 	rec := httptest.NewRecorder()
 	handler.Client = upstream.Client()
 	handler.HandleAudioVoices(rec, req)

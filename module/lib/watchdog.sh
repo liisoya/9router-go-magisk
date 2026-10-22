@@ -199,6 +199,7 @@ confirmed_dns=0
 dns_fail=0          # 连续几次探测全部上游不可达
 dns_probe_at=0      # 上次探测时刻（墙钟秒）
 dns_heal_at=0       # 上次自愈动作时刻（墙钟秒，冷却用）
+dns_reopt_at=0      # 上次自动优选尝试时刻（墙钟秒；成功与否都算——节流在 lifecycle）
 ev_chld=0
 ev_usr1=0
 # handler 内**只做算术赋值**（零 fork）：见文件头的风暴警告。
@@ -393,6 +394,24 @@ while :; do
           fi ;;
         ok) dns_fail=0 ;;
         none) : ;;   # 无真实主机可探（无兼容节点/全走远端代理解析）→ 不判 DNS，交可达性诊断
+      esac
+    fi
+    # ── DNS 周期自动优选（ADR-0010 完整优选落地；与自愈独立）──
+    # 节流/击败门槛/strike 双确认全部在 life_dns_reoptimize 内（含判据词），这里只持墙钟。
+    # 探测健康（ok）才值得优选：全死时自愈已覆盖，不叠加两次探测开销。
+    if [ "$((dns_fail))" -eq 0 ] && [ "$_hdn" -ge "$((dns_reopt_at + $(life_dns_opt_interval)))" ]; then
+      dns_reopt_at="$_hdn"
+      _ro_v="$(life_dns_reoptimize)"
+      case "$_ro_v" in
+        reoptimized)                 log "DNS 自动优选：候选池评分 Top5 已应用并热重载（自定义项保留在前；回滚点已留）" ;;
+        reoptimized-reload-failed)   log "DNS 自动优选：配置已写盘，但热重载未生效（详见 dnsfwd.log）" ;;
+        beaten-strike=*)             log "DNS 自动优选：候选池击败当前集（gap 达标，strike ${_ro_v#beaten-strike=}），等下一轮双确认" ;;
+        not-beaten)                  : ;;  # 追平/反超：静默（常态，每 3 天一次）
+        none-viable|no-candidates)   log "DNS 自动优选未执行：候选池无 ≥50% 可用项（verdict=$_ro_v）" ;;
+        stale-config)                log "DNS 自动优选让位：探测期间配置被修改（用户编辑优先）" ;;
+        write-failed)                log "DNS 自动优选写盘失败（原配置未动）" ;;
+        no-dnsfwd|skip-throttled)    : ;;
+        *)                           log "DNS 自动优选未生效（verdict=${_ro_v:-空}）" ;;
       esac
     fi
   else

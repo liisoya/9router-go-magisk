@@ -23,7 +23,6 @@ import (
 // local-device | elevenlabs | gemini, ?lang=<code> filter, ?apiKey for elevenlabs.
 
 const (
-	elevenVoicesURL   = "https://api.elevenlabs.io/v1/voices"
 	deepgramModelsURL = "https://api.deepgram.com/v1/models"
 	inworldVoicesURL  = "https://api.inworld.ai/tts/v1/voices"
 	minimaxVoiceURL   = "https://api.minimax.io/v1/get_voice"
@@ -31,6 +30,10 @@ const (
 	edgeUA            = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 	voicesCacheTTL    = 24 * time.Hour
 )
+
+// elevenVoicesURL is a var so tests can stub the upstream (same pattern as
+// edgeVoicesURL): the unit suite must never reach the real API (repo rule §5.4).
+var elevenVoicesURL = "https://api.elevenlabs.io/v1/voices"
 
 // edgeVoicesURL is a var so tests can stub the upstream.
 var edgeVoicesURL = "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4"

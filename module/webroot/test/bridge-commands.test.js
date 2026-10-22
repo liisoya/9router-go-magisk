@@ -224,9 +224,9 @@ test('fetch / sha256 / zipList：命令形状', () => {
 });
 
 // ── 模块专属 ──
-test('probeDns：MODDIR 来自 CFG，-P -j 8', () => {
+test('probeDns：MODDIR 来自 CFG，-P -j 8 --tsv（解析层固定消费 TSV 列位置）', () => {
   assert.strictEqual(C.probeDns('/d/dns-candidates.tmp'),
-    "/data/adb/modules/ninerouter-go/bin/dnsfwd -f '/d/dns-candidates.tmp' -P -j 8 2>&1");
+    "/data/adb/modules/ninerouter-go/bin/dnsfwd -f '/d/dns-candidates.tmp' -P -j 8 --tsv 2>&1");
 });
 test('openUrl：VIEW intent，URL 过 shq（WebView 不处理 _blank 时的兜底）', () => {
   assert.strictEqual(C.openUrl('https://github.com/x/y'),

@@ -12,6 +12,26 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { createHarness } = require('./lib/app-harness.js');
 
+// 候选池单一来源文件（与 module/etc/dns-candidates 同格式；芯片用例读取）
+const CAND_FILE = [
+  '# 9router-go · DNS 优选候选池（单一事实源）',
+  'cat=明文 label=腾讯     nameserver 119.29.29.29',
+  'cat=明文 label=阿里     nameserver 223.6.6.6',
+  'cat=明文 label=字节     nameserver 180.184.1.1',
+  'cat=明文 label=114     nameserver 114.114.114.114',
+  'cat=明文 label=百度     nameserver 180.76.76.76',
+  'cat=明文 label=CNNIC   nameserver 1.2.4.8',
+  'cat=doh  label=阿里IP   doh https://223.5.5.5/dns-query',
+  'cat=doh  label=阿里域名 doh https://dns.alidns.com/dns-query',
+  'cat=doh  label=腾讯     doh https://doh.pub/dns-query',
+  'cat=doh  label=腾讯IP   doh https://120.53.53.53/dns-query',
+  'cat=doh  label=360     doh https://doh.360.cn/dns-query',
+  'cat=dot  label=阿里IP   dot 223.5.5.5',
+  'cat=dot  label=阿里域名 dot dns.alidns.com',
+  'cat=dot  label=腾讯     dot dot.pub',
+  'cat=dot  label=腾讯IP   dot 120.53.53.53'
+].join('\n');
+
 const PANEL_OK = 'port=20130 bind=loopback module_version=v1.0.0-r1 versioncode=100 ' +
   'engine_version=1.0.0 engine_ver_src=runtime engine_ver_healed=0 lan_ip=127.0.0.1 ' +
   'dns=up dns_pid=2 engine=up engine_pid=1 watchdog=up watchdog_pid=3 ' +
@@ -35,6 +55,8 @@ function boot(opts = {}) {
       }
       if (cmd.includes('reload-dns')) return opts.reload === undefined ? 'reloaded' : opts.reload;
       if (cmd.includes('panel')) return PANEL_OK;
+      // 候选池单一来源（loadDnsCandidates 经 readFile；无此桩时页面回退静态最小集）
+      if (cmd.includes('etc/dns-candidates')) return CAND_FILE + '\n__READ_OK__';
       if (cmd.includes('rm -f')) return 'rm-ok';
       return '';
     }

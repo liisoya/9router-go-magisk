@@ -1,0 +1,35 @@
+# 9router-go · DNS 优选候选池（单一事实源；ADR-0010 挂账收敛，2026-10-22）
+#
+# 消费者（都从这里派生，不再各写一份）：
+#   · 面板「DNS 优选」芯片与候选来源 —— page-dns.js 运行时经 bridge 读取本文件
+#   · 守护的周期自动优选 —— lifecycle.sh life_dns_reoptimize 的候选腿
+#   · 手动优选 —— ops.sh cmd_optimize_dns 的候选腿
+#   · 门禁 —— tools/check-dns-candidates.sh 断言本文件形状与"JS 侧第二份清单"不复活
+#
+# 行格式（cat=<明文|doh|dot>  label=<区分词>  <配置行>）：
+#   配置行 = normUpstream 形式（nameserver IP / doh URL / dot 主机），dnsfwd 可直接读。
+#   cat/label 只服务面板芯片的分组与展示；写盘与优选只用配置行本身。
+#
+# 只放国内解析器：境外公共 DNS 给出与国内不同的 CDN 节点，从国内运营商出去
+# 常常 TLS 握手卡死（真机实测见 module/etc/dns-defaults 头注）。加新条目只改
+# 本文件 —— 面板芯片、手动优选、自动优选三处同步生效，不许再在 JS 里抄一份。
+#
+# 自动优选语义（lifecycle.sh）：候选按 dnsfwd TSV 末列 score（可用率×端到端
+# TCP 握手 ×延迟，公式唯一实现在 dnsfwd.c probe_score_uptime）排序取 Top5，
+# 用户自定义项保留在前；当前配置连续 4 个间隔轮（≥4 周）被候选击败才改写。
+
+cat=明文 label=腾讯     nameserver 119.29.29.29
+cat=明文 label=阿里     nameserver 223.6.6.6
+cat=明文 label=字节     nameserver 180.184.1.1
+cat=明文 label=114     nameserver 114.114.114.114
+cat=明文 label=百度     nameserver 180.76.76.76
+cat=明文 label=CNNIC   nameserver 1.2.4.8
+cat=doh  label=阿里IP   doh https://223.5.5.5/dns-query
+cat=doh  label=阿里域名 doh https://dns.alidns.com/dns-query
+cat=doh  label=腾讯     doh https://doh.pub/dns-query
+cat=doh  label=腾讯IP   doh https://120.53.53.53/dns-query
+cat=doh  label=360     doh https://doh.360.cn/dns-query
+cat=dot  label=阿里IP   dot 223.5.5.5
+cat=dot  label=阿里域名 dot dns.alidns.com
+cat=dot  label=腾讯     dot dot.pub
+cat=dot  label=腾讯IP   dot 120.53.53.53

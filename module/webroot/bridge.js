@@ -274,8 +274,14 @@
       `printf '%s' ${shq(b64Encode(content))} | ${_cmds.ops('write-upstreams')}`,
     restoreUpstreams: which =>
       _cmds.ops(`restore-upstreams ${which}`),
+    // 手动完整优选：候选池评分 Top5 的选择/写盘/热重载全在 ops.sh optimize-dns
+    // （lifecycle.life_dns_reoptimize 唯一实现），前端不再编排探测→写盘两步。
+    optimizeDns: () =>
+      _cmds.ops('optimize-dns'),
+    // --tsv：输出加列不再破坏解析（列位置稳定）；评分消费方（parsers/page-dns/lifecycle）
+    // 读 TSV 末列 score。人类可读格式仅供 9rctl -P 手看。
     probeDns: configFile =>
-      `${cfg().MODDIR}/bin/dnsfwd -f ${shq(configFile)} -P -j 8 2>&1`,
+      `${cfg().MODDIR}/bin/dnsfwd -f ${shq(configFile)} -P -j 8 --tsv 2>&1`,
     // 批量测速（A5）：**并发放在 shell 内部** —— 单次 exec 里对每个节点起一个后台子 shell，
     // 各自把结果写进**自己的文件**，`wait` 后按索引统一 cat 出来。
     // 为什么不放开 exec 并发：bridge 有全局串行队列（并发 ksu.exec 在部分管理器上输出交叉/丢失），
@@ -394,6 +400,12 @@
     return { ok: false, verdict: v };
   }
   function probeDns(configFile, tmo) { return sh(_cmds.probeDns(configFile), tmo || 60000); }
+  // 优选动作：只回判据词；解析/文案在 page-dns.js（与 writeUpstreams 同风格）。
+  // 120s：候选池 15 条 × 2 轮重复 × 真实主机 -d，串行 TLS 上游最坏 ~1min（探测并发 j=8 但 TLS 限 1）。
+  async function optimizeDns() {
+    const r = await sh(_cmds.optimizeDns(), 120000);
+    return r.out.trim();
+  }
   // 批量测速：只回**原始输出**，解析交给纯函数（parsers.parseCurlTimings）——
   // 执行归 bridge、解析归 parsers，各自单向依赖（原先单点 curlTiming 把解析内联在这里，
   // 于是"输出形态"这件事有两个家；批量后收成一处）
@@ -450,7 +462,7 @@
   const api = {
     sh, sqlFile, ops, openUrl, detectMode, db, diag,
     readFile, writeFile, appendLine, remove,
-    writeUpstreams, restoreUpstreams,
+    writeUpstreams, restoreUpstreams, optimizeDns,
     probeDns, curlTimingBatch, fetch, download, sha256, zipList, sqlSnapshot,
     fileSize, elfMagic,
     b64Decode

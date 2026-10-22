@@ -625,7 +625,7 @@ td b { color: var(--acc); font-weight: 600; }
           优选 <span class="tag">测速后自动应用</span>
         </h2>
         <div class="row">
-          <button class="primary" id="btn-opt" title="候选池 = 内置可达清单 ∪ 你的自定义项 ∪ 当前配置；评分 = 可用率×100 − RTT/50 − fake-ip 罚 100；排序只看本机实测评分（内置清单的排列只是分组，不是推荐优先级）；手写项保留在最前">候选池测速</button>
+          <button class="primary" id="btn-opt" title="候选池 = 候选文件（etc/dns-candidates）∪ 你的自定义项 ∪ 当前配置；评分（dnsfwd score 列，唯一公式在 dnsfwd.c）= 可用率×50 + 对真实供应商主机的 TCP 握手成功率×30 + 速度×20，fake-ip 罚 100 —— 答得出但对供应商连不通的上游会被淘汰；排序只看本机实测；手写项保留在最前">候选池测速</button>
           <button id="btn-rollback" title="回到上一版（.prev）">回滚上一版</button>
         </div>
         <div id="opt-table"></div>

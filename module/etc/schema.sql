@@ -124,3 +124,14 @@ CREATE TABLE IF NOT EXISTS upstream_leases (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (scope, key)
 );
+
+-- usageLedgerCarryover（Go-only，usage_retention_ledger.go）：usageHistory 按 keyId 的
+-- 保留期裁剪（opt-in ledger retention）时，按 key 记下被裁掉的 token 用量结转，防止
+-- "裁账 = 退款"——per-key token 预算（pattern keys 的 metering）读它把结转算回额度。
+-- 刻意不做成 usageHistory 里的合成行：marker 行与真实流量对所有 ledger 消费者不可区分，
+-- 每个消费者都得各自过滤、漏一个就虚报支出。由 EnsureLedgerTables 在运行期建表。
+CREATE TABLE IF NOT EXISTS usageLedgerCarryover (
+    keyId      TEXT PRIMARY KEY,
+    tokens     INTEGER NOT NULL DEFAULT 0,
+    updatedAt  TEXT NOT NULL
+);

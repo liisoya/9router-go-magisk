@@ -1,5 +1,23 @@
 # Changelog
 
+## [v1.9.14-r1] - 2026-10-22
+
+模块版本：同步上游 v1.9.14 引擎 + DNS 完整优选落地（ADR-0010 挂账功能）。**引擎**：1.9.14 全量（Gemini 4 Argon / Antigravity 2.23.0 / OpenCode Bun BoringSSL 隐身传输 / DeepSeek-web 与 gemini-web 隐身直连 / usage analytics 趋势图与多币种 / pattern-based keys / usage retention / 403 envelope / 499 abort / max_tokens cutoff 计为回答等 70 提交）。**面板**：由合并后源码重建。
+
+### DNS 机制完善（本轮核心）
+- **候选池收敛为单一事实源**：`module/etc/dns-candidates` 一处定义（cat=/label= 元数据 + 配置行），面板芯片、手动优选、守护自动优选三处共享；页面运行时读文件，JS 里的 15 条硬编码清单退役（读取失败回退两条明文最小集）。新门禁 `DNSPOOL`（tools/check-dns-candidates.sh）防 JS 全量清单复活。
+- **评分公式唯一实现在 dnsfwd（`probe_score`）**：`-P --tsv` 新增末列 `score` = 可用率×50 + 端到端握手率×30 + 速度×20，fake-ip 罚 100。端到端 = 拿该上游给出的答案 IP 对真实供应商主机做 TCP 握手——直接对齐"DNS 答得出但模型连不上（TLS 失败）"的主因。面板 JS 的第二份公式退役（只留无 score 列时的兼容回退），shell/JS 都只消费 TSV 列。
+- **守护周期自动优选（life_dns_reoptimize）**：每 3 天对候选池∪当前配置实测评分，候选最高分需超出当前集 15 分且连续 2 个间隔轮（双确认）才改写；探测期间用户编辑过配置即让位（cksum 快照前移到探测之前）；写盘 = 备份优先 + 自定义项保留在前 + Top5 + 原子写 + 热重载；strike 计数落盘跨重启存活。判据词如实进 watchdog.log。
+- **转发态端到端沉底**：dnsfwd 转发路径对锚点主机（= 用户配置的真实供应商域名）的查询做异步 TCP 握手，失败计 `tcpfails`（权重 ×3，成功查询减压）——"答得出但对你的供应商连不通"的上游在健康排序里持续下沉，TLS 失败的连接自动换上游。
+- **手动优选收编**：面板「候选池测速」改走 `ops.sh optimize-dns`（同一 life_dns_reoptimize 实现），页面不再自己编排写盘；probeDns 固定 `--tsv`（加列不再破坏解析）；PROBE_RE 兼容 TSV（rtt 无 ms 后缀）。
+- **修探测判据死角**：fake-ip 上游从写盘候选中显式剔除（此前只罚分，可能仍混入 Top5）；负分排序改为整数毫分 + 正偏移 + LC_ALL=C（浮点负分字符串在 locale 排序下会排到最前，真机/CI 都可能踩）。
+
+### 引擎测试环境修复
+- `TestHandleAudioVoices_elevenlabs` 改 hermetic：`elevenVoicesURL` const → var（同 edgeVoicesURL 桩先例），测试不再打真网 api.elevenlabs.io（§5.4"测试不许碰网络"；此前国内网络必红）；并修正 handler 构造（HandleAudioVoices 挂在 MediaHandler 上，此前构造 ChatHandler 导致桩 transport 永远打不进去）。
+- `TestLaunchdPlistAcceptedByValidator`：plutil 校验限 darwin（Linux 的 GNUstep plutil 对 XML plist 误报 "non-NSData"，非渲染问题）；非 darwin 走 xmllint --nonet。
+- `go.mod`：golang.org/x/{crypto,net,sync,sys,text} 越过可达 advisory（上游 #504 之后又补 net 0.61.0 / sys 0.49.0 / text 0.43.0）。
+- `module/etc/schema.sql` 补 `usageLedgerCarryover`（上游 #395 引入的 Go-only 表，SCHEMA 门禁红过）。
+
 ## [v1.9.13-r1] - 2026-10-16
 
 模块版本：同步上游 v1.9.13 引擎 + 架构评审修复。**引擎**：1.9.13 全量（含 OpenCode 免费层 /inference/v1 迁移、请求确定性序列化等上游修复）。**面板**：由合并后源码重建（非旧预构建），带 1.9.13 全部新面板能力（可观测性设置、数据库统计与清理等）。

@@ -217,6 +217,13 @@ if [ "$OFFLINE" = 1 ]; then
     if [ -f tools/check-dns-defaults.sh ]; then
       run "DNSSRC DNS 默认集单一来源与三处字面量缝合" sh tools/check-dns-defaults.sh
     fi
+    # DNSPOOL：优选候选池单一事实源（2026-10-22，ADR-0010 完整优选落地）——
+    # 候选池从 page-dns.js 硬编码收敛为 module/etc/dns-candidates；本闸门防 JS 全量清单
+    # 复活（shell 优选与面板芯片共享一份候选），并钉住 dnsfwd TSV score 列（评分公式
+    # 唯一实现在 C 侧，表头漂移会让 shell/JS 消费方全部静默失效）。
+    if [ -f tools/check-dns-candidates.sh ]; then
+      run "DNSPOOL 优选候选池单一来源与 score 列缝合" sh tools/check-dns-candidates.sh
+    fi
     # OPSUP：上游清单写入口（ops.sh write-upstreams / restore-upstreams）的行为自证（C4）。
     # WebUI 过去经 ksu.exec 直写 dns-upstreams.conf（绕过 ops.sh），"备份→原子写→热重载"
     # 的纪律整个在 JS 里；现在只 seam 一份实现，本门禁钉住它的失败语义：备份优先拒写、

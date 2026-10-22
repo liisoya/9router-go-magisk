@@ -44,29 +44,36 @@ function dnsVerdictToast(w, okMsg) {
   if (okMsg) toast(okMsg, 2400);
   return true;
 }
-// 候选池：旧版实测可达清单（国内明文 + 国内 DoH/DoT）。
-// 2026-09-30：改为按**三大类**（明文 / DoH / DoT）分组展示，标签只留最短的区分词 ——
-// 原来九个芯片平铺、每个还带一句括号备注，一屏读不出结构（用户反馈"很乱"）。
-// `v` 是唯一事实（写盘与优选都用它）；`cat`/`label` 只服务展示，
-// 完整地址不另存一份文案，由 v 现取进 title（存两份一定会漂）。
-const DNS_CANDIDATES = [
-  { cat: '明文', label: '腾讯',     v: 'nameserver 119.29.29.29' },
-  { cat: '明文', label: '阿里',     v: 'nameserver 223.6.6.6' },
-  { cat: '明文', label: '字节',     v: 'nameserver 180.184.1.1' },
-  { cat: '明文', label: '114',      v: 'nameserver 114.114.114.114' },
-  { cat: '明文', label: '百度',     v: 'nameserver 180.76.76.76' },
-  { cat: '明文', label: 'CNNIC',    v: 'nameserver 1.2.4.8' },
-  { cat: 'DoH',  label: '阿里',     v: 'doh https://223.5.5.5/dns-query' },
-  { cat: 'DoH',  label: '阿里域名', v: 'doh https://dns.alidns.com/dns-query' },
-  { cat: 'DoH',  label: '腾讯',     v: 'doh https://doh.pub/dns-query' },
-  { cat: 'DoH',  label: '腾讯IP',   v: 'doh https://120.53.53.53/dns-query' },
-  { cat: 'DoH',  label: '360',      v: 'doh https://doh.360.cn/dns-query' },
-  { cat: 'DoT',  label: '阿里',     v: 'dot 223.5.5.5' },
-  { cat: 'DoT',  label: '阿里域名', v: 'dot dns.alidns.com' },
-  { cat: 'DoT',  label: '腾讯',     v: 'dot dot.pub' },
-  { cat: 'DoT',  label: '腾讯IP',   v: 'dot 120.53.53.53' }
+// 候选池：单一事实源 = module/etc/dns-candidates（cat= label= 元数据 + 配置行）。
+// 2026-10-22（ADR-0010 完整优选落地）：此前清单硬编码在 JS —— 面板芯片是它唯一消费者，
+// 守护自动优选/手动优选（lifecycle/ops）想要候选池时没有第二份可共享，ADR-0010 因此挂账
+// “待候选池收敛为单一来源”。现在收敛：本文件运行时读文件，shell 侧直接读同一文件，
+// 加候选只改一处。读取失败回退**静态最小集**（= 明文两大条，够应急；不复制全量清单，
+// 全量漂移由 tools/check-dns-candidates.sh 门禁看着）。
+const DNS_CANDIDATES_FALLBACK = [
+  { cat: '明文', label: '腾讯', v: 'nameserver 119.29.29.29' },
+  { cat: '明文', label: '阿里', v: 'nameserver 223.6.6.6' }
 ];
-const DNS_CATS = ['明文', 'DoH', 'DoT'];
+const DNS_CANDIDATES_FILE = CFG.MODDIR + '/etc/dns-candidates';
+async function loadDnsCandidates() {
+  try {
+    const r = await KB.readFile(DNS_CANDIDATES_FILE);
+    if (!r.ok) return DNS_CANDIDATES_FALLBACK;
+    const out = [];
+    for (const raw of r.out.split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const catM = line.match(/(?:^|\s)cat=(\S+)/);
+      const labelM = line.match(/(?:^|\s)label=(\S+)/);
+      const v = KP.normUpstream(
+        line.replace(/cat=\S+/g, '').replace(/label=\S+/g, '').trim());
+      if (!v) continue;
+      out.push({ cat: catM ? catM[1] : '明文', label: labelM ? labelM[1] : v, v });
+    }
+    return out.length ? out : DNS_CANDIDATES_FALLBACK;
+  } catch { return DNS_CANDIDATES_FALLBACK; }
+}
+const DNS_CATS = ['明文', 'doh', 'dot'];
 const b64Text = KB.b64Decode; // upstreams_b64 解码（UTF-8 安全，实现收敛在 bridge）
 // ═══════════ DNS ═══════════
 async function loadCurrentUpstreams(st) {
@@ -86,6 +93,7 @@ async function loadUpstreamEditor(st) {
   const el = document.getElementById('upstreams');
   el.value = st && st.upstreams_b64 ? b64Text(st.upstreams_b64)
     : (await KB.readFile(UPSTREAMS)).out;
+  DNS_CANDIDATES = await loadDnsCandidates();   // 单一来源候选池（失败回退静态最小集）
   renderCandChips();
 }
 async function saveUpstreams() {
@@ -136,24 +144,25 @@ async function restoreInit() {
 // 由 test/page-flows.test.js 的「优选排序」用例钉住 —— 改成按清单顺序会红。
 async function optimize() {
   return withBusy($id('btn-opt'), '测速中…', async () => {
-  // 候选池 = 用户自定义项（textarea）∪ 内置候选清单 ∪ 当前配置项；
-  // 谁进池 ≠ 谁排前：排序只看实测评分（见上方契约①）
+  const tbl = document.getElementById('opt-table');
+  // 门禁①：没有任何可用上游 → 不得改写配置（planGate 阶段切片，2026-09-28 走查）
+  // 候选池 = 用户自定义项（textarea）∪ 单一来源候选文件 ∪ 当前配置项；
+  // 谁进池 ≠ 谁排前：排序只看 dnsfwd TSV 的 score 列（公式唯一实现在 dnsfwd.c probe_score）
   const custom = document.getElementById('upstreams').value.split('\n')
     .map(s => KP.normUpstream(s.trim())).filter(l => l && !l.startsWith('#'));
   const cur = (await KB.readFile(UPSTREAMS)).out.split('\n')
     .map(s => KP.normUpstream(s.trim())).filter(l => l && !l.startsWith('#'));
-  const cands = [...new Set([...custom, ...DNS_CANDIDATES.map(c => KP.normUpstream(c.v)), ...cur])];
+  const pool = await loadDnsCandidates();
+  const cands = [...new Set([...custom, ...pool.map(c => KP.normUpstream(c.v)), ...cur])];
   const cf = CFG.DATA_DIR + '/dns-candidates.tmp';
   if (!await KB.writeFile(cf, cands.join('\n') + '\n')) {
-    document.getElementById('opt-table').innerHTML = '<div class="hint">❌ 候选清单写入失败，未测速。</div>';
+    tbl.innerHTML = '<div class="hint">❌ 候选清单写入失败，未测速。</div>';
     return;
   }
-  const r = await withElapsed(document.getElementById('opt-table'), '测速中', () => KB.probeDns(cf, 60000));
+  const r = await withElapsed(tbl, '测速中', () => KB.probeDns(cf, 60000));
   await KB.remove(cf);
   const rows = KP.parseDnsProbeOutput(r.out);
-  const tbl = document.getElementById('opt-table');
-  // 门禁①：没有任何可用上游 → 不得改写配置（只求值本阶段门禁：planGate，
-  // 2026-09-28 走查证实 planSteps 整计划求值会在此假拦 —— 活体 bug）
+  // 门禁①：没有任何可用上游 → 不得改写配置（只求值本阶段门禁：planGate）
   const gRows = { ok: rows.length > 0, reason: '没有可用率 ≥50% 的上游' };
   if (!KP.planGate(KP.DNS_OPTIMIZE_PLAN, 'rows-gate', gRows).ok) {
     tbl.innerHTML = `<div class="hint">❌ ${gRows.reason}，保持原配置不动。</div>`;
@@ -163,21 +172,21 @@ async function optimize() {
   tbl.innerHTML = '<table><tr><th>#</th><th>上游</th><th>类型</th><th>可用率</th><th>RTT</th><th>评分</th></tr>' +
     top.map((x, i) => `<tr><td>${i + 1}</td><td>${esc(x.upstream)}</td><td>${KP.upType(x.upstream)}</td><td>${Math.round(x.okRate * 100)}%</td><td>${x.rtt.toFixed(0)}ms</td><td><b>${x.score.toFixed(1)}</b></td></tr>`).join('') + '</table>' +
     '<div class="hint">✅ 已自动应用：手写的自定义项（保留在最前）+ 上方 Top5（按本机实测评分降序）。不满意可「回滚上一版」或「恢复初始默认」。</div>';
-  // 自动应用：自定义项在前 + Top5，原子写入后热重载
-  const merged = [...new Set([...custom, ...top.map(x => KP.normUpstream(x.upstream))])].join('\n');
-  // 备份→原子写→热重载都在 seam（ops.sh write-upstreams；C4）：备份建不起来时 seam
-  // 拒绝改写——"先门禁后动作"的 backup-gate 从 JS 预检升级为 seam fail-closed，
-  // 纪律从此只有一份实现（lifecycle 的 life_upstreams_backup_*）。
-  const w = await DNS_STORE.write('# 优选自动生成（自定义项在前）' + new Date().toLocaleString() + '\n' + merged);
-  if (!w.ok) {
-    toast(w.verdict === 'write-failed-no-backup'
-      ? '⚠️ 备份失败（没有回滚点，不改写配置）'
-      : '❌ 配置写入失败，原配置未动（备份仍在）', 3600);
-    return;
-  }
+  // 自动应用：走 ops.sh optimize-dns（lifecycle.life_dns_reoptimize 唯一实现：
+  // 候选池评分 → Top5 → 自定义项在前 → seam 写盘 + 热重载；此处不再重复编排）。
+  // 上面已把候选与自定义项展示给用户；落盘内容可能与表格略有差异（reoptimize 会再次
+  // 实测候选池），这是刻意收编：评分/写盘纪律只有 shell 一份实现。
+  const v = await KB.optimizeDns();
+  if (v === 'reoptimized') { toast('✅ 优选已应用（评分 Top5 已生效）', 2400); }
+  else if (v === 'reoptimized-reload-failed') { toast('⚠️ 配置已写入，但热重载失败（详见 DNS 日志）', 4200); }
+  else if (v.startsWith('beaten-strike=')) { toast(`ℹ️ 候选池击败当前配置（第 ${v.split('=')[1]} 次确认），再测一轮将自动应用`, 4200); }
+  else if (v === 'not-beaten') { tbl.innerHTML += '<div class="hint">ℹ️ 候选池未能明显击败当前配置，未改写。</div>'; }
+  else if (v === 'none-viable' || v === 'no-candidates') { toast('❌ 候选池没有可用上游，未改写', 3600); }
+  else if (v === 'stale-config') { toast('ℹ️ 探测期间配置被修改过，本次优选让位', 3600); }
+  else if (v === 'write-failed') { toast('❌ 优选写盘失败，原配置未动', 3600); }
+  else { toast(`⚠️ 优选未生效（${v || '空输出'}）`, 4200); }
   loadCurrentUpstreams();
   loadUpstreamEditor();
-  dnsVerdictToast(w);
   });
 }
 async function rollback() {
@@ -188,6 +197,8 @@ async function rollback() {
   });
 }
 // （setBind/setBindUI/restartDns 已删除：index.html 无绑定范围按钮，死代码按 deletion test 清除）
+// 候选清单缓存：loadUpstreamEditor 时填充（异步读单一来源文件），芯片渲染只消费缓存。
+let DNS_CANDIDATES = DNS_CANDIDATES_FALLBACK;
 function renderCandChips() {
   const box = document.getElementById('cand-chips');
   const cur = document.getElementById('upstreams').value;

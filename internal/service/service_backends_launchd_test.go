@@ -1,6 +1,7 @@
 package service
 
 import (
+	"runtime"
 	"encoding/xml"
 	"errors"
 	"os"
@@ -209,11 +210,16 @@ func TestLaunchdPlistAcceptedByValidator(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if plutil, err := exec.LookPath("plutil"); err == nil {
-		if out, err := exec.Command(plutil, "-lint", path).CombinedOutput(); err != nil {
-			t.Fatalf("plutil -lint rejected the rendered plist: %v\n%s", err, out)
+	// plutil first on darwin only: Linux distros ship a GNUstep plutil whose
+	// -lint rejects plain XML plists ("non-NSData data argument") — a false red
+	// unrelated to what we render. xmllint validates the XML fine everywhere.
+	if runtime.GOOS == "darwin" {
+		if plutil, err := exec.LookPath("plutil"); err == nil {
+			if out, err := exec.Command(plutil, "-lint", path).CombinedOutput(); err != nil {
+				t.Fatalf("plutil -lint rejected the rendered plist: %v\n%s", err, out)
+			}
+			return
 		}
-		return
 	}
 	if xmllint, err := exec.LookPath("xmllint"); err == nil {
 		// --nonet keeps libxml2 from fetching the Apple DTD over the network.

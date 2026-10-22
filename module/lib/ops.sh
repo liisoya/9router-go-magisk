@@ -6,7 +6,7 @@
 #   生命周期 = lib/lifecycle.sh（进程启停、用户意图、状态文件、cgroup 脱组）。本文件只 source 它，
 #              **绝不自己读写任何 lifecycle 状态文件**（否则"状态无主"的老毛病会立刻回来）。
 # 输出约定：机器可读的 key=value 行（WebUI 解析）；部分子命令输出状态词。
-USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|write-upstreams|restore-upstreams <initial|prev>|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port|export-logs>"
+USAGE="ops.sh <status|panel|get <key> [key...]|prep-db|start-engine|stop-engine|stop-all|stop-user|start-user|restart-engine|reload-dns|write-upstreams|optimize-dns|restore-upstreams <initial|prev>|watchdog-start|hold [sec]|install-engine <file> [ver]|install-module <zip>|cleanup [--dry-run]|start-dns|stop-dns|enable-dns|port53-busy|seed-key [--force]|get-port|export-logs>"
 # 环境变量: DATA_DIR（默认 /data/adb/9router-go）、PORT（显式覆盖端口）
 
 # PATH 显式声明（架构审查 S2）：本脚本被 WebUI(ksu.exec)/管理器/Termux 多上下文执行，
@@ -643,6 +643,9 @@ case "${1:-}" in
   restart-engine)  life_restart_engine ;;
   reload-dns)      life_reload_dns ;;
   write-upstreams) cmd_write_upstreams ;;
+  # 手动完整优选：候选池(module/etc/dns-candidates)评分 Top5 → seam 写盘 + 热重载；
+  # 判据词与自愈/自动优选同族（reoptimized*），由 WebUI 层翻译成提示（page-dns.js）。
+  optimize-dns)     life_dns_reoptimize ;;
   restore-upstreams) shift; cmd_restore_upstreams "${1:-}" ;;
   watchdog-start)  life_wd_start ;;
   hold)            shift; life_wd_hold "${1:-180}"; echo "held" ;;

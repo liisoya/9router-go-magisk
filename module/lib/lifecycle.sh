@@ -742,6 +742,7 @@ LIFE_DNS_HEAL_MIN_FAILS=2     # 连续几次"全不可达"才动手（去抖：�
 LIFE_DNS_HEAL_COOLDOWN=600    # 自愈动作后多久内不再动作（防恢复风暴）
 LIFE_DNS_ROUND=4              # 每轮探测主机数（= dnsfwd MAXDOMAINS；首轮取代表=前 4 个）
 LIFE_DNS_MAX_HOSTS=12         # 真实主机总量上限（分轮探完；上限防呆）
+LIFE_DNS_CANDIDATES="$MODDIR/etc/dns-candidates"   # 候选池单一事实源（缺文件时各消费方退化）
 
 # 纯判定：URL → 主机名（去 scheme/path/userinfo/port，转小写，只接受域名形状）。
 life_dns_host_from_url() {
@@ -817,6 +818,8 @@ life_dns_probe_due() {
   case "$_pu_l" in ''|*[!0-9]*) _pu_l=0 ;; esac
   [ $((_pu_n - _pu_l)) -ge "$LIFE_DNS_PROBE_SEC" ]
 }
+# 纯判定：自动优选节流常数的外部读取口（守护不再 import 内部常数；离线可断言）。
+life_dns_opt_interval() { echo "$LIFE_DNS_OPT_INTERVAL"; }
 # 纯判定：该不该执行自愈动作（连续失败门槛 + 冷却）。$1=fails $2=now $3=last_act；该动返回 0。
 life_dns_heal_due() {
   _hd_f="${1:-}"; _hd_n="${2:-}"; _hd_a="${3:-}"
@@ -863,9 +866,162 @@ life_dns_select_reachable() {
   awk -F'\t' '$1=="upstream"||$1==""{next}
       { n=split($5,a,"/"); if(n!=2||a[1]!~/^[0-9]+$/) next; if(a[1]+0>0 && !seen[$1]++) print $1 }'
 }
+
+# ── 完整优选：候选池 + 评分 Top5（ADR-0010 挂账本体的落地）──────────
+# 候选池单一来源 = module/etc/dns-candidates（面板芯片、手动优选、自动优选三处都读它）。
+# 评分唯一公式实现在 dnsfwd.c probe_score（可用率×端到端握手×延迟），随 TSV 新增的
+# score 列输出 —— shell/JS 都只消费第 9(TSV 列) 列，不再各写一份公式（§2.1）。
+LIFE_DNS_OPT_INTERVAL=259200    # 自动优选节流（秒，= 3 天）：换网/CDN 漂移是天级事件，分钟级是浪费
+LIFE_DNS_OPT_MIN_GAIN=15        # 击败门槛（分）：候选最高分 - 当前集最高分 ≥ 15 分才算"被击败"（比较用毫分 = ×1000）
+LIFE_DNS_OPT_STRIKES=2          # 连续几个间隔轮都被击败才改写（2 轮 ≈ 6 天，双确认去抖）
+LIFE_DNS_OPT_STRIKES_FILE="$DATA_DIR/dns-opt-strikes"   # strike 计数落盘（跨守护重启存活）
+
+# I/O：候选池文件路径（单一来源；缺失时 echo 空并由调用方退化到默认集）。
+life_dns_candidates_file() {
+  [ -s "$MODDIR/etc/dns-candidates" ] && { echo "$MODDIR/etc/dns-candidates"; return 0; }
+  return 1
+}
+# 纯判定：候选池文件 → 配置行（剥 cat=/label= 元数据与注释；无环回；保序去重）。
+# 为什么独立成纯函数：文件格式只有这里该懂；L-测试离线断言它。
+life_dns_candidate_lines() {
+  awk '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      line=""; nc=0
+      for (i=1;i<=NF;i++) {
+        if ($i ~ /^cat=/ || $i ~ /^label=/) continue
+        line = (line=="") ? $i : line" "$i; nc++
+      }
+      if (nc>=2 && line ~ /^(nameserver|doh|dot)[[:space:]]/) {
+        if (line !~ /127\.0\.0\.1/ && line !~ /::1/) print line
+      }
+    }' "$1" | awk '!s[$0]++'
+}
+# 纯判定（优选"选谁/多优"的唯一规则，离线可断言）：
+#   dnsfwd -P --tsv（带 score 列）输出 → 每个上游的最高行分（按分降序）。
+#   判据链：score 列（TSV 末列，第 12 列）合法数字 → 行有效；每上游取最高行分；
+#   过滤可用率 <50%；fake-ip 行**显式剔除**（不是沉底）——写盘候选里不该有任何假 IP
+#   上游（答 198.18 假 IP，引擎拿到也连不通）。
+#   与 life_dns_select_reachable 的分工：那个只答"谁活着"（自愈可达性硬门槛），
+#   这个答"谁最好"（完整优选排序）—— 不合并：自愈要宽松（ok>0 即留），优选要严格。
+#   排序细节（真机/CI 都可能踩的坑）：分数整数化成毫分 + 偏移 +1000 分（范围恒为正），
+#   %012d 零宽补齐后 LC_ALL=C 字符串逆序 —— 负分浮点字符串在 locale 排序下会把 "-…"
+#   排到最前（'-' 在数字前），整数+正偏移+C locale 是唯一防弹形态；
+#   key = (score+1000)*1000，life_dns_reoptimize 的门槛比较同单位（分×1000）。
+life_dns_scored_pairs() {
+  awk -F'\t' '
+    $1=="upstream" || $1=="" { next }
+    $8 == "yes" { next }   # fake-ip 上游绝不进写盘候选
+    {
+      n=split($5,a,"/"); if(n!=2 || a[1]!~/^[0-9]+$/ || a[2]!~/^[0-9]+$/ || a[2]+0==0) next
+      okr = (a[1]+0) / (a[2]+0); if (okr < 0.5) next
+      sc=$12; if (sc !~ /^-?[0-9]+(\.[0-9]+)?$/) next; sc+=0
+      if (!(($1) in seenmax) || sc > seenmax[$1]) seenmax[$1]=sc
+    }
+    END { for (u in seenmax) printf "%012d\t%s\n", (seenmax[u]+1000)*1000, u }' \
+    | LC_ALL=C sort -k1,1r
+}
+life_dns_select_best() {
+  _n="${1:-5}"; case "$_n" in ''|*[!0-9]*) _n=5 ;; esac
+  life_dns_scored_pairs | awk -F'\t' -v N="$_n" '!seen[$2]++ { print; c++; if (c>=N) exit }' | cut -f2
+}
+# I/O：跑一次完整优选探测：候选文件 $1（缺省=内置默认集），真实主机 -d 与 --tsv。
+#   输出 TSV 原文（含表头）；候选不可用返回 1。
+life_dns_probe_candidates() {
+  _cf="${1:-}"; _pf=""
+  if [ -n "$_cf" ] && [ -s "$_cf" ]; then _pf="$_cf"; else
+    _pf="$DATA_DIR/dns-opt-defaults.tmp"
+    life_dns_default_lines > "$_pf" 2>/dev/null || return 1
+  fi
+  _po_d=""; _po_i=0
+  for _po_h in $(life_dns_probe_hosts 2>/dev/null); do
+    case "$_po_h" in ''|*[!a-z0-9.-]*) continue ;; esac
+    _po_d="$_po_d -d $_po_h"
+    _po_i=$((_po_i + 1)); [ "$_po_i" -ge "$LIFE_DNS_ROUND" ] && break
+  done
+  # shellcheck disable=SC2086  # 主机已过域形状校验
+  "$LIFE_DNSFWD" -f "$_pf" -P --tsv $_po_d 2>/dev/null
+}
+# 纯判定（离线可断言）：TSV 输出 → 当前配置里会被外部候选击败的最高分（无有效行 → 空）。
+life_dns_best_score_of() { life_dns_scored_pairs | head -n 1 | cut -f1; }
+# I/O：周期自动优选（守护维护块调用）。完整链路：
+#   候选池探测 → score 降序 Top5 → 当前集同轮探测最高分比较（击败门槛 + 连续 STRIKES 轮）
+#   → cksum 让位用户编辑 → 备份优先 → 原子写盘 → 热重载。
+#   stdout 判据词（watchdog 如实记账）：
+#     reoptimized / reoptimized-reload-failed / not-beaten / not-beaten-weak
+#     / stale-config / no-candidates / none-viable / no-dnsfwd / write-failed / skip-throttled
+life_dns_reoptimize() {
+  life_dns_running || { echo no-dnsfwd; return 0; }
+  [ -x "$LIFE_DNSFWD" ] || { echo no-dnsfwd; return 0; }
+  # cksum 快照必须先于一切探测（探测有秒级网络开销，正是用户编辑的高发窗口；
+  # 写盘前复核比对 —— 快照在探测后 = 窗口形同虚设）
+  _ro_sig="$(cksum < "$LIFE_UPSTREAMS" 2>/dev/null)"
+  _ro_cf="$(life_dns_candidates_file)" || _ro_cf=""
+  _ro_tsv="$(life_dns_probe_candidates "$_ro_cf")"
+  _ro_best="$(printf '%s\n' "$_ro_tsv" | life_dns_select_best 5)"
+  [ -n "$_ro_best" ] || { echo none-viable; return 0; }
+
+  # 击败门槛：当前配置同轮探测的最高分 vs 候选最高分（同一次网络快照，公平比较）
+  _ro_cur_tsv="$(life_dns_probe_output $(life_dns_probe_hosts 2>/dev/null | head -n $LIFE_DNS_ROUND) 2>/dev/null)"
+  _ro_cur_top="$(printf '%s\n' "$_ro_cur_tsv" | life_dns_best_score_of)"
+  _ro_chal_top="$(printf '%s\n' "$_ro_tsv" | life_dns_best_score_of)"
+  _ro_strike=0
+  [ -s "$LIFE_DNS_OPT_STRIKES_FILE" ] && case "$(cat "$LIFE_DNS_OPT_STRIKES_FILE" 2>/dev/null)" in
+    ''|*[!0-9]*) _ro_strike=0 ;; *) _ro_strike="$(cat "$LIFE_DNS_OPT_STRIKES_FILE" 2>/dev/null)" ;;
+  esac
+  if [ -n "$_ro_cur_top" ]; then
+    # scored_pairs 的 key = (score+1000)*1000 毫分；门槛同单位换算（MIN_GAIN 分 = ×1000）
+    _ro_gap="$(awk -v c="$_ro_cur_top" -v h="$_ro_chal_top" 'BEGIN{printf "%d", h-c}')"
+    if [ "$_ro_gap" -lt "$((LIFE_DNS_OPT_MIN_GAIN * 1000))" ]; then
+      # 未被击败：strike 清零（质量追平就不该再动用户的配置）
+      echo 0 > "$LIFE_DNS_OPT_STRIKES_FILE" 2>/dev/null
+      echo not-beaten; return 0
+    fi
+    # 被击败：先让位（用户在探测期间编辑过 → 本轮探测基于旧配置，strike 不该记）。
+    # 让位检查必须在任何状态变更（含 strike 计数）之前 —— O5h 的教训。
+    [ "$(cksum < "$LIFE_UPSTREAMS" 2>/dev/null)" = "$_ro_sig" ] \
+      || { echo stale-config; return 0; }
+    # 累计 strike，不足 STRIKES 个间隔轮只记不写（双确认，单次网络抖动不改写）
+    _ro_strike=$((_ro_strike + 1))
+    if [ "$_ro_strike" -lt "$LIFE_DNS_OPT_STRIKES" ]; then
+      echo "$_ro_strike" > "$LIFE_DNS_OPT_STRIKES_FILE" 2>/dev/null
+      echo "beaten-strike=$_ro_strike"; return 0
+    fi
+  else
+    # cur_top 为空 = 当前配置没有一条 ≥50% 可用的有效探测行 → 无需双确认直接改写，
+    # 但同样要让位用户编辑（sig 在探测前快照）
+    [ "$(cksum < "$LIFE_UPSTREAMS" 2>/dev/null)" = "$_ro_sig" ] \
+      || { echo stale-config; return 0; }
+  fi
+  echo 0 > "$LIFE_DNS_OPT_STRIKES_FILE" 2>/dev/null
+
+  # 用户自定义项保留在前（明示意图不被淘汰）+ Top5
+  _ro_custom="$(grep -Ev '^[[:space:]]*(#|$)' "$LIFE_UPSTREAMS" 2>/dev/null \
+    | grep -Ev '(127\.0\.0\.1|::1)' \
+    | awk 'NF>=2 && ($1=="nameserver"||$1=="doh"||$1=="dot")' | awk '!s[$0]++')"
+  _ro_new="$(printf '%s\n%s\n' "$_ro_custom" "$_ro_best" | awk '!s[$0]++')"
+  [ -n "$_ro_new" ] || { echo no-candidates; return 0; }
+
+  # （stale 让位检查已前移到 strike 计数之前；此处到 mv 只剩微秒级窗口，.prev 回滚点兜底）
+  life_upstreams_backup_prev || { echo write-failed; return 0; }
+  life_upstreams_backup_initial || { echo write-failed; return 0; }
+  _ro_tmp="$DATA_DIR/dns-reopt.new.tmp"
+  {
+    printf '# DNS 周期自动优选（ADR-0010 完整优选）%s：候选池评分 Top5（自定义项保留在前）\n' "$(date '+%F %T')"
+    printf '%s\n' "$_ro_new"
+  } > "$_ro_tmp" 2>/dev/null || { rm -f "$_ro_tmp" 2>/dev/null; echo write-failed; return 0; }
+  mv "$_ro_tmp" "$LIFE_UPSTREAMS" 2>/dev/null || { rm -f "$_ro_tmp" 2>/dev/null; echo write-failed; return 0; }
+  if [ "$(life_reload_dns 2>/dev/null)" = "reloaded" ]; then
+    echo reoptimized
+  else
+    echo reoptimized-reload-failed
+  fi
+  return 0
+}
 # I/O：恢复动作（ADR-0010 决策 3）。连续全败后：备份优先 + 可达性硬门槛 + 原子写盘 + 热重载。
-#   选择规则**只做可达性**（保留 ok>0 的上游），不复制面板 page-dns.js 的 RTT/可用率评分优选
-#   （§2.1 单一所有者：紧急恢复 ≠ 手动优选）。完整"优选"待把候选池收敛为单一来源后的后续阶段。
+#   选择规则**只做可达性**（保留 ok>0 的上游）—— 紧急恢复 ≠ 完整优选：评分 Top5 的
+#   周期优选在 life_dns_reoptimize（候选池 = module/etc/dns-candidates 单一来源），
+#   两者判据严格度不同（这里 ok>0 即留，那边 ≥50% 可用率 + 评分门槛），不合并。
 #   候选 = 当前配置项（用户明示意图优先）∪ 内置默认集（module/etc/dns-defaults，
 #   C3 单一来源，life_prep 落盘的正是它；不含境外公共解析器，见 L23）。
 #   判据（stdout 一词，watchdog 如实记账 —— ADR-0010 决策 5"不谎报成功"；C5 前这里

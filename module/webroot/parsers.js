@@ -189,7 +189,9 @@
   //   223.5.5.5                v4  www.baidu.com   28ms  2/2  答案...
   //   doh https://x/dns-query  doh www.baidu.com  455ms  2/2  答案...
   // 从行尾锚定解析，rtt 带 ms 后缀。
-  const PROBE_RE = /^(.+?)\s+(v4|v6|doh|dot)\s+(\S+)\s+([\d.]+)ms\s+(\d+)\/(\d+)\s*(.*)$/;
+  // 2026-10-22：兼容 TSV（probeDns 现固定 --tsv；rtt 列无 ms 后缀，列数 7/12 两种形态）
+  // 与旧人类可读行（外部工具/旧桩）：rtt 的 ms 后缀可选。
+  const PROBE_RE = /^(.+?)\s+(v4|v6|doh|dot)\s+(\S+)\s+([\d.]+)(?:ms)?\s+(\d+)\/(\d+)(?:\s+(.*))?$/;
   function parseDnsProbeLine(line) {
     const m = stripCr(line).trim().match(PROBE_RE);
     if (!m) return null;
@@ -205,10 +207,11 @@
     };
   }
   // 行数组 → 合格候选（可用率 ≥50%），按评分降序。
-  // 评分 = 可用率×100 − RTT/50 − fake-ip 罚 100（与 index.html 的承诺一致）。
-  // fake-ip 判据来自 dnsfwd -P 人类可读输出行尾的 `← fake-ip(TUN 接管)`（tools/dnsfwd.c:1368，
-  // 答案落在 198.18.0.0/15 = mihomo 默认 fake-ip 段时追加）：走 TUN 假 IP 的上游虽然 ping 得通，
-  // 但给不了真实解析，必须重罚，否则优选会把假 IP 的上游排到前面。
+  // 2026-10-22（ADR-0010 完整优选落地）：评分改为**消费 dnsfwd TSV 末列 score**——
+  // 公式唯一实现在 dnsfwd.c probe_score（可用率×端到端握手×延迟，fake-ip 罚 100 在 C 侧）。
+  // JS 不再有自己的公式（§2.1）：旧公式只有 DNS 可达率一个网络维度，治不了“答得出但对
+  // 供应商连不通”（TLS 失败主因）；TSV score 直接对齐真机痛点。
+  // 兼容：无 score 列的旧输出（外部工具/旧桩）退回旧公式排序，不让解析层炸掉。
   const FAKEIP_RE = /fake-ip/;
   function parseDnsProbeOutput(text) {
     const rows = [];
@@ -216,9 +219,12 @@
       const p = parseDnsProbeLine(line);
       if (!p || p.okRate < 0.5) continue;
       const fakeip = FAKEIP_RE.test(p.answers);
+      const cols = stripCr(line).trim().split('\t');
+      const tsvScore = cols.length >= 12 ? parseFloat(cols[11]) : NaN;
       rows.push({
         upstream: p.upstream, rtt: p.rtt, okRate: p.okRate, fakeip,
-        score: p.okRate * 100 - p.rtt / 50 - (fakeip ? 100 : 0)
+        score: Number.isFinite(tsvScore) ? tsvScore
+             : p.okRate * 100 - p.rtt / 50 - (fakeip ? 100 : 0)
       });
     }
     rows.sort((a, b) => b.score - a.score);

@@ -19,6 +19,12 @@ const assert = require('node:assert');
 const { createHarness } = require('./lib/app-harness.js');
 
 const SHA = 'a'.repeat(64);
+// 候选池文件内容（单一来源 module/etc/dns-candidates；芯片与优选都读它）
+const CAND_FILE = [
+  '# 9router-go · DNS 优选候选池（单一事实源）',
+  'cat=明文 label=腾讯     nameserver 119.29.29.29',
+  'cat=明文 label=阿里     nameserver 223.6.6.6'
+].join('\n');
 const PANEL_LINE = [
   'port=20130 bind=loopback module_version=v1.9.3-r1 versioncode=109030',
   'engine_version=1.9.4 engine_ver_src=runtime engine_ver_healed=0',
@@ -52,9 +58,11 @@ const h = createHarness({ execHandler: cmd => {
     return [0, 1, 2].map(i => `${i}\thttps://node-${i}/\t200 0.${100 + i}`).join('\n');
   }
   if (cmd.includes('version.json')) return '{"latestVersion":"1.9.4"}';
+  if (cmd.includes('etc/dns-candidates')) return CAND_FILE;          // 候选池单一来源
   if (cmd.includes('__READ_OK__')) return '__READ_OK__';            // readFile（内容可为空）
   // ── optimize ──
   if (mode === 'optimize' && cmd.includes('bin/dnsfwd')) return PROBE_OUT;
+  if (mode === 'optimize' && cmd.includes('optimize-dns')) return 'reoptimized';
   // ── engUpdate ──
   if (mode === 'engUpdate') {
     if (cmd.includes('curl -fsSL')) return 'dl-ok';                                   // 下载
@@ -67,27 +75,29 @@ const h = createHarness({ execHandler: cmd => {
   return '';
 }});
 
-test('DNS 优选全链可达：探测 → Top5 → 写配置（备份+热重载在 seam；bug A 回归）', async () => {
+test('DNS 优选全链可达：探测 → 评分表 → optimize-dns seam（bug A 回归，2026-10-22 收编后）', async () => {
   mode = 'optimize'; captured = [];
   const els = h.loadApp();
   await els.get('btn-opt').onclick();
 
   const tbl = els.get('opt-table').innerHTML;
   assert.ok(tbl.includes('<table>'), '探测结果表没有渲染（rows-gate 假拦？）');
-  // C4：最终配置写入 = 经 seam 下发 ops.sh write-upstreams（备份→原子写→热重载都在里面）
-  const finalWrite = captured.find(c => c.includes('write-upstreams'));
-  assert.ok(finalWrite, '最终配置写入不可达 —— 优选在门禁处被假拦（bug A）');
-  // 内容随命令走（base64 过 stdin）：Top5 必须真的进了 seam 命令
-  const m = finalWrite.match(/printf '%s' '([A-Za-z0-9+/=]+)'/);
-  const body = m ? Buffer.from(m[1], 'base64').toString('utf8') : '';
-  assert.ok(body.includes('119.29.29.29'), `写入内容里缺上游：${body}`);
-  // 备份与热重载的执行点已搬进 seam：页面不再自发 '.prev'/'reload-dns' 命令 ——
-  // 纪律只有一份实现（lifecycle 的 life_upstreams_backup_* + ops.sh write-upstreams），
-  // 其次序（先删 .prev 再备、备份失败拒写、写后必 reload）由 tools/test-ops-upstreams.sh 钉住。
+  // C4 + 2026-10-22 完整优选收编：最终配置写入 = ops.sh optimize-dns（候选池评分 →
+  // Top5 → 自定义项在前 → seam 写盘，全在 lifecycle.life_dns_reoptimize 一份实现里）；
+  // 页面只发一次动作命令 + 翻译判据词，不再自己编排 write-upstreams。
+  const optCmd = captured.find(c => c.includes('optimize-dns'));
+  assert.ok(optCmd, 'optimize-dns 不可达 —— 优选在门禁处被假拦（bug A）');
+  // 探测（候选清单临时文件 + dnsfwd -P）仍然发生：评分表要展示给用户
+  assert.ok(captured.some(c => c.includes('dns-candidates.tmp') && c.includes('base64 -d')),
+    '候选清单临时文件没写（评分表会空）');
+  assert.ok(captured.some(c => c.includes('bin/dnsfwd') && c.includes('-P')),
+    'dnsfwd 探测没跑');
+  // 备份与热重载的执行点在 shell 侧（write-upstreams seam / reoptimize 内）：页面不再自发
+  // '.prev'/'reload-dns' 命令 —— 纪律只有一份实现。
   assert.ok(!captured.some(c => c.includes('.prev') && c.includes('cp ')),
     '页面又在自发备份（备份纪律应只在 seam，两份实现必然漂）');
   assert.ok(!captured.some(c => /ops\.sh' 'reload-dns'/.test(c)),
-    '页面又在自发热重载（reload 是 seam 写流程的一步，成败由 verdict 带回）');
+    '页面又在自发热重载（reload 是写流程的一步，成败由 verdict 带回）');
 });
 
 test('引擎更新全链可达：门禁 → 校验和 → install-engine（bug B 回归）', async () => {

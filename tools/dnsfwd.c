@@ -1,32 +1,32 @@
-/* dnsfwd.c —— 本地 DNS 转发器 + 上游优选引擎（9Router 模块用）
+/* dnsfwd.c -- 本地 DNS 转发器 + 上游优选引擎(9Router 模块用)
  *
- * 背景：Android 没有 /etc/resolv.conf，Go 的解析器读不到服务器列表时会退回到
- *       localhost:53（127.0.0.1 / ::1）。本程序监听回环 53，把查询转发到上游 DNS。
+ * 背景:Android 没有 /etc/resolv.conf,Go 的解析器读不到服务器列表时会退回到
+ *       localhost:53(127.0.0.1 / ::1)。本程序监听回环 53,把查询转发到上游 DNS。
  *       ⇒ 不需要 /etc/resolv.conf、不需要改 hosts、不需要重启。
  *
- * 上游文件（默认 /data/adb/9router-go/dns-upstreams.conf，由模块 lifecycle.sh 生成；
- * 其内置默认集的唯一来源是 module/etc/dns-defaults）：
- *       # 注释；每行一条
+ * 上游文件(默认 /data/adb/9router-go/dns-upstreams.conf,由模块 lifecycle.sh 生成;
+ * 其内置默认集的唯一来源是 module/etc/dns-defaults):
+ *       # 注释;每行一条
  *       nameserver 223.5.5.5            ← IPv4
  *       nameserver 2400:3200::1         ← IPv6
- *       （识别不了的其它行会被跳过并在 -v 下提示，便于将来扩展 doh/dot）
- *       ⚠️ 文件里**不要**出现 127.0.0.1（会自我循环）
+ *       (识别不了的其它行会被跳过并在 -v 下提示,便于将来扩展 doh/dot)
+ *       ⚠️ 文件里**不要**出现 127.0.0.1(会自我循环)
  *
- * 用法：
- *   dnsfwd                          # 前台运行（由 service.sh / 9rctl 后台拉起）
+ * 用法:
+ *   dnsfwd                          # 前台运行(由 service.sh / 9rctl 后台拉起)
  *   dnsfwd -f <上游文件>            # 指定上游文件
- *   dnsfwd -t <域名>                # 自检：走本程序监听端口解析一次
- *   dnsfwd -b loopback|any          # 绑定范围（默认 loopback，安全）
- *   dnsfwd -i <网卡>                # 上游 socket 绑到指定网卡（SO_BINDTODEVICE）
- *                                   #   ⇒ 绕过 TUN：拿到真实 IP（注意：TUN 的域名规则可能因此不命中）
- *   dnsfwd -P -d <域名> [-d 域名]…  # 【探测】并发测全部上游：延迟/成功率/答案/是否 fake-ip（TSV）
- *   dnsfwd -p <端口>                # 换端口（调试用）
+ *   dnsfwd -t <域名>                # 自检:走本程序监听端口解析一次
+ *   dnsfwd -b loopback|any          # 绑定范围(默认 loopback,安全)
+ *   dnsfwd -i <网卡>                # 上游 socket 绑到指定网卡(SO_BINDTODEVICE)
+ *                                   #   ⇒ 绕过 TUN:拿到真实 IP(注意:TUN 的域名规则可能因此不命中)
+ *   dnsfwd -P -d <域名> [-d 域名]...  # 【探测】并发测全部上游:延迟/成功率/答案/是否 fake-ip(TSV)
+ *   dnsfwd -p <端口>                # 换端口(调试用)
  *   dnsfwd -h                       # 帮助
  *
- * 热重载：收到 SIGHUP 立即重读上游文件；也会每 30 秒检查文件 mtime 自动重载。
- *         ⇒ 9rctl 改完上游后让优选结果生效，无需重启进程、不中断解析。
+ * 热重载:收到 SIGHUP 立即重读上游文件;也会每 30 秒检查文件 mtime 自动重载。
+ *         ⇒ 9rctl 改完上游后让优选结果生效,无需重启进程、不中断解析。
  *
- * 编译：见同目录 build-dnsfwd.sh（静态链接，零运行库依赖）
+ * 编译:见同目录 build-dnsfwd.sh(静态链接,零运行库依赖)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,13 +43,13 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* ---- DoH / DoT（可选编译：-DWITH_DOH，静态链接 mbedTLS） ----
- * 上游文件里支持三种写法：
- *   nameserver 223.5.5.5                      明文 UDP（v4/v6）
- *   doh https://223.5.5.5/dns-query           加密 DoH（RFC 8484，POST wireformat）
- *   doh https://doh.pub/dns-query@1.12.12.12   末尾 @IP 是"自举提示"（免去先解析 DoH 域名）
- *   dot dns.alidns.com@223.5.5.5              加密 DoT（RFC 7858，853 端口）
- * 说明：@ 后是提示 IP；没有提示时用列表里第一个 UDP 上游解析该域名（并有内置兜底）。
+/* ---- DoH / DoT(可选编译:-DWITH_DOH,静态链接 mbedTLS) ----
+ * 上游文件里支持三种写法:
+ *   nameserver 223.5.5.5                      明文 UDP(v4/v6)
+ *   doh https://223.5.5.5/dns-query           加密 DoH(RFC 8484,POST wireformat)
+ *   doh https://doh.pub/dns-query@1.12.12.12   末尾 @IP 是"自举提示"(免去先解析 DoH 域名)
+ *   dot dns.alidns.com@223.5.5.5              加密 DoT(RFC 7858,853 端口)
+ * 说明:@ 后是提示 IP;没有提示时用列表里第一个 UDP 上游解析该域名(并有内置兜底)。
  */
 #define UP_UDP 0
 #define UP_DOH 1
@@ -64,40 +64,43 @@
 #endif
 
 /* 上游数量上限。
-   注意：内置候选池有 40+ 条（含 DoH/DoT 与 IPv6），原来写 32 会导致
-   **第 33 条之后被静默丢弃**——表现为"DoH/DoT/IPv6 永远不被探测、也永远选不上"。
-   故放宽到 128，并在截断时打印警告（不要再静默丢）。 */
+   注意:内置候选池有 40+ 条(含 DoH/DoT 与 IPv6),原来写 32 会导致
+   **第 33 条之后被静默丢弃**--表现为"DoH/DoT/IPv6 永远不被探测、也永远选不上"。
+   故放宽到 128,并在截断时打印警告(不要再静默丢)。 */
 #define MAXUP      128
 #define BUFSZ      4096
 #define TIMEOUT_MS 3000
-#define PROBE_TIMEOUT_MS     1500   /* 明文 UDP：1.5s 足够（只用于探测，不影响转发） */
-/* DoH/DoT：TLS 握手 + 查询，并发下会明显变慢（实测 dot.pub 单条已 1048ms，
-   4 并发即超 1.5s 被误判为不可用）⇒ 单独放宽，避免"加密上游永远测不出来"。 */
+#define PROBE_TIMEOUT_MS     1500   /* 明文 UDP:1.5s 足够(只用于探测,不影响转发) */
+/* DoH/DoT:TLS 握手 + 查询,并发下会明显变慢(实测 dot.pub 单条已 1048ms,
+   4 并发即超 1.5s 被误判为不可用)⇒ 单独放宽,避免"加密上游永远测不出来"。 */
 #define PROBE_TIMEOUT_MS_TLS 5000
-/* 端到端 TCP 握手（探你 API 主机是否可达）：慢一些的主机也要算"通" */
+/* 端到端 TCP 握手(探你 API 主机是否可达):慢一些的主机也要算"通" */
 #define PROBE_TCP_TIMEOUT_MS 4000
+/* 转发态健康权重:端到端锚点握手失败计几次,抵消一次成功查询
+   (把"DNS 能答但对你的供应商连不通"的上游沉底--TLS/连接失败的主治部) */
+#define TCPFAIL_WEIGHT 3
 #define MAXDOMAINS 4
 #define RELOAD_CHECK_SEC 5
 
-/* ---------------- 上游表（可热重载） ---------------- */
+/* ---------------- 上游表(可热重载) ---------------- */
 
 struct upstream {
     int type;                       /* UP_UDP / UP_DOH / UP_DOT */
-    struct sockaddr_storage sa;     /* UDP：DNS 服务器；DoH/DoT：目标地址（可由提示或自举解析得到） */
+    struct sockaddr_storage sa;     /* UDP:DNS 服务器;DoH/DoT:目标地址(可由提示或自举解析得到) */
     socklen_t len;
     int family;
-    char text[256];                 /* 展示用：IP 或 https://…（同时作为连接池键，留足空间）*/
-    char host[128];                 /* DoH/DoT 主机名（用于 SNI 与证书校验） */
+    char text[256];                 /* 展示用:IP 或 https://...(同时作为连接池键,留足空间)*/
+    char host[128];                 /* DoH/DoT 主机名(用于 SNI 与证书校验) */
     int  port;                      /* 443 / 853 */
-    char path[64];                  /* DoH 路径，默认 /dns-query */
-    char hint[64];                  /* @ 后的自举提示 IP（可空） */
+    char path[64];                  /* DoH 路径,默认 /dns-query */
+    char hint[64];                  /* @ 后的自举提示 IP(可空) */
 };
 static struct upstream up[MAXUP];
 static int nup = 0;
 static pthread_mutex_t up_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static const char *g_conf = "/data/adb/9router-go/dns-upstreams.conf";
-static const char *g_iface = NULL;      /* -i：上游 socket 绑定的网卡（绕 TUN） */
+static const char *g_iface = NULL;      /* -i:上游 socket 绑定的网卡(绕 TUN) */
 static int g_verbose = 0;
 static volatile sig_atomic_t g_reload = 0;
 static volatile sig_atomic_t g_stop = 0;
@@ -113,7 +116,7 @@ static int parse_upstream(const char *ip, struct upstream *u)
 {
     memset(u, 0, sizeof *u);
     u->family = strchr(ip, ':') ? AF_INET6 : AF_INET;
-    /* 明确拒绝回环：否则会自己转发给自己，形成死循环 */
+    /* 明确拒绝回环:否则会自己转发给自己,形成死循环 */
     if (u->family == AF_INET) {
         struct in_addr a;
         if (inet_pton(AF_INET, ip, &a) != 1) return 0;
@@ -133,7 +136,7 @@ static int parse_upstream(const char *ip, struct upstream *u)
     return 1;
 }
 
-/* 解析 doh 行：  doh https://host[:port]/path[@提示IP] */
+/* 解析 doh 行:  doh https://host[:port]/path[@提示IP] */
 static int parse_doh(char *s, struct upstream *u)
 {
     if (!s || !*s) return 0;
@@ -156,7 +159,7 @@ static int parse_doh(char *s, struct upstream *u)
     return 1;
 }
 
-/* 解析 dot 行：  dot host[:port][@提示IP] */
+/* 解析 dot 行:  dot host[:port][@提示IP] */
 static int parse_dot(char *s, struct upstream *u)
 {
     if (!s || !*s) return 0;
@@ -174,7 +177,7 @@ static int parse_dot(char *s, struct upstream *u)
     return 1;
 }
 
-/* 读文件到 tmp_up[]；返回 0 表示文件打不开（保留旧表） */
+/* 读文件到 tmp_up[];返回 0 表示文件打不开(保留旧表) */
 static int load_file(const char *path)
 {
     FILE *f = fopen(path, "r");
@@ -201,13 +204,13 @@ static int load_file(const char *path)
 #ifdef WITH_DOH
             ok = parse_doh(w2, &tmp_up[tmp_nup]);
 #else
-            if (g_verbose) fprintf(stderr, "dnsfwd: 本二进制未编译 DoH 支持，跳过 %s\n", w2);
+            if (g_verbose) fprintf(stderr, "dnsfwd: 本二进制未编译 DoH 支持,跳过 %s\n", w2);
 #endif
         } else if (strcmp(w1, "dot") == 0) {
 #ifdef WITH_DOH
             ok = parse_dot(w2, &tmp_up[tmp_nup]);
 #else
-            if (g_verbose) fprintf(stderr, "dnsfwd: 本二进制未编译 DoT 支持，跳过 %s\n", w2);
+            if (g_verbose) fprintf(stderr, "dnsfwd: 本二进制未编译 DoT 支持,跳过 %s\n", w2);
 #endif
         } else {
             const char *ip = w1;
@@ -219,12 +222,12 @@ static int load_file(const char *path)
             }
             int r = (*ip) ? parse_upstream(ip, &tmp_up[tmp_nup]) : 0;
             if (r == 1) ok = 1;
-            else if (r == -1) fprintf(stderr, "dnsfwd: 忽略回环上游 %s（会造成自我循环）\n", ip);
+            else if (r == -1) fprintf(stderr, "dnsfwd: 忽略回环上游 %s(会造成自我循环)\n", ip);
         }
         if (ok) {
             tmp_nup++;
             if (tmp_nup >= MAXUP) {
-                fprintf(stderr, "dnsfwd: 上游数量超过上限 %d，后面的条目被忽略（请检查上游文件）\n", MAXUP);
+                fprintf(stderr, "dnsfwd: 上游数量超过上限 %d,后面的条目被忽略(请检查上游文件)\n", MAXUP);
                 break;
             }
         } else if (w1[0]) {
@@ -232,11 +235,11 @@ static int load_file(const char *path)
         }
     }
     fclose(f);
-    if (skipped && g_verbose) fprintf(stderr, "dnsfwd: %s 中有 %d 行未能识别（已跳过）\n", path, skipped);
+    if (skipped && g_verbose) fprintf(stderr, "dnsfwd: %s 中有 %d 行未能识别(已跳过)\n", path, skipped);
     return 1;
 }
 
-/* 重载：读文件 → 原子替换（拿锁） */
+/* 重载:读文件 → 原子替换(拿锁) */
 static int reload_upstreams(void)
 {
     if (!load_file(g_conf)) return 0;
@@ -247,7 +250,7 @@ static int reload_upstreams(void)
     return 1;
 }
 
-/* 上游快照：转发/探测时拷出，避免长时间持锁 */
+/* 上游快照:转发/探测时拷出,避免长时间持锁 */
 static int snapshot(struct upstream *dst)
 {
     int n;
@@ -263,7 +266,7 @@ static int snapshot(struct upstream *dst)
 static int build_query(const char *name, int qtype, unsigned char *q)
 {
     int len = 0;
-    q[len++] = 0x12; q[len++] = 0x34;              /* 固定 ID：单查询单连接，够用 */
+    q[len++] = 0x12; q[len++] = 0x34;              /* 固定 ID:单查询单连接,够用 */
     q[len++] = 0x01; q[len++] = 0x00;              /* RD */
     q[len++] = 0x00; q[len++] = 0x01;              /* QDCOUNT */
     for (int i = 0; i < 6; i++) q[len++] = 0;
@@ -286,14 +289,14 @@ static int build_query(const char *name, int qtype, unsigned char *q)
 static int is_fake_ip4(unsigned int be_addr)
 {
     unsigned int a = ntohl(be_addr);
-    return (a & 0xfffe0000u) == 0xc6120000u;       /* 198.18.0.0/15：mihomo 默认 fake-ip 段 */
+    return (a & 0xfffe0000u) == 0xc6120000u;       /* 198.18.0.0/15:mihomo 默认 fake-ip 段 */
 }
 static int is_fake_ip6(const unsigned char *p)
 {
     return (p[0] & 0xfe) == 0xfc && (p[1] & 0xc0) == 0x00;   /* fc00::/18 近似判断 */
 }
 
-/* 解析应答，把 A/AAAA 追加到 out；返回记录数，*fake 置位表示命中 fake-ip 段 */
+/* 解析应答,把 A/AAAA 追加到 out;返回记录数,*fake 置位表示命中 fake-ip 段 */
 static int parse_answers(const unsigned char *r, int n, char *out, size_t outsz, int *fake)
 {
     int cnt = 0;
@@ -341,13 +344,13 @@ qdone:
     return cnt;
 }
 
-/* 一次 UDP 查询；成功返回应答长度，失败返回 -1；rtt 写入 *rtt_ms */
+/* 一次 UDP 查询;成功返回应答长度,失败返回 -1;rtt 写入 *rtt_ms */
 static int query_once(const struct upstream *u, const unsigned char *q, int qlen,
                       unsigned char *resp, int respsz, long *rtt_ms, int timeout_ms)
 {
     int s = socket(u->family, SOCK_DGRAM, 0);
     if (s < 0) return -1;
-    /* -i：把查询直接绑到物理网卡（绕过 TUN 的 fake-ip，拿真实 IP） */
+    /* -i:把查询直接绑到物理网卡(绕过 TUN 的 fake-ip,拿真实 IP) */
     if (g_iface) setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, g_iface, strlen(g_iface));
     if (connect(s, (const struct sockaddr *)&u->sa, u->len) != 0) { close(s); return -1; }
     if (send(s, q, qlen, 0) != qlen) { close(s); return -1; }
@@ -365,7 +368,7 @@ static int query_once(const struct upstream *u, const unsigned char *q, int qlen
     return n;
 }
 
-/* ---------------- DoH / DoT（加密上游；可选编译 WITH_DOH） ---------------- */
+/* ---------------- DoH / DoT(加密上游;可选编译 WITH_DOH) ---------------- */
 #ifdef WITH_DOH
 static mbedtls_x509_crt g_ca;
 static mbedtls_entropy_context g_ent;
@@ -376,9 +379,9 @@ static int g_ncadir = 0;
 static pthread_mutex_t g_tlsmu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_dcmu = PTHREAD_MUTEX_INITIALIZER;
 
-/* 加载 CA：路径既可能是目录（系统 cacerts），也可能是单个 PEM 文件（模块打包的 doh-ca.pem）
- * ⚠️ 注意返回值语义：mbedTLS 3.x 的 mbedtls_x509_crt_parse* 返回的是**解析失败的张数**
- *    （0 表示全部成功），不是"加载了多少张"。所以这里以"证书链是否非空"为准。 */
+/* 加载 CA:路径既可能是目录(系统 cacerts),也可能是单个 PEM 文件(模块打包的 doh-ca.pem)
+ * ⚠️ 注意返回值语义:mbedTLS 3.x 的 mbedtls_x509_crt_parse* 返回的是**解析失败的张数**
+ *    (0 表示全部成功),不是"加载了多少张"。所以这里以"证书链是否非空"为准。 */
 static int ca_load(const char *path)
 {
     struct stat st;
@@ -388,11 +391,11 @@ static int ca_load(const char *path)
     if (S_ISDIR(st.st_mode)) r = mbedtls_x509_crt_parse_path(&g_ca, path);
     else if (S_ISREG(st.st_mode)) r = mbedtls_x509_crt_parse_file(&g_ca, path);
     else return 0;
-    if (r < 0) return r;                       /* 真正的错误（打不开/格式非法） */
+    if (r < 0) return r;                       /* 真正的错误(打不开/格式非法) */
     return (g_ca.version != 0 || had) ? 1 : 0; /* 只要链里有证书就算成功 */
 }
 
-/* 统计已加载的根证书张数（沿着链数） */
+/* 统计已加载的根证书张数(沿着链数) */
 static int ca_count_certs(void)
 {
     int n = 0;
@@ -412,13 +415,13 @@ static void tls_init_once(void)
         const char *pers = "dnsfwd-tls";
         if (mbedtls_ctr_drbg_seed(&g_drbg, mbedtls_entropy_func, &g_ent,
                                   (const unsigned char *)pers, strlen(pers)) == 0) {
-            /* 优先用命令行动态指定的目录（模块的 pick_ca_dir 会传进来），
-             * 否则依次尝试 Android 的常见位置（含 Android 14+ 的 apex）；
-             * 也支持直接给一个 PEM 文件（模块会打包一份 doh-ca.pem，跨设备更可靠） */
+            /* 优先用命令行动态指定的目录(模块的 pick_ca_dir 会传进来),
+             * 否则依次尝试 Android 的常见位置(含 Android 14+ 的 apex);
+             * 也支持直接给一个 PEM 文件(模块会打包一份 doh-ca.pem,跨设备更可靠) */
             int loaded_any = 0;
             for (int i = 0; i < g_ncadir; i++) {
                 int rc = ca_load(g_cadir[i]);
-                if (rc < 0) fprintf(stderr, "dnsfwd: 加载 CA %s 失败（错误码 %d）\n", g_cadir[i], rc);
+                if (rc < 0) fprintf(stderr, "dnsfwd: 加载 CA %s 失败(错误码 %d)\n", g_cadir[i], rc);
                 else if (rc > 0) loaded_any = 1;
             }
             if (!loaded_any) {
@@ -432,15 +435,15 @@ static void tls_init_once(void)
                 };
                 for (int i = 0; defs[i]; i++) {
                     int rc = ca_load(defs[i]);
-                    if (rc < 0) fprintf(stderr, "dnsfwd: 加载 CA %s 失败（错误码 %d）\n", defs[i], rc);
+                    if (rc < 0) fprintf(stderr, "dnsfwd: 加载 CA %s 失败(错误码 %d)\n", defs[i], rc);
                     else if (rc > 0) loaded_any = 1;
                 }
             }
             g_ca_count = ca_count_certs();
         }
         g_tls_ready = 1;
-        fprintf(stderr, "dnsfwd: TLS 就绪（系统 CA %d 张%s）\n", g_ca_count,
-                g_ca_count > 0 ? "" : "；未找到 CA 目录，加密上游暂不校验证书");
+        fprintf(stderr, "dnsfwd: TLS 就绪(系统 CA %d 张%s)\n", g_ca_count,
+                g_ca_count > 0 ? "" : ";未找到 CA 目录,加密上游暂不校验证书");
     }
     pthread_mutex_unlock(&g_tlsmu);
 }
@@ -483,13 +486,13 @@ static int ssl_write_all(mbedtls_ssl_context *ssl, const unsigned char *p, int n
 }
 
 /* ============================================================
- * 加密上游连接池（DoH/DoT 复用）
- *   · 为什么需要：每次查询都重建 TCP+TLS 要 4 个 RTT（实测 400~500ms），
- *     复用之后同一上游的后续查询只需 1 个 RTT（约 30~100ms）——省电省流量也更快。
- *   · 键 = 上游展示串（host:port/path），每个槽位自带互斥锁：同一连接同时只被
- *     一个工作线程使用；被占用时新来的查询自己另开一条（不排队、不等待）。
- *   · 失败时**只重试一次**并重建连接（复用连接对端可能已关闭）。
- *   · 空闲超过 60 秒的连接在下次取用时关闭（避免占用 fd 与server 侧超时残连）。
+ * 加密上游连接池(DoH/DoT 复用)
+ *   · 为什么需要:每次查询都重建 TCP+TLS 要 4 个 RTT(实测 400~500ms),
+ *     复用之后同一上游的后续查询只需 1 个 RTT(约 30~100ms)--省电省流量也更快。
+ *   · 键 = 上游展示串(host:port/path),每个槽位自带互斥锁:同一连接同时只被
+ *     一个工作线程使用;被占用时新来的查询自己另开一条(不排队、不等待)。
+ *   · 失败时**只重试一次**并重建连接(复用连接对端可能已关闭)。
+ *   · 空闲超过 60 秒的连接在下次取用时关闭(避免占用 fd 与server 侧超时残连)。
  * ============================================================ */
 #define POOL_SZ 6
 struct tls_conn {
@@ -515,7 +518,7 @@ static void conn_close(struct tls_conn *pc)
         pc->fd = -1;
     }
 }
-/* 新建一条 TLS 连接（不做抢占，直接占用一个空槽） */
+/* 新建一条 TLS 连接(不做抢占,直接占用一个空槽) */
 static struct tls_conn *pool_new_conn(const struct upstream *u, const char *key, int timeout_ms)
 {
     tls_init_once();
@@ -526,7 +529,7 @@ static struct tls_conn *pool_new_conn(const struct upstream *u, const char *key,
     }
     int slot = -1;
     for (int i = 0; i < POOL_SZ; i++) if (!g_pool[i].used) { slot = i; break; }
-    if (slot < 0) { pthread_mutex_unlock(&g_poolmu); return NULL; }   /* 池满：本次不走加密 */
+    if (slot < 0) { pthread_mutex_unlock(&g_poolmu); return NULL; }   /* 池满:本次不走加密 */
     g_pool[slot].used = 1;
     snprintf(g_pool[slot].key, sizeof g_pool[slot].key, "%s", key);
     g_pool[slot].fd = -1;
@@ -551,7 +554,7 @@ static struct tls_conn *pool_new_conn(const struct upstream *u, const char *key,
         if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) {
             if (g_verbose) {
                 char eb[128]; mbedtls_strerror(r, eb, sizeof eb);
-                fprintf(stderr, "dnsfwd: TLS 握手失败（%s）：%s\n", u->host, eb);
+                fprintf(stderr, "dnsfwd: TLS 握手失败(%s):%s\n", u->host, eb);
             }
             mbedtls_ssl_free(&pc->ssl);
             mbedtls_ssl_config_free(&pc->conf);
@@ -570,7 +573,7 @@ fail:
     pthread_mutex_unlock(&pc->mu);
     return NULL;
 }
-/* 取一条可复用的连接（返回时已持有该槽位锁）；没有就返回 NULL */
+/* 取一条可复用的连接(返回时已持有该槽位锁);没有就返回 NULL */
 static struct tls_conn *pool_get_conn(const char *key)
 {
     struct tls_conn *pc = NULL;
@@ -580,13 +583,13 @@ static struct tls_conn *pool_get_conn(const char *key)
         if (pthread_mutex_trylock(&g_pool[i].mu) == 0) { pc = &g_pool[i]; break; }
     }
     pthread_mutex_unlock(&g_poolmu);
-    if (pc && pc->fd >= 0 && time(NULL) - pc->last > 60) {     /* 空闲过久：丢弃重建 */
+    if (pc && pc->fd >= 0 && time(NULL) - pc->last > 60) {     /* 空闲过久:丢弃重建 */
         conn_close(pc);
         pc->fd = -1;
     }
     return pc;
 }
-/* 归还：keep=1 保留连接复用；keep=0 关闭并释放槽位 */
+/* 归还:keep=1 保留连接复用;keep=0 关闭并释放槽位 */
 static void pool_put_conn(struct tls_conn *pc, int keep)
 {
     if (!keep) {
@@ -600,7 +603,7 @@ static void pool_put_conn(struct tls_conn *pc, int keep)
     pthread_mutex_unlock(&pc->mu);
 }
 
-/* HTTP 头里取一个值（大小写不敏感，只匹配行首） */
+/* HTTP 头里取一个值(大小写不敏感,只匹配行首) */
 static int hdr_val(const unsigned char *buf, int hdr_end, const char *name, char *out, int outsz)
 {
     int nl = (int)strlen(name);
@@ -649,7 +652,7 @@ static int dechunk(const unsigned char *p, int n, unsigned char *out, int outsz)
     return o;
 }
 
-/* DoH 一次请求（复用连接；Connection: keep-alive + 按 Content-Length 读） */
+/* DoH 一次请求(复用连接;Connection: keep-alive + 按 Content-Length 读) */
 static int doh_exchange(struct tls_conn *pc, const struct upstream *u, const unsigned char *q, int qlen,
                         unsigned char *resp, int respsz)
 {
@@ -674,7 +677,7 @@ static int doh_exchange(struct tls_conn *pc, const struct upstream *u, const uns
                 if (hdr_val(buf, hdr_end, "Content-Length", v, sizeof v)) cl = atoi(v);
                 else if (hdr_val(buf, hdr_end, "Transfer-Encoding", v, sizeof v) &&
                          (v[0] == 'c' || v[0] == 'C')) chunked = 1;
-                else return -1;                       /* 无法定长 ⇒ 不能复用，判失败 */
+                else return -1;                       /* 无法定长 ⇒ 不能复用,判失败 */
             }
             if (cl >= 0 && bl >= hdr_end + cl) break;
             if (chunked && bl > hdr_end) {
@@ -700,7 +703,7 @@ static int doh_exchange(struct tls_conn *pc, const struct upstream *u, const uns
     memcpy(resp, buf + hdr_end, cl);
     return cl;
 }
-/* DoH 查询：优先复用；失败则重建并只重试一次 */
+/* DoH 查询:优先复用;失败则重建并只重试一次 */
 static int doh_query(const struct upstream *u, const unsigned char *q, int qlen,
                      unsigned char *resp, int respsz, int timeout_ms)
 {
@@ -710,7 +713,7 @@ static int doh_query(const struct upstream *u, const unsigned char *q, int qlen,
     if (!pc) return -1;
     int n = (pc->fd >= 0) ? doh_exchange(pc, u, q, qlen, resp, respsz) : -1;
     if (n <= 0 && !fresh) {
-        pool_put_conn(pc, 0);                          /* 复用失败：关掉，重建一次 */
+        pool_put_conn(pc, 0);                          /* 复用失败:关掉,重建一次 */
         pc = pool_new_conn(u, u->text, timeout_ms);
         if (!pc) return -1;
         n = doh_exchange(pc, u, q, qlen, resp, respsz);
@@ -719,7 +722,7 @@ static int doh_query(const struct upstream *u, const unsigned char *q, int qlen,
     return n;
 }
 
-/* DoT 一次请求（复用连接，2 字节长度前缀） */
+/* DoT 一次请求(复用连接,2 字节长度前缀) */
 static int dot_exchange(struct tls_conn *pc, const unsigned char *q, int qlen,
                         unsigned char *resp, int respsz)
 {
@@ -766,17 +769,17 @@ static int dot_query(const struct upstream *u, const unsigned char *q, int qlen,
 }
 #endif /* WITH_DOH */
 
-/* 自举解析缓存：DoH/DoT 主机名 → 地址（避免每个查询都去解析一遍） */
+/* 自举解析缓存:DoH/DoT 主机名 → 地址(避免每个查询都去解析一遍) */
 struct dns_cache { char host[128]; struct sockaddr_storage sa; socklen_t len; int family; };
 static struct dns_cache g_dc[16];
 static int g_ndc = 0;
 
 /* ============================================================
- * 端到端锚点测量（-E host[:port]）
- *   为什么需要：DNS 解析快 ≠ 连模型快。解析器返回哪个 CDN/接入 IP，
- *   决定了你实际连到哪个节点；只看 DNS 延迟会选出"解析快但连接慢"的 DNS。
- *   做法：拿该解析器对这个域名的应答 IP，真的 TCP 连一次目标端口，量握手耗时。
- *   ⇒ 打分以"端到端可连性 + 握手耗时"为主，DNS 延迟只做次要参考。
+ * 端到端锚点测量(-E host[:port])
+ *   为什么需要:DNS 解析快 ≠ 连模型快。解析器返回哪个 CDN/接入 IP,
+ *   决定了你实际连到哪个节点;只看 DNS 延迟会选出"解析快但连接慢"的 DNS。
+ *   做法:拿该解析器对这个域名的应答 IP,真的 TCP 连一次目标端口,量握手耗时。
+ *   ⇒ 打分以"端到端可连性 + 握手耗时"为主,DNS 延迟只做次要参考。
  * ============================================================ */
 #define MAX_ANCHOR 4
 struct anchor { char host[128]; int port; };
@@ -790,7 +793,7 @@ static int anchor_port_of(const char *host)
     return 0;
 }
 
-/* 对某个 IP 做一次 TCP 握手，返回毫秒；失败返回 -1 */
+/* 对某个 IP 做一次 TCP 握手,返回毫秒;失败返回 -1 */
 static long tcp_handshake_ms(int family, const struct sockaddr_storage *sa, socklen_t slen, int port, int timeout_ms)
 {
     int s = socket(family, SOCK_STREAM, 0);
@@ -848,7 +851,7 @@ qd:
     return 0;
 }
 
-/* 用列表里的 UDP 上游把 host 解析成地址（自举；失败则用内置兜底） */
+/* 用列表里的 UDP 上游把 host 解析成地址(自举;失败则用内置兜底) */
 static int boot_resolve(const char *host, struct upstream *out)
 {
     struct upstream list[MAXUP];
@@ -863,9 +866,9 @@ static int boot_resolve(const char *host, struct upstream *out)
             if (list[i].type != UP_UDP || list[i].len == 0) continue;
             t = list[i];
         } else if (!parse_upstream("223.5.5.5", &t)) {
-            /* 最后防线的自举字面量：与模块内置默认集（module/etc/dns-defaults，C3
-               单一来源）的一致性由 tools/check-dns-defaults.sh 断言缝合。改这里
-               必须同步改那个文件，否则离线门禁会红。 */
+            /* 最后防线的自举字面量:与模块内置默认集(module/etc/dns-defaults,C3
+               单一来源)的一致性由 tools/check-dns-defaults.sh 断言缝合。改这里
+               必须同步改那个文件,否则离线门禁会红。 */
             return 0;
         }
         long ms = 0;
@@ -881,13 +884,13 @@ static int boot_resolve(const char *host, struct upstream *out)
     return 0;
 }
 
-/* 确保 DoH/DoT 上游有可用地址：提示 IP > 缓存 > 自举解析 */
+/* 确保 DoH/DoT 上游有可用地址:提示 IP > 缓存 > 自举解析 */
 static int upstream_ready(struct upstream *u)
 {
     if (u->type == UP_UDP) return u->len > 0;
     if (u->len > 0) return 1;
-    /* 主机名本身就是 IP 字面量（如 doh https://223.5.5.5/dns-query）：
-     * 直接用它，绝不能拿去当域名解析（否则必然失败） */
+    /* 主机名本身就是 IP 字面量(如 doh https://223.5.5.5/dns-query):
+     * 直接用它,绝不能拿去当域名解析(否则必然失败) */
     {
         struct upstream h;
         if (parse_upstream(u->host, &h)) {
@@ -933,7 +936,7 @@ static int upstream_ready(struct upstream *u)
     return 1;
 }
 
-/* 统一入口：按上游类型分派（UDP / DoH / DoT），并统一测耗时 */
+/* 统一入口:按上游类型分派(UDP / DoH / DoT),并统一测耗时 */
 static int upstream_query(struct upstream *u, const unsigned char *q, int qlen,
                           unsigned char *resp, int respsz, long *rtt_ms, int timeout_ms)
 {
@@ -961,14 +964,14 @@ static int upstream_query(struct upstream *u, const unsigned char *q, int qlen,
     return n;
 }
 
-/* 上游类型标签（探测输出用） */
-/* 可回读的规范形式：用于**探测输出**与择优清单（9rctl 会把第一列原样写回上游文件）。
-   为什么需要它：探测过去输出的是 text（`doh host:port/path`），
-     · 丢了 `https://` ⇒ 写回后 parse_doh 认不出来；
-     · 丢了 `@提示IP` ⇒ 需要自举解析的 DoH/DoT（doh.pub、dns.alidns.com…）在探测里
-       自己解析不出主机名 ⇒ 全部超时 ⇒ 加密上游永远选不上（实测 9999ms/可用 0%）。
-   为什么不直接改 text：text 同时是 **TLS 连接池的键**，改它会影响既有连接复用行为。
-   ⇒ 只在这里派生一个"能原样回读"的字符串，text 保持不动。 */
+/* 上游类型标签(探测输出用) */
+/* 可回读的规范形式:用于**探测输出**与择优清单(9rctl 会把第一列原样写回上游文件)。
+   为什么需要它:探测过去输出的是 text(`doh host:port/path`),
+     · 丢了 `https://` ⇒ 写回后 parse_doh 认不出来;
+     · 丢了 `@提示IP` ⇒ 需要自举解析的 DoH/DoT(doh.pub、dns.alidns.com...)在探测里
+       自己解析不出主机名 ⇒ 全部超时 ⇒ 加密上游永远选不上(实测 9999ms/可用 0%)。
+   为什么不直接改 text:text 同时是 **TLS 连接池的键**,改它会影响既有连接复用行为。
+   ⇒ 只在这里派生一个"能原样回读"的字符串,text 保持不动。 */
 static void up_ident(const struct upstream *u, char *dst, size_t n)
 {
     if (u->type == UP_DOH)
@@ -978,7 +981,7 @@ static void up_ident(const struct upstream *u, char *dst, size_t n)
         snprintf(dst, n, "dot %s:%d%s%s",
                  u->host, u->port, u->hint[0] ? "@" : "", u->hint);
     else
-        snprintf(dst, n, "%s", u->text);   /* 明文：text 本身就是 IP，保持原样 */
+        snprintf(dst, n, "%s", u->text);   /* 明文:text 本身就是 IP,保持原样 */
 }
 
 static const char *up_kind(const struct upstream *u)
@@ -989,17 +992,17 @@ static const char *up_kind(const struct upstream *u)
 }
 
 /* ============================================================
- * DNS 响应缓存（遵循 TTL）
- *   · 为什么需要：Go 的解析器自己不缓存，而我们绕过了 netd 的缓存 ⇒
- *     没有缓存时，同一个域名每次解析都要打到上游（费流量、费电、慢）。
- *   · 命中即回，不发任何网络包 ⇒ 这是"能效"最直接的来源。
- *   · 只缓存 RCODE=0 的成功应答；TTL 取所有记录的最小值（保守），并可设上限。
- *   · 键 = 问题段（去掉 12 字节头），大小写归一（DNS 不区分大小写）。
- *   · 命中时把应答里的 ID 改写成客户端查询的 ID（每个客户端 ID 都不同）。
+ * DNS 响应缓存(遵循 TTL)
+ *   · 为什么需要:Go 的解析器自己不缓存,而我们绕过了 netd 的缓存 ⇒
+ *     没有缓存时,同一个域名每次解析都要打到上游(费流量、费电、慢)。
+ *   · 命中即回,不发任何网络包 ⇒ 这是"能效"最直接的来源。
+ *   · 只缓存 RCODE=0 的成功应答;TTL 取所有记录的最小值(保守),并可设上限。
+ *   · 键 = 问题段(去掉 12 字节头),大小写归一(DNS 不区分大小写)。
+ *   · 命中时把应答里的 ID 改写成客户端查询的 ID(每个客户端 ID 都不同)。
  * ============================================================ */
 #define CACHE_SZ        256
-#define CACHE_RESP_MAX  1024        /* 超过这个大小的应答不缓存（罕见） */
-#define CACHE_TTL_MAX   300         /* TTL 上限（秒），避免长期使用过期记录 */
+#define CACHE_RESP_MAX  1024        /* 超过这个大小的应答不缓存(罕见) */
+#define CACHE_TTL_MAX   300         /* TTL 上限(秒),避免长期使用过期记录 */
 #define CACHE_KEY_MAX   256
 
 struct c_entry {
@@ -1015,7 +1018,7 @@ static pthread_mutex_t g_cachemu = PTHREAD_MUTEX_INITIALIZER;
 static int g_cache_enable = 1;
 static long g_cache_hits = 0, g_cache_miss = 0;
 
-/* 生成缓存键：问题段（qname+qtype+qclass），字节小写化 */
+/* 生成缓存键:问题段(qname+qtype+qclass),字节小写化 */
 static int cache_key(const unsigned char *q, int qlen, unsigned char *key)
 {
     if (qlen <= 12 || qlen - 12 > CACHE_KEY_MAX) return 0;
@@ -1028,7 +1031,7 @@ static int cache_key(const unsigned char *q, int qlen, unsigned char *key)
     return n;
 }
 
-/* 取应答里所有记录的最小 TTL；无法解析时返回 0（不缓存） */
+/* 取应答里所有记录的最小 TTL;无法解析时返回 0(不缓存) */
 static int min_ttl(const unsigned char *r, int n)
 {
     if (n < 12) return 0;
@@ -1103,7 +1106,7 @@ static void cache_put(const unsigned char *q, int qlen, const unsigned char *res
         if (!g_cache[i].used || now >= g_cache[i].expire) { slot = i; break; }
         if (g_cache[i].keylen == klen && memcmp(g_cache[i].key, key, klen) == 0) { slot = i; break; }
     }
-    if (slot < 0) {                                    /* 全满：覆盖最早过期的那个 */
+    if (slot < 0) {                                    /* 全满:覆盖最早过期的那个 */
         time_t oldest = 0;
         for (int i = 0; i < CACHE_SZ; i++)
             if (slot < 0 || g_cache[i].expire < oldest) { oldest = g_cache[i].expire; slot = i; }
@@ -1117,7 +1120,7 @@ static void cache_put(const unsigned char *q, int qlen, const unsigned char *res
     pthread_mutex_unlock(&g_cachemu);
 }
 
-/* ---------------- 自检（走本进程监听的端口） ---------------- */
+/* ---------------- 自检(走本进程监听的端口) ---------------- */
 
 static int selftest_addr(const char *name, const char *server, int family, int port)
 {
@@ -1151,17 +1154,17 @@ static int selftest_addr(const char *name, const char *server, int family, int p
     return (rcode == 0 && ancount > 0) ? 0 : 1;
 }
 
-/* ---------------- 探测模式：并发测全部上游 ---------------- */
+/* ---------------- 探测模式:并发测全部上游 ---------------- */
 
-/* 聚合粒度 = 上游 × 域名：只有按域名分开，才能比较"同一域名在不同上游答案是否一致"
- * （这是识别劫持/污染的关键信号，见方案文档 §2.1） */
+/* 聚合粒度 = 上游 × 域名:只有按域名分开,才能比较"同一域名在不同上游答案是否一致"
+ * (这是识别劫持/污染的关键信号,见方案文档 §2.1) */
 struct agg {
     int ok, total, fake;
     long rtts[64];
     int nrtt;
-    char ans[8][INET6_ADDRSTRLEN + 1];   /* 去重后的答案，最多 8 个 */
+    char ans[8][INET6_ADDRSTRLEN + 1];   /* 去重后的答案,最多 8 个 */
     int nans;
-    /* 端到端（该解析器的答案 IP 能否连上、握手多快）——锚点域名才有值 */
+    /* 端到端(该解析器的答案 IP 能否连上、握手多快)--锚点域名才有值 */
     int tcp_ok, tcp_total;
     long tcp_ms;
     char tcp_ip[INET6_ADDRSTRLEN + 1];
@@ -1186,15 +1189,15 @@ static int cmp_long(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
-/* 探测时限制 DoH/DoT 并发：TLS 握手要经过全局锁与连接池，
-   8 个 worker 一起挤会让多数握手直接失败（实测 j=1 / j=4 基本全通，j=8 挂掉 4 条）。
-   这里只限探测路径，**不影响转发服务**。 */
-/* 实测结论（本机网络，命中同一批端点）：
-     j=1 全通（doh 306 / doh.pub 787 / dot 246 / dot.pub 1048ms）
-     j=2~4 开始出现挂（限流到 2 仍有 3/6 失败）
+/* 探测时限制 DoH/DoT 并发:TLS 握手要经过全局锁与连接池,
+   8 个 worker 一起挤会让多数握手直接失败(实测 j=1 / j=4 基本全通,j=8 挂掉 4 条)。
+   这里只限探测路径,**不影响转发服务**。 */
+/* 实测结论(本机网络,命中同一批端点):
+     j=1 全通(doh 306 / doh.pub 787 / dot 246 / dot.pub 1048ms)
+     j=2~4 开始出现挂(限流到 2 仍有 3/6 失败)
      j=8 大面积挂
-   ⇒ 加密上游的握手对并发极度敏感，取 1（完全串行）换取可靠。
-   代价有限：加密候选只有几条，串行多花几秒；探测是后台低频任务。 */
+   ⇒ 加密上游的握手对并发极度敏感,取 1(完全串行)换取可靠。
+   代价有限:加密候选只有几条,串行多花几秒;探测是后台低频任务。 */
 #define TLS_PROBE_MAX_CONC 1
 static pthread_mutex_t p_tlsmu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  p_tlscv = PTHREAD_COND_INITIALIZER;
@@ -1239,7 +1242,7 @@ static void *probe_worker(void *arg)
         int fake = 0, cnt = 0;
         if (n > 0) cnt = parse_answers(r, n, ans, sizeof ans, &fake);
 
-        /* 锚点域名：拿这个解析器给的 IP，真的连一次目标端口（端到端质量） */
+        /* 锚点域名:拿这个解析器给的 IP,真的连一次目标端口(端到端质量) */
         long tcpms = -1;
         char tcpip[INET6_ADDRSTRLEN + 1];
         tcpip[0] = 0;
@@ -1265,7 +1268,7 @@ static void *probe_worker(void *arg)
             a->ok++;
             if (a->nrtt < (int)(sizeof a->rtts / sizeof a->rtts[0])) a->rtts[a->nrtt++] = ms;
             if (fake) a->fake++;
-            /* 答案去重收集（同一域名多次探测、同上游多答案都收敛成一份） */
+            /* 答案去重收集(同一域名多次探测、同上游多答案都收敛成一份) */
             char *sp = ans;
             while (sp && *sp) {
                 char *comma = strchr(sp, ',');
@@ -1284,30 +1287,49 @@ static void *probe_worker(void *arg)
     return NULL;
 }
 
+/* ---------------- 探测评分（唯一事实源） ----------------
+ * 评分 = 可用率×50 + 端到端握手率×30 + 速度分×20（0~100）。
+ * 端到端 = dnsfwd 拿“该上游给出的答案 IP”对锚点主机的 TCP 握手成功率 ——
+ * 直接对齐用户痛点（DNS 能答但模型连不上 = TLS 失败的主因）；无锚点数据时
+ * 该项不计入，按可用率与速度归一（与旧面板公式的排序结论基本一致）。
+ * 速度分 = rtt_ms ≤50 → 20；≥600 → 0；线性内插。
+ * 面板 JS 与 shell 自动优选都不再各自实现公式 —— 都消费 TSV 末列 score 列。
+ */
+static double probe_score(double okrate, double tcprate, long rtt_ms)
+{
+    double speed = (rtt_ms < 0) ? 0.0
+                 : (rtt_ms <= 50) ? 20.0
+                 : (rtt_ms >= 600) ? 0.0
+                 : 20.0 * (600.0 - (double)rtt_ms) / 550.0;
+    if (tcprate < 0) /* 无端到端数据：权重并入可用率，保持满分仍是 100 */
+        return okrate * 80.0 + speed;
+    return okrate * 50.0 + tcprate * 30.0 + speed;
+}
+
 /* 返回 0 表示成功（结果已打印） */
 static int probe_all(int workers, int tsv)
 {
     if (!load_file(g_conf)) { fprintf(stderr, "dnsfwd: 无法读取 %s\n", g_conf); return 1; }
     p_nup = tmp_nup;
     if (p_nup == 0) { fprintf(stderr, "dnsfwd: %s 里没有可用上游\n", g_conf); return 1; }
-    /* 原子替换到运行表（探测模式下也保持一致） */
+    /* 原子替换到运行表(探测模式下也保持一致) */
     pthread_mutex_lock(&up_lock);
     memcpy(up, tmp_up, sizeof(struct upstream) * p_nup); nup = p_nup;
     pthread_mutex_unlock(&up_lock);
     snapshot(p_up);
 
-    /* 探测前置：先把 DoH/DoT 的地址解析出来，并**把结果写回 hint**。
-       为什么：boot_resolve() 本来就会自举解析（用明文上游，兜底 223.5.5.5），
+    /* 探测前置:先把 DoH/DoT 的地址解析出来,并**把结果写回 hint**。
+       为什么:boot_resolve() 本来就会自举解析(用明文上游,兜底 223.5.5.5),
        但解析结果过去只留在内存里 ⇒ 探测输出与随之写回的清单都**不带 @提示IP** ⇒
-       每次都要重解析，失败时还是静默的。这里把"自举解析"落实到**持久化**：
-         · 解析成功且 host 不是 IP 字面量 ⇒ 把 IP 写进 hint（之后 up_ident() 会带出来）；
-         · 解析失败 ⇒ 明确告警（不再静默失败）。
-       全部在单线程、快照 p_up[] 上做 ⇒ 不碰转发表 up[]，也不干扰并发。 */
+       每次都要重解析,失败时还是静默的。这里把"自举解析"落实到**持久化**:
+         · 解析成功且 host 不是 IP 字面量 ⇒ 把 IP 写进 hint(之后 up_ident() 会带出来);
+         · 解析失败 ⇒ 明确告警(不再静默失败)。
+       全部在单线程、快照 p_up[] 上做 ⇒ 不碰转发表 up[],也不干扰并发。 */
     for (int u = 0; u < p_nup; u++) {
         struct upstream *pu = &p_up[u];
         if (pu->type == UP_UDP) continue;
         if (!upstream_ready(pu)) {
-            fprintf(stderr, "dnsfwd: 无法确定 %s 的地址（探测中不可用；建议在候选池写 @提示IP）\n",
+            fprintf(stderr, "dnsfwd: 无法确定 %s 的地址(探测中不可用;建议在候选池写 @提示IP)\n",
                     pu->host[0] ? pu->host : pu->text);
             continue;
         }
@@ -1344,10 +1366,10 @@ static int probe_all(int workers, int tsv)
     for (int i = 0; i < nth; i++) pthread_create(&th[i], NULL, probe_worker, NULL);
     for (int i = 0; i < nth; i++) pthread_join(th[i], NULL);
 
-    if (tsv) printf("upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\tanswers\tfakeip\ttcp_ms\ttcp_ok/total\ttcp_ip\n");
+    if (tsv) printf("upstream\tfamily\tdomain\trtt_ms\tok/total\tn_ans\tanswers\tfakeip\ttcp_ms\ttcp_ok/total\ttcp_ip\tscore\n");
     for (int u = 0; u < p_nup; u++) {
         const char *fam = up_kind(&p_up[u]);
-        char ident[300];                 /* 可回读的规范形式（含 @提示IP），供 9rctl 写回上游文件 */
+        char ident[300];                 /* 可回读的规范形式(含 @提示IP),供 9rctl 写回上游文件 */
         up_ident(&p_up[u], ident, sizeof ident);
         for (int d = 0; d < p_ndomain; d++) {
             struct agg *a = AGG(u, d);
@@ -1363,11 +1385,19 @@ static int probe_all(int workers, int tsv)
                 strncat(j3, a->ans[k], sizeof j3 - strlen(j3) - 1);
             }
             if (tsv) {
-                printf("%s\t%s\t%s\t%ld\t%d/%d\t%d\t%s\t%s\t%ld\t%d/%d\t%s\n",
+                /* 行评分（唯一公式实现在 probe_score；消费方只读不弃）:
+                   可用率 / 端到端握手率 / p50 延迟；无成功查询(p50<0)不给速度分；
+                   fake-ip 罚 100（假 IP 在 TUN 下 TCP 也能“握上”，必须显式惩罚）。
+                   同一上游多行时由消费方取最高行（awk/JS 各自一行去重，无第二公式）。 */
+                double okrate = (a->total > 0) ? (double)a->ok / a->total : 0.0;
+                double tcprate = (a->tcp_total > 0) ? (double)a->tcp_ok / a->tcp_total : -1.0;
+                double sc = probe_score(okrate, tcprate, p50);
+                if (a->fake > 0) sc -= 100.0;
+                printf("%s\t%s\t%s\t%ld\t%d/%d\t%d\t%s\t%s\t%ld\t%d/%d\t%s\t%.1f\n",
                        ident, fam, p_domains[d], p50, a->ok, a->total, a->nans,
                        j3[0] ? j3 : "-", a->fake > 0 ? "yes" : "no",
                        a->tcp_total > 0 ? a->tcp_ms : -1, a->tcp_ok, a->tcp_total,
-                       a->tcp_ip[0] ? a->tcp_ip : "-");
+                       a->tcp_ip[0] ? a->tcp_ip : "-", sc);
             } else {
                 printf("  %-34s %-3s %-24s %6ldms  %d/%d  %s%s",
                        ident, fam, p_domains[d], p50, a->ok, a->total,
@@ -1382,29 +1412,29 @@ static int probe_all(int workers, int tsv)
 }
 
 /* ============================================================
- * 转发工作池：并发 + 健康优先 + 快速失败
+ * 转发工作池:并发 + 健康优先 + 快速失败
  *
- * 旧实现的问题（实测）：
- *   1) 一个上游试完再试下一个 ⇒ 最坏 ≈ 上游数 × 3s（5 个上游就是 15s），
- *      期间其它客户端的查询全被阻塞（Go 会并发发起多个查询，表现尤其差）；
- *   2) 坏上游永远排在前面（列表顺序固定）⇒ 每次都要先浪费一个 3s 超时；
- *   3) 全部失败时"沉默"⇒ 客户端只能等自己的超时，而不是立刻改用下一个 nameserver。
+ * 旧实现的问题(实测):
+ *   1) 一个上游试完再试下一个 ⇒ 最坏 ≈ 上游数 × 3s(5 个上游就是 15s),
+ *      期间其它客户端的查询全被阻塞(Go 会并发发起多个查询,表现尤其差);
+ *   2) 坏上游永远排在前面(列表顺序固定)⇒ 每次都要先浪费一个 3s 超时;
+ *   3) 全部失败时"沉默"⇒ 客户端只能等自己的超时,而不是立刻改用下一个 nameserver。
  *
- * 现在的做法：
- *   · 工作池（默认 4 线程）并发处理客户端查询，互不阻塞；
- *   · 每个上游维护「连续失败数 + 平滑延迟」，按健康度排序 ⇒ 好多上游自然排前面、坏的上游沉底；
- *   · 单次尝试用短超时（首个 800ms，之后按剩余预算均分，总预算仍是 3s）；
+ * 现在的做法:
+ *   · 工作池(默认 4 线程)并发处理客户端查询,互不阻塞;
+ *   · 每个上游维护「连续失败数 + 平滑延迟」,按健康度排序 ⇒ 好多上游自然排前面、坏的上游沉底;
+ *   · 单次尝试用短超时(首个 800ms,之后按剩余预算均分,总预算仍是 3s);
  *   · 全部失败立即回 SERVFAIL ⇒ Go 解析器马上回落到 resolv.conf 的下一个 nameserver。
  * ============================================================ */
 #define FWD_WORKERS_DEF  4
 #define JOBSZ            64
 #define ATTEMPT_FIRST_MS 800
 #define ATTEMPT_MIN_MS   300
-/* DoH/DoT 首次要建立 TCP + TLS（约 4 个 RTT），预算要给得比明文宽，
- * 否则冷连接会被判超时、白白回落到明文（实测：DoH 首次 250~400ms，冷启动更慢） */
+/* DoH/DoT 首次要建立 TCP + TLS(约 4 个 RTT),预算要给得比明文宽,
+ * 否则冷连接会被判超时、白白回落到明文(实测:DoH 首次 250~400ms,冷启动更慢) */
 #define ATTEMPT_TLS_FIRST_MS 2000
 
-struct up_stat { long rtt_ewma; int fails; };
+struct up_stat { long rtt_ewma; int fails; int tcpfails; };
 static struct up_stat g_st[MAXUP];
 static int g_workers = FWD_WORKERS_DEF;
 
@@ -1421,20 +1451,27 @@ static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_qcv = PTHREAD_COND_INITIALIZER;
 static pthread_t g_wth[16];
 
-/* 构造 SERVFAIL 应答：把客户端请求原样回一张"服务器失败" */
+/* 构造 SERVFAIL 应答:把客户端请求原样回一张"服务器失败" */
 static int build_servfail(const unsigned char *q, int qlen, unsigned char *out)
 {
     if (qlen < 12) return 0;
     memcpy(out, q, qlen);
     out[2] = 0x81;                                     /* QR=1 */
-    out[3] = (unsigned char)((q[3] & 0x01) | 0x02);    /* 保留 RD，RCODE=2 */
+    out[3] = (unsigned char)((q[3] & 0x01) | 0x02);    /* 保留 RD,RCODE=2 */
     out[6] = 0; out[7] = 0;                            /* ANCOUNT */
     out[8] = 0; out[9] = 0;                            /* NSCOUNT */
     out[10] = 0; out[11] = 0;                          /* ARCOUNT */
     return qlen;
 }
 
-/* 按健康度排序（插入排序，n ≤ 32）：失败少的在前，其次延迟小的在前 */
+/* 按健康度排序(插入排序,n ≤ MAXUP):失败少的在前,其次延迟小的在前。
+   权重 = 查询失败 + 端到端锚点握手失败(tcpfails×TCPFAIL_WEIGHT):
+   "DNS 能答但答案 IP 连不通"的上游(坏 CDN 节点/污染/劫持--TLS 失败的主因)
+   会沉底,不再长期占用队首。 */
+static int up_cost(int u)
+{
+    return g_st[u].fails + g_st[u].tcpfails * TCPFAIL_WEIGHT;
+}
 static void order_by_health(int *idx, int n)
 {
     for (int i = 0; i < n; i++) idx[i] = i;
@@ -1442,8 +1479,8 @@ static void order_by_health(int *idx, int n)
         int k = idx[i], j = i - 1;
         while (j >= 0) {
             int a = idx[j];
-            int better = (g_st[k].fails != g_st[a].fails)
-                       ? (g_st[k].fails < g_st[a].fails)
+            int better = (up_cost(k) != up_cost(a))
+                       ? (up_cost(k) < up_cost(a))
                        : (g_st[k].rtt_ewma < g_st[a].rtt_ewma);
             if (!better) break;
             idx[j + 1] = idx[j]; j--;
@@ -1458,8 +1495,42 @@ static void stat_ok(int u, long ms)
     if (g_st[u].rtt_ewma <= 0) g_st[u].rtt_ewma = ms;
     else g_st[u].rtt_ewma = (g_st[u].rtt_ewma * 3 + ms) / 4;      /* EWMA */
     g_st[u].fails = 0;
+    if (g_st[u].tcpfails > 0) g_st[u].tcpfails--;                /* 成功查询减压,避免永久沉底 */
 }
 static void stat_fail(int u) { if (g_st[u].fails < 1000) g_st[u].fails++; }
+static void stat_tcpfail(int u) { if (g_st[u].tcpfails < 1000) g_st[u].tcpfails++; }
+
+/* 从客户端查询报文提取 QNAME(偏移 12 起的 label 序列),查锚点表。
+   命中返回该锚点的端口(供转发态端到端惩罚),未命中返回 0。
+   只做形状遍历,不重组字符串--逐 label 与锚点后缀比对。 */
+static int fwd_anchor_port(const unsigned char *q, int qlen)
+{
+    if (qlen <= 12) return 0;
+    const unsigned char *p = q + 12;
+    const unsigned char *end = q + qlen;
+    char name[256];
+    int n = 0;
+    while (p < end && *p) {
+        int lab = *p++;
+        if (lab > 63 || p + lab > end) return 0;
+        if (n && n < (int)sizeof name - 1) name[n++] = '.';
+        for (int i = 0; i < lab && n < (int)sizeof name - 1; i++) {
+            char c = (char)*p++;
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');   /* DNS 不分大小写 */
+            name[n++] = c;
+        }
+    }
+    name[n] = 0;
+    if (!n) return 0;
+    /* 锚点匹配:全等或以 ".锚点" 结尾(子域也算--引擎对它的每次解析都走同一条上游) */
+    for (int i = 0; i < g_nanchor; i++) {
+        size_t al = strlen(g_anchor[i].host);
+        if (n == (int)al && strcmp(name, g_anchor[i].host) == 0) return g_anchor[i].port;
+        if (n > (int)al + 1 && name[n - (int)al - 1] == '.' &&
+            strcmp(name + n - (int)al, g_anchor[i].host) == 0) return g_anchor[i].port;
+    }
+    return 0;
+}
 
 /* 处理一个客户端查询 */
 static void handle_query(const struct qjob *jb)
@@ -1472,19 +1543,19 @@ static void handle_query(const struct qjob *jb)
     order_by_health(idx, cnt);
 
     unsigned char r[BUFSZ];
-    /* 1) 命中缓存 → 直接回，零网络开销（省电、快；TTL 由上游决定） */
+    /* 1) 命中缓存 → 直接回,零网络开销(省电、快;TTL 由上游决定) */
     {
         int clen = 0;
         if (cache_get(jb->q, jb->qlen, r, sizeof r, &clen)) {
             sendto(jb->fd, r, clen, 0, (const struct sockaddr *)&jb->cli, jb->clilen);
-            if (g_verbose) fprintf(stderr, "dnsfwd: 缓存命中（命中 %ld / 未命中 %ld）\n", g_cache_hits, g_cache_miss);
+            if (g_verbose) fprintf(stderr, "dnsfwd: 缓存命中(命中 %ld / 未命中 %ld)\n", g_cache_hits, g_cache_miss);
             return;
         }
     }
 
     long budget = TIMEOUT_MS;
     for (int i = 0; i < cnt; i++) {
-        /* 首个尝试的预算按上游类型区分：明文 800ms，加密 2000ms（要建 TLS） */
+        /* 首个尝试的预算按上游类型区分:明文 800ms,加密 2000ms(要建 TLS) */
         long first = (snap[idx[i]].type == UP_UDP) ? ATTEMPT_FIRST_MS : ATTEMPT_TLS_FIRST_MS;
         long per = (i == 0) ? first : (budget > ATTEMPT_MIN_MS ? budget : ATTEMPT_MIN_MS);
         if (per > budget && budget > 0) per = budget;
@@ -1495,16 +1566,29 @@ static void handle_query(const struct qjob *jb)
             cache_put(jb->q, jb->qlen, r, rn);          /* 成功应答按 TTL 缓存 */
             if (sendto(jb->fd, r, rn, 0, (const struct sockaddr *)&jb->cli, jb->clilen) >= 0)
                 stat_ok(idx[i], ms);
+            /* 端到端惩罚(异步,不阻塞应答):当查询的域名正是锚点主机时,
+               拿本上游给的答案 IP 真握手一次 -- 失败 = "它答得出但对你的供应商连不通",
+               计 tcpfail 让它沉底。port 由锚点表提供(443 默认)。 */
+            {
+                int aport = fwd_anchor_port(jb->q, jb->qlen);
+                if (aport > 0) {
+                    struct sockaddr_storage sa; socklen_t sl = 0; int fam = 0;
+                    if (first_addr(r, rn, &sa, &sl, &fam)) {
+                        if (tcp_handshake_ms(fam, &sa, sl, aport, PROBE_TCP_TIMEOUT_MS) < 0)
+                            stat_tcpfail(idx[i]);
+                    }
+                }
+            }
             return;
         }
         stat_fail(idx[i]);
         if (budget <= 0) break;
     }
-    /* 全部失败：立即回 SERVFAIL（不沉默），让 Go 马上换下一个 nameserver */
+    /* 全部失败:立即回 SERVFAIL(不沉默),让 Go 马上换下一个 nameserver */
     unsigned char sf[BUFSZ];
     int n = build_servfail(jb->q, jb->qlen, sf);
     if (n > 0) sendto(jb->fd, sf, n, 0, (const struct sockaddr *)&jb->cli, jb->clilen);
-    fprintf(stderr, "dnsfwd: 全部上游不可用（%d 个），已回 SERVFAIL\n", cnt);
+    fprintf(stderr, "dnsfwd: 全部上游不可用(%d 个),已回 SERVFAIL\n", cnt);
 }
 
 static void *fwd_worker(void *arg)
@@ -1526,23 +1610,23 @@ static void *fwd_worker(void *arg)
 static void usage(void)
 {
     printf("用法: dnsfwd [选项]\n"
-           "  -f <文件>     上游列表（默认 %s）\n"
-           "  -b loopback   只绑 127.0.0.1 与 ::1（默认，安全）\n"
-           "  -b any        绑 [::]:53 双栈全网卡（局域网共享；仅限可信网络）\n"
-           "  -p <端口>     监听端口（默认 53；调试可用 5354）\n"
-           "  -i <网卡>     上游 socket 绑到该网卡（SO_BINDTODEVICE，绕过 TUN）\n"
-           "  -A <证书目录> 指定系统 CA 目录（DoH/DoT 校验用；可重复）\n"
-           "  -c <秒>       响应缓存 TTL 上限（默认 %d；0 = 关闭缓存）\n"
-           "  -E <锚点>     端到端测量：host[:port][,host[:port]]…（用你的上游 API 域名，\n"
-           "                会拿解析出来的 IP 真连一次该端口，量握手耗时）\n"
-           "  -t <域名>     自检：走本进程监听端口解析一次\n"
-           "  -P            探测模式：并发测全部上游（配合 -d/-n）\n"
-           "  -d <域名>     探测用域名（可重复，最多 %d 个）\n"
-           "  -n <次数>     每个上游每域名的探测次数（默认 2）\n"
-           "  -j <并发数>   探测并发（默认 6，最大 16）\n"
-           "  -w <并发数>   转发工作线程数（默认 4，最大 16）\n"
-           "  -T a|aaaa     查询类型（默认 a）\n"
-           "  --tsv         探测结果输出 TSV（给脚本用）\n"
+           "  -f <文件>     上游列表(默认 %s)\n"
+           "  -b loopback   只绑 127.0.0.1 与 ::1(默认,安全)\n"
+           "  -b any        绑 [::]:53 双栈全网卡(局域网共享;仅限可信网络)\n"
+           "  -p <端口>     监听端口(默认 53;调试可用 5354)\n"
+           "  -i <网卡>     上游 socket 绑到该网卡(SO_BINDTODEVICE,绕过 TUN)\n"
+           "  -A <证书目录> 指定系统 CA 目录(DoH/DoT 校验用;可重复)\n"
+           "  -c <秒>       响应缓存 TTL 上限(默认 %d;0 = 关闭缓存)\n"
+           "  -E <锚点>     端到端测量:host[:port][,host[:port]]...(用你的上游 API 域名,\n"
+           "                会拿解析出来的 IP 真连一次该端口,量握手耗时)\n"
+           "  -t <域名>     自检:走本进程监听端口解析一次\n"
+           "  -P            探测模式:并发测全部上游(配合 -d/-n)\n"
+           "  -d <域名>     探测用域名(可重复,最多 %d 个)\n"
+           "  -n <次数>     每个上游每域名的探测次数(默认 2)\n"
+           "  -j <并发数>   探测并发(默认 6,最大 16)\n"
+           "  -w <并发数>   转发工作线程数(默认 4,最大 16)\n"
+           "  -T a|aaaa     查询类型(默认 a)\n"
+           "  --tsv         探测结果输出 TSV(给脚本用)\n"
            "  -v            详细日志\n", g_conf, MAXDOMAINS, CACHE_TTL_MAX);
 }
 
@@ -1565,11 +1649,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-n") && i + 1 < argc) p_repeat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-j") && i + 1 < argc) workers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-w") && i + 1 < argc) g_workers = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-c") && i + 1 < argc) {   /* 缓存 TTL 上限（秒）；0 = 关闭缓存 */
+        else if (!strcmp(argv[i], "-c") && i + 1 < argc) {   /* 缓存 TTL 上限(秒);0 = 关闭缓存 */
             int v = atoi(argv[++i]);
             g_cache_enable = (v > 0) ? 1 : 0;
         }
-        else if (!strcmp(argv[i], "-E") && i + 1 < argc) {   /* 端到端锚点：host[:port][,host[:port]]… */
+        else if (!strcmp(argv[i], "-E") && i + 1 < argc) {   /* 端到端锚点:host[:port][,host[:port]]... */
             char *spec = argv[++i];
             char *sp = spec;
             while (sp && *sp && g_nanchor < MAX_ANCHOR) {
@@ -1612,7 +1696,7 @@ int main(int argc, char **argv)
     }
 
     if (!load_file(g_conf)) {
-        /* 文件不存在时不算致命：仍可 -t 自检或按旧行为报错 */
+        /* 文件不存在时不算致命:仍可 -t 自检或按旧行为报错 */
         if (!test) { fprintf(stderr, "dnsfwd: 无法读取上游文件 %s\n", g_conf); return 1; }
     } else {
         pthread_mutex_lock(&up_lock);
@@ -1621,7 +1705,7 @@ int main(int argc, char **argv)
     }
 
     if (test) {
-        /* 两条回落路径都要验：Go 会先试 [::1] 再试 127.0.0.1 */
+        /* 两条回落路径都要验:Go 会先试 [::1] 再试 127.0.0.1 */
         int rc4, rc6;
         printf("127.0.0.1:%d ", port);
         rc4 = selftest_addr(test, "127.0.0.1", AF_INET, port);
@@ -1640,7 +1724,7 @@ int main(int argc, char **argv)
     if (!strcmp(bindmode, "any")) {
         int fd = socket(AF_INET6, SOCK_DGRAM, 0);
         if (fd < 0) { perror("socket6"); return 1; }
-        int on = 0;                                     /* 双栈：v4 也收（局域网共享用） */
+        int on = 0;                                     /* 双栈:v4 也收(局域网共享用) */
         setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof on);
         int one = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
         struct sockaddr_in6 a; memset(&a, 0, sizeof a);
@@ -1659,7 +1743,7 @@ int main(int argc, char **argv)
         a4.sin_family = AF_INET; a4.sin_port = htons(port); a4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         if (bind(f4, (struct sockaddr *)&a4, sizeof a4) != 0) {
             if (errno == EADDRINUSE)
-                fprintf(stderr, "dnsfwd: 127.0.0.1:%d 已被占用（可能已有实例在跑）。先 `9rctl dns-fwd stop`\n", port);
+                fprintf(stderr, "dnsfwd: 127.0.0.1:%d 已被占用(可能已有实例在跑)。先 `9rctl dns-fwd stop`\n", port);
             else perror("bind 127.0.0.1");
             return 1;
         }
@@ -1671,28 +1755,28 @@ int main(int argc, char **argv)
             struct sockaddr_in6 a6; memset(&a6, 0, sizeof a6);
             a6.sin6_family = AF_INET6; a6.sin6_port = htons(port); a6.sin6_addr = in6addr_loopback;
             if (bind(f6, (struct sockaddr *)&a6, sizeof a6) == 0) fds[nfd++] = f6;
-            else { close(f6); fprintf(stderr, "dnsfwd: 警告：[::1]:%d 绑定失败，仅 IPv4 回环可用\n", port); }
+            else { close(f6); fprintf(stderr, "dnsfwd: 警告:[::1]:%d 绑定失败,仅 IPv4 回环可用\n", port); }
         }
     }
 
-    fprintf(stderr, "dnsfwd: 监听 %s:%d（%s），上游 %d 个，来自 %s%s\n",
+    fprintf(stderr, "dnsfwd: 监听 %s:%d(%s),上游 %d 个,来自 %s%s\n",
             !strcmp(bindmode, "any") ? "0.0.0.0/::" : "127.0.0.1+::1", port,
             !strcmp(bindmode, "any") ? "全网卡·局域网可见" : "仅本机回环", nup, g_conf,
-            g_iface ? "（上游绑定网卡，绕过 TUN）" : "");
-    fprintf(stderr, "dnsfwd: 工作线程 %d，缓存 %s（TTL 上限 %ds，槽位 %d）\n",
+            g_iface ? "(上游绑定网卡,绕过 TUN)" : "");
+    fprintf(stderr, "dnsfwd: 工作线程 %d,缓存 %s(TTL 上限 %ds,槽位 %d)\n",
             g_workers, g_cache_enable ? "开" : "关", CACHE_TTL_MAX, CACHE_SZ);
     if (g_verbose) {
         for (int i = 0; i < nup; i++) fprintf(stderr, "  upstream[%d] %s\n", i, up[i].text);
     }
-    /* 启动转发工作池（并发处理客户端查询，互不阻塞） */
+    /* 启动转发工作池(并发处理客户端查询,互不阻塞) */
     if (g_workers < 1) g_workers = 1;
     if (g_workers > 16) g_workers = 16;
     for (int i = 0; i < g_workers; i++) {
         if (pthread_create(&g_wth[i], NULL, fwd_worker, NULL) != 0) { g_workers = i; break; }
     }
-    if (g_workers <= 0) { fprintf(stderr, "dnsfwd: 工作线程创建失败，退化为单线程\n"); }
+    if (g_workers <= 0) { fprintf(stderr, "dnsfwd: 工作线程创建失败,退化为单线程\n"); }
 
-    /* 收包缓冲随任务传递，无需此处局部变量 */
+    /* 收包缓冲随任务传递,无需此处局部变量 */
     struct pollfd pfds[2];
     struct stat st; time_t last_mtime = 0, last_check = 0;
     if (stat(g_conf, &st) == 0) last_mtime = st.st_mtime;
@@ -1703,19 +1787,19 @@ int main(int argc, char **argv)
         int pr = poll(pfds, nfd, 1000);
         if (pr < 0 && errno != EINTR) break;
 
-        /* 热重载：SIGHUP，或文件 mtime 变化（每 30 秒检查一次） */
+        /* 热重载:SIGHUP,或文件 mtime 变化(每 30 秒检查一次) */
         time_t now = time(NULL);
         if (g_reload || now - last_check >= RELOAD_CHECK_SEC) {
             last_check = now;
-            if (g_reload) { g_reload = 0; if (reload_upstreams()) fprintf(stderr, "dnsfwd: 收到 SIGHUP，已重载上游 %d 个\n", nup); }
+            if (g_reload) { g_reload = 0; if (reload_upstreams()) fprintf(stderr, "dnsfwd: 收到 SIGHUP,已重载上游 %d 个\n", nup); }
             else if (stat(g_conf, &st) == 0 && st.st_mtime != last_mtime) {
                 last_mtime = st.st_mtime;
-                if (reload_upstreams()) fprintf(stderr, "dnsfwd: 上游文件变更，已自动重载 %d 个\n", nup);
+                if (reload_upstreams()) fprintf(stderr, "dnsfwd: 上游文件变更,已自动重载 %d 个\n", nup);
             }
         }
         if (pr <= 0) continue;
 
-        /* 收包后交给工作池：主线程只做收包与热重载，转发互不阻塞 */
+        /* 收包后交给工作池:主线程只做收包与热重载,转发互不阻塞 */
         for (int k = 0; k < nfd; k++) {
             if (!(pfds[k].revents & POLLIN)) continue;
             struct qjob jb;
@@ -1727,7 +1811,7 @@ int main(int argc, char **argv)
             pthread_mutex_lock(&g_qmu);
             if (g_qn >= JOBSZ) {
                 pthread_mutex_unlock(&g_qmu);
-                fprintf(stderr, "dnsfwd: 队列已满（%d），丢弃本次查询\n", JOBSZ);
+                fprintf(stderr, "dnsfwd: 队列已满(%d),丢弃本次查询\n", JOBSZ);
                 continue;
             }
             g_q[g_qt] = jb;
@@ -1737,7 +1821,7 @@ int main(int argc, char **argv)
             pthread_mutex_unlock(&g_qmu);
         }
     }
-    /* 退出：唤醒并回收工作线程 */
+    /* 退出:唤醒并回收工作线程 */
     pthread_mutex_lock(&g_qmu);
     pthread_cond_broadcast(&g_qcv);
     pthread_mutex_unlock(&g_qmu);
